@@ -1,0 +1,3479 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Lightify — Tier 2 native shell (Slint, software renderer)
+// Ports the existing HTML/CSS design: same palette, layout, now-playing centrepiece.
+// Data is mock for the spike; the real port wires these props to the Rust host.
+// ─────────────────────────────────────────────────────────────────────────────
+import { ListView, ScrollView } from "std-widgets.slint";
+
+// Palette (mirrors styles.css :root). `accent` is `in-out`, not `out` — like the
+// original's `--accent` custom property, the host reassigns it at runtime (from the
+// current cover's sampled colour) so every consumer below tints to the song, exactly
+// as `applyDynamicAccent` re-pointing one CSS var recoloured the whole original UI.
+export global Pal {
+    out property <color> bg:        #111111;
+    out property <color> surface:   #1a1a1a;
+    out property <color> surface2:  #202020;
+    out property <color> panel:     #171717;
+    out property <color> border:    #2c2c2c;
+    out property <color> border-hi: #444444;
+    in-out property <color> accent: #34d399;
+    out property <color> accent-dim:#10b981;
+    out property <color> text:      #e2e2e2;
+    // Secondary text tiers, tuned for contrast on `bg` (#111): text2 ≈ 6.6:1,
+    // text3 ≈ 4.5:1 (WCAG AA body text). `faint` is for decoration only — rules,
+    // grips, disabled glyphs — never for text someone needs to read.
+    out property <color> text2:     #9a9a9a;
+    out property <color> text3:     #7c7c7c;
+    out property <color> faint:     #4e4e4e;
+    out property <color> heart:     #fb7185;
+    out property <color> danger:    #f87171;
+}
+
+// Motion (UI-PLAN A6). `reduced` mirrors Windows' "Animation effects" setting
+// (SPI_GETCLIENTAREAANIMATION, set by the host); every transition checks it. All
+// motion here is transition-only — nothing animates while the UI is idle.
+export global Motion {
+    in-out property <bool> reduced: false;
+}
+
+// Spacing scale (4-based). New and reworked layouts use these; older hand-tuned
+// paddings migrate section by section, each checked by render (UI-PLAN B3).
+export global Space {
+    out property <length> xs:  4px;
+    out property <length> s:   8px;
+    out property <length> m:   12px;
+    out property <length> l:   16px;
+    out property <length> xl:  24px;
+    out property <length> xxl: 32px;
+}
+
+// Type scale. Nothing in the UI goes below `micro`; uppercase letter-spaced labels
+// use `micro`, subtitles / meta / small buttons use `caption`.
+export global TypeScale {
+    out property <length> micro:   10px;
+    out property <length> caption: 11px;
+    out property <length> small:   12px;
+    out property <length> body:    13px;
+    out property <length> section: 15px;
+    out property <length> title:   20px;
+}
+
+// `active` = this row is the current playback source (`.list-item.playing`);
+// `playing` = and it is actually playing (`.playing-active` vs `.playing-paused`).
+struct Row { id: string, name: string, sub: string, active: bool, liked: bool, playing: bool }
+struct Trk { uri: string, name: string, artist: string, playable: bool, active: bool, playing: bool, selected: bool }
+// `kind`: track | artist | album | playlist (a hit), top (the Top result card; `meta`
+// then holds the hit's own kind), header (a section title; `meta` = its link text),
+// recent (a past query). `art` = cover URL (the host resolves it into `search-art`);
+// `meta` on a track = its duration.
+struct SearchRow { name: string, sub: string, kind: string, selected: bool, art: string, meta: string }
+struct SideRow { name: string, artist: string, time: string, playing: bool, selected: bool }
+// One row of the DOWNLOADS sidebar. `progress` is 0..100; `state` is
+// 0 = queued/working, 1 = finished on disk, 2 = failed/unavailable.
+struct DlRow { name: string, sub: string, progress: int, state: int }
+struct BpItem { title: string, sub: string, selected: bool }
+struct DeviceRow { name: string, active: bool }
+struct CmdRow { title: string, hint: string }
+// One row of a right-click menu (`.ctx-menu-item`). `muted` = the action exists in
+// the shipped app but not here (host-only downloads, unported station); clicking it
+// says so in the status bar rather than pretending the row isn't there.
+struct MenuItem { label: string, danger: bool, muted: bool }
+
+// A monochrome SVG-path icon inside a circular hover target.
+component IconBtn inherits Rectangle {
+    in property <string> cmds;
+    in property <color> tint: Pal.text3;
+    in property <color> hover-tint: Pal.text;
+    in property <length> icon: 18px;
+    in property <length> box: 32px;
+    in property <bool> is-active: false;
+    in property <bool> stroked: false;      // stroke the path instead of filling it
+    in property <length> stroke-w: 1.7px;
+    callback clicked <=> ta.clicked;
+    width: box;
+    height: box;
+    border-radius: self.width / 2;
+    // Pressed feedback: a faint disc while the button is held (UI-PLAN A6).
+    background: ta.pressed ? #ffffff12 : transparent;
+    ta := TouchArea { }
+    property <color> icon-paint: root.is-active ? Pal.accent : (ta.has-hover ? root.hover-tint : root.tint);
+    Path {
+        width: root.icon;
+        height: root.icon;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.cmds;
+        fill: root.stroked ? transparent : root.icon-paint;
+        stroke: root.stroked ? root.icon-paint : transparent;
+        stroke-width: root.stroke-w;
+    }
+}
+
+// A footer toggle (Queue / Recent / Downloads): stroked icon + label (UI-PLAN A4).
+// With `show-label` off it is icon-only and names itself in a small tooltip above on
+// hover, so no control is ever unidentifiable.
+component FootTab inherits Rectangle {
+    in property <string> cmds;
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> show-label: true;
+    callback clicked <=> ta.clicked;
+    property <color> ink: root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text3);
+    height: 22px;
+    width: lay.preferred-width;
+    border-radius: 4px;
+    background: ta.pressed ? Pal.surface2 : (ta.has-hover ? Pal.surface : transparent);
+    ta := TouchArea { }
+    lay := HorizontalLayout {
+        padding-left: 6px;
+        padding-right: root.show-label ? 8px : 6px;
+        spacing: 5px;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 15px; height: 15px;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: root.cmds;
+                fill: transparent;
+                stroke: root.ink;
+                stroke-width: 1.7px;
+            }
+        }
+        if root.show-label : Text {
+            text: root.label;
+            color: root.ink;
+            font-size: TypeScale.caption;
+            vertical-alignment: center;
+        }
+    }
+    if !root.show-label && ta.has-hover : Rectangle {
+        y: -self.height - 6px;
+        x: (parent.width - self.width) / 2;
+        width: tip.preferred-width + 14px;
+        height: 22px;
+        border-radius: 4px;
+        background: Pal.surface2;
+        border-width: 1px;
+        border-color: Pal.border-hi;
+        tip := Text { text: root.label; color: Pal.text; font-size: TypeScale.caption; x: 7px; y: (parent.height - self.height) / 2; }
+    }
+}
+
+// One left-panel list row (icon dot + name + sub/count).
+component ListRow inherits Rectangle {
+    in property <image> art;             // cover thumbnail; empty = placeholder glyph
+    in property <string> name;
+    in property <string> sub;
+    in property <bool> active: false;    // is the active playback source
+    in property <bool> playing: false;   // …and playback is running (vs paused)
+    in property <bool> liked: false;
+    callback clicked <=> ta.clicked;
+    // Double-click plays the whole playlist (the original's row `dblclick`); the
+    // single click still expands it first, exactly as in the browser.
+    callback double-clicked <=> ta.double-clicked;
+    // Right-click → open the row menu at the pointer (window coordinates).
+    callback menu(mx: length, my: length);
+    height: 46px;
+    background: ta.has-hover ? Pal.surface : transparent;
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+            }
+        }
+    }
+    // `.list-item.playing-active` / `.playing-paused`: a left-to-right accent (or grey,
+    // when paused) wash behind the active source row — the highlighted-playlist
+    // presence. Tied to the live accent (was a fixed teal hex) so it tints to the cover.
+    if root.active : Rectangle {
+        background: root.playing
+            ? @linear-gradient(90deg, Pal.accent.with-alpha(0.16) 0%, Pal.accent.with-alpha(0.05) 58%, Pal.accent.with-alpha(0) 100%)
+            : @linear-gradient(90deg, #88888824 0%, Pal.accent.with-alpha(0.03) 58%, Pal.accent.with-alpha(0) 100%);
+    }
+    // `.list-item.playing::before`: 3px rounded accent bar, inset 6px top/bottom.
+    // Accent in both states — pausing changes the wash and the sub-line, not the bar.
+    if root.active : Rectangle {
+        x: 0; y: 6px; width: 3px; height: parent.height - 12px; border-radius: 1.5px;
+        background: Pal.accent;
+        opacity: 0.95;
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            // 32px cover slot (UI-PLAN A2). Until a cover arrives — or for a playlist
+            // without one, and for Liked Songs — it holds the state-tinted glyph the
+            // original's `.item-icon` draws, on a quiet tile so rows stay aligned.
+            Rectangle {
+                width: 32px; height: 32px;
+                border-radius: 4px;
+                clip: true;
+                background: root.liked ? Pal.heart.with-alpha(0.12) : Pal.surface2;
+                if !root.liked && root.art.width > 0 : Image {
+                    source: root.art;
+                    width: parent.width; height: parent.height;
+                    image-fit: cover;
+                }
+                if root.liked : Path {
+                    width: 17px; height: 17px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 24; viewbox-height: 24;
+                    fill: root.active && !root.playing ? Pal.text2 : Pal.heart;
+                    commands: "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z";
+                }
+                // Plain 3-line playlist glyph — mirrors `getTypeIcon('playlist')`.
+                // Tinted like `.item-icon` under `.list-item.playing`/`.playing-paused`:
+                // accent while this row is playing, grey while paused-here, dim (--text-3)
+                // otherwise.
+                if !root.liked && root.art.width == 0 : Path {
+                    width: 14px; height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 24; viewbox-height: 24;
+                    fill: root.active ? (root.playing ? Pal.accent : Pal.text2) : Pal.faint;
+                    commands: "M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h11v2H3v-2z";
+                }
+            }
+        }
+        // Two-line body: name over "N tracks • owner" — mirrors makeListItem.
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.name;
+                color: root.active ? #f4fff9 : #d8d8d8;
+                font-size: 12px;
+                font-weight: root.active ? 600 : 500;
+                overflow: elide;
+            }
+            Text {
+                text: root.sub;
+                color: root.active
+                    ? (root.playing ? #9fd4bf : #9a9a9a)
+                    : Pal.text3;
+                font-size: TypeScale.caption;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A two-line track row (name over artist), dimmed when unplayable — like the original.
+component TrackRow inherits Rectangle {
+    in property <string> name;
+    in property <string> artist;
+    in property <bool> playable: true;
+    in property <bool> active: false;    // this row is the currently-loaded track
+    in property <bool> playing: false;   // ...and playback is running
+    callback clicked();
+    // Double-click anywhere in the list drops the selection, like the original's
+    // document-level `dblclick` handler.
+    callback double-clicked <=> ta.double-clicked;
+    // Right-click → the track menu (Play / Add to queue / Share / …).
+    callback menu(mx: length, my: length);
+    // Multi-select. Ctrl+click toggles a row, Shift+click extends from the last
+    // one. (The original drag-selects after a 200ms hold; that gesture can't be had
+    // through Slint's ListView — see PARITY.md — so this uses the desktop idiom.)
+    in property <bool> selected: false;
+    callback select-click(ctrl: bool, shift: bool);
+    // Set when a modifier click is handled, so the plain click that follows doesn't
+    // also start playback (the original's `__skipClick`).
+    property <bool> skip-click: false;
+    height: 40px;
+    background: ta.has-hover ? Pal.surface : transparent;
+    opacity: root.playable ? 1.0 : 0.4;
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                if (e.button == PointerEventButton.right) {
+                    root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+                } else if (e.button == PointerEventButton.left
+                        && (e.modifiers.control || e.modifiers.shift)) {
+                    root.skip-click = true;
+                    root.select-click(e.modifiers.control, e.modifiers.shift);
+                }
+            }
+        }
+        clicked => {
+            if (root.skip-click) {
+                root.skip-click = false;
+            } else {
+                root.clicked();
+            }
+        }
+    }
+    // `.list-item.selected` — accent wash; stronger when it is also the playing row.
+    if root.selected : Rectangle {
+        background: root.active
+            ? @linear-gradient(90deg, Pal.accent.with-alpha(0.2) 0%, Pal.accent.with-alpha(0.11) 58%, Pal.accent.with-alpha(0.06) 100%)
+            : Pal.accent.with-alpha(0.12);
+    }
+    // Same `.playing-active` / `.playing-paused` treatment the library rows get — the
+    // highlighted-track presence. Tied to the live accent (was a fixed teal hex).
+    if root.active : Rectangle {
+        background: root.playing
+            ? @linear-gradient(90deg, Pal.accent.with-alpha(0.16) 0%, Pal.accent.with-alpha(0.05) 58%, Pal.accent.with-alpha(0) 100%)
+            : @linear-gradient(90deg, #88888824 0%, Pal.accent.with-alpha(0.03) 58%, Pal.accent.with-alpha(0) 100%);
+    }
+    if root.active : Rectangle {
+        x: 0; y: 5px; width: 3px; height: parent.height - 10px; border-radius: 1.5px;
+        background: Pal.accent;
+        opacity: 0.95;
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 9px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 13px; height: 13px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: root.active ? (root.playing ? Pal.accent : Pal.text2) : Pal.faint;
+                commands: "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z";
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.name;
+                color: root.active ? #f4fff9 : Pal.text;
+                font-size: 12px;
+                font-weight: root.active ? 600 : 400;
+                overflow: elide;
+            }
+            Text {
+                text: root.artist;
+                color: root.active ? (root.playing ? #9fd4bf : #9a9a9a) : Pal.text2;
+                font-size: TypeScale.caption;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A DOWNLOADS sidebar row: name + "status - artist - 42%" summary, with a thin
+// progress bar while the bridge is actually working on it. Mirrors
+// `renderSidebarDownloads` (`app.js:5910`): left-click on a finished row opens its
+// folder, right-click opens the retry/cancel/open/delete menu.
+component DlTrackRow inherits Rectangle {
+    in property <string> name;
+    in property <string> sub;
+    in property <int> progress: 0;      // 0..100
+    in property <int> state: 0;         // 0 = working, 1 = done, 2 = failed
+    callback clicked();
+    callback menu(mx: length, my: length);
+    height: 46px;
+    background: dta.has-hover ? Pal.surface : transparent;
+    dta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.menu(dta.absolute-position.x + dta.mouse-x, dta.absolute-position.y + dta.mouse-y);
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 9px;
+        // No `alignment` on purpose: `alignment: start` packs children at their
+        // natural width and IGNORES stretch factors, which sized the text column
+        // (and with it the progress bar) to the track name instead of the row.
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            // Done -> check, failed -> cross, otherwise the download arrow.
+            Path {
+                width: 13px; height: 13px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: transparent;
+                stroke: root.state == 1 ? Pal.accent : root.state == 2 ? Pal.danger : Pal.text3;
+                stroke-width: 1.8px;
+                commands: root.state == 1
+                    ? "M5 12.5l4.5 4.5L19 7.5"
+                    : root.state == 2
+                        ? "M6.5 6.5l11 11M17.5 6.5l-11 11"
+                        : "M12 4.5v9.6M8.3 10.4L12 14.1l3.7-3.7M5 18.5h14";
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.name;
+                color: root.state == 2 ? Pal.text2 : Pal.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+            Text {
+                text: root.sub;
+                color: root.state == 2 ? Pal.danger : Pal.text2;
+                font-size: TypeScale.caption;
+                overflow: elide;
+            }
+            // Progress track - only while a download is genuinely in flight.
+            if root.state == 0 && root.progress > 0 : Rectangle {
+                height: 3px;
+                border-radius: 1.5px;
+                background: Pal.surface2;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * (min(root.progress, 100) / 100);
+                    height: parent.height;
+                    border-radius: 1.5px;
+                    background: Pal.accent;
+                }
+            }
+        }
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+}
+
+// A sidebar (queue / recent) track row: two-line name+artist, the active row shows
+// an accent equalizer + accent name (mirrors #sidebar-list .list-item.playing);
+// recent rows show a right-aligned relative timestamp (.item-time).
+component SideTrackRow inherits Rectangle {
+    in property <string> name;
+    in property <string> artist;
+    in property <string> time;
+    in property <bool> playing: false;
+    in property <bool> selectable: true;
+    in property <bool> selected: false;
+    // QUEUE mode only (RECENT/DOWNLOADS pass false) — per-row remove. There is no
+    // Spotify/librespot primitive to drop one specific item out of the middle of a
+    // connect-state queue (only "add" and "clear everything" exist), so the handler
+    // behind this necessarily clears the whole queue and re-adds every *other* track —
+    // see the caller for the real cost of that.
+    in property <bool> removable: false;
+    callback clicked();
+    callback menu(mx: length, my: length);
+    callback select-click(ctrl: bool, shift: bool);
+    callback remove();
+    property <bool> skip-click: false;
+    height: 44px;
+    background: ta.has-hover ? Pal.surface : transparent;
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                if (e.button == PointerEventButton.right) {
+                    root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+                } else if (root.selectable && e.button == PointerEventButton.left
+                        && (e.modifiers.control || e.modifiers.shift)) {
+                    root.skip-click = true;
+                    root.select-click(e.modifiers.control, e.modifiers.shift);
+                }
+            }
+        }
+        clicked => {
+            if (root.skip-click) {
+                root.skip-click = false;
+            } else {
+                root.clicked();
+            }
+        }
+    }
+    // `.list-item.selected`
+    if root.selected : Rectangle {
+        background: Pal.accent.with-alpha(0.12);
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 9px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            // Playing → static 3-bar equalizer glyph; otherwise the note icon.
+            if root.playing : Rectangle {
+                width: 13px; height: 13px;
+                Rectangle { x: 1px;    width: 2.4px; height: 7px;  y: parent.height - self.height; border-radius: 1px; background: Pal.accent; }
+                Rectangle { x: 5.3px;  width: 2.4px; height: 11px; y: parent.height - self.height; border-radius: 1px; background: Pal.accent; }
+                Rectangle { x: 9.6px;  width: 2.4px; height: 5px;  y: parent.height - self.height; border-radius: 1px; background: Pal.accent; }
+            }
+            if !root.playing : Path {
+                width: 13px; height: 13px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: Pal.faint;
+                commands: "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z";
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text { text: root.name; color: root.playing ? Pal.accent : Pal.text; font-size: 12px; overflow: elide; }
+            Text { text: root.artist; color: Pal.text2; font-size: TypeScale.caption; overflow: elide; }
+        }
+        if root.time != "" : VerticalLayout {
+            alignment: center;
+            Text { text: root.time; color: Pal.text3; font-size: TypeScale.caption; }
+        }
+        if root.removable : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 20px; height: 20px; border-radius: 5px;
+                background: rmta.has-hover ? #f8717122 : transparent;
+                rmta := TouchArea { clicked => { root.remove(); } }
+                Text {
+                    text: "\u{00D7}";
+                    color: rmta.has-hover ? Pal.danger : Pal.text3;
+                    font-size: 13px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2 - 1px;
+                }
+            }
+        }
+    }
+}
+
+component TabBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    horizontal-stretch: 1;
+    ta := TouchArea { }
+    Text {
+        text: root.label;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        color: root.active ? Pal.accent : (ta.has-hover ? Pal.text2 : Pal.text3);
+        font-size: TypeScale.micro;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+    }
+}
+
+// `.btn-primary.btn-xs` / `.btn-sm` — a small bordered action button. `enabled:
+// false` reproduces `:disabled { opacity: 0.32; pointer-events: none }`.
+component ActionBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <length> pad: 10px;
+    callback clicked();
+    height: 24px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.enabled && ta.has-hover ? Pal.border-hi : Pal.border;
+    background: root.enabled && ta.has-hover ? Pal.surface2 : transparent;
+    opacity: root.enabled ? 1.0 : 0.32;
+    ta := TouchArea {
+        clicked => { if (root.enabled) { root.clicked(); } }
+    }
+    HorizontalLayout {
+        padding-left: root.pad;
+        padding-right: root.pad;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            color: root.enabled && ta.has-hover ? Pal.text : Pal.text2;
+            font-size: TypeScale.caption;
+        }
+    }
+}
+
+// A search result row: kind-specific icon + name + type/detail subtitle.
+// A library-toolbar sort button - the native form of `.btn-primary.btn-xs`
+// (small label, 1px border, accent-tinted when active).
+component SortBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    height: 22px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.active ? Pal.accent.with-alpha(0.32) : (ta.has-hover ? Pal.border-hi : Pal.border);
+    background: root.active ? Pal.accent.with-alpha(0.08) : (ta.has-hover ? Pal.surface : transparent);
+    ta := TouchArea { }
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            color: root.active ? Pal.accent : Pal.text2;
+            font-size: TypeScale.caption;
+            font-weight: 600;
+        }
+    }
+}
+
+// `#library-toolbar`: Recent / A-Z sort for whichever library surface is showing.
+// The alpha button flips direction on a second press (like `updateLibrarySortControls`).
+component LibraryToolbar inherits Rectangle {
+    in property <string> mode: "recent";   // "recent" | "alpha"
+    in property <string> dir: "asc";       // "asc" | "desc"
+    callback recent-clicked();
+    callback alpha-clicked();
+    height: 30px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        // `.library-toolbar` is `padding: 0 8px 6px`, but in the original the chips
+        // still breathe because what sits above them (the back BUTTON) carries a 5px
+        // margin. The shell draws a full-width back BAR with a rule under it, so with
+        // no top padding the chips' top border landed directly on that rule. Split the
+        // padding instead of growing the header - same 30px, no longer cramped.
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 6px;
+        alignment: start;
+        SortBtn {
+            label: "Recent";
+            active: root.mode == "recent";
+            clicked => { root.recent-clicked(); }
+        }
+        SortBtn {
+            label: root.dir == "asc" ? "A \u{2192} Z" : "Z \u{2192} A";
+            active: root.mode == "alpha";
+            clicked => { root.alpha-clicked(); }
+        }
+    }
+}
+
+component SearchResultRow inherits Rectangle {
+    in property <string> name;
+    in property <string> sub;
+    in property <string> kind;
+    in property <string> meta;
+    in property <image> art;
+    // Only track rows are selectable — the original registers selectable rows for
+    // search *tracks* only; playlist/album/artist hits just get a menu.
+    in property <bool> selectable: false;
+    in property <bool> selected: false;
+    callback clicked();
+    callback menu(mx: length, my: length);
+    callback select-click(ctrl: bool, shift: bool);
+    property <bool> skip-click: false;
+    property <bool> is-header: root.kind == "header";
+    property <bool> is-top: root.kind == "top";
+    property <bool> is-recent: root.kind == "recent";
+    // The hit's own kind (a Top result card carries it in `meta`).
+    property <string> hit: root.is-top ? root.meta : root.kind;
+    height: root.is-header ? 34px : root.is-top ? 92px : root.is-recent ? 34px : 50px;
+    background: (ta.has-hover && !root.is-header && !root.is-top) ? Pal.surface : transparent;
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                if (e.button == PointerEventButton.right) {
+                    root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+                } else if (root.selectable && e.button == PointerEventButton.left
+                        && (e.modifiers.control || e.modifiers.shift)) {
+                    root.skip-click = true;
+                    root.select-click(e.modifiers.control, e.modifiers.shift);
+                }
+            }
+        }
+        clicked => {
+            if (root.skip-click) {
+                root.skip-click = false;
+            } else {
+                root.clicked();
+            }
+        }
+    }
+    // `.list-item.selected`
+    if root.selected : Rectangle {
+        background: Pal.accent.with-alpha(0.12);
+    }
+
+    // Section title ("Songs", "Artists", …) with its "See all" / "Clear" link.
+    if root.is-header : HorizontalLayout {
+        padding-left: Space.m;
+        padding-right: Space.m;
+        padding-top: Space.s;
+        Text {
+            text: root.name;
+            color: Pal.text;
+            font-size: TypeScale.body;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.meta;
+            color: ta.has-hover ? Pal.accent : Pal.text3;
+            font-size: TypeScale.caption;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    // Top result: a card with a larger cover (round for an artist).
+    if root.is-top : Rectangle {
+        x: Space.s;
+        y: Space.xs;
+        width: parent.width - 2 * Space.s;
+        height: parent.height - Space.s;
+        border-radius: 8px;
+        background: ta.has-hover ? Pal.surface2 : Pal.surface;
+        HorizontalLayout {
+            padding: Space.m;
+            spacing: Space.m;
+            Rectangle {
+                width: 60px; height: 60px;
+                border-radius: root.hit == "artist" ? 30px : 6px;
+                clip: true;
+                background: Pal.surface2;
+                if root.art.width > 0 : Image { source: root.art; width: parent.width; height: parent.height; image-fit: cover; }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: Space.xs;
+                horizontal-stretch: 1;
+                Text { text: root.name; color: Pal.text; font-size: TypeScale.section + 1px; font-weight: 700; overflow: elide; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    Rectangle {
+                        height: 18px;
+                        width: chip.preferred-width + 12px;
+                        border-radius: 9px;
+                        background: Pal.bg;
+                        chip := Text {
+                            text: root.hit == "artist" ? "Artist" : root.hit == "track" ? "Song" : root.hit == "album" ? "Album" : "Playlist";
+                            color: Pal.text2; font-size: TypeScale.micro; font-weight: 600;
+                            x: 6px; y: (parent.height - self.height) / 2;
+                        }
+                    }
+                    Text { text: root.sub; color: Pal.text3; font-size: TypeScale.caption; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                }
+            }
+        }
+    }
+
+    // A past query.
+    if root.is-recent : HorizontalLayout {
+        padding-left: Space.m;
+        padding-right: Space.m;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 15px; height: 15px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: transparent; stroke: Pal.text3; stroke-width: 1.8px;
+                commands: "M12 4.5a7.5 7.5 0 110 15 7.5 7.5 0 010-15zM12 8v4.2l2.8 1.7";
+            }
+        }
+        Text { text: root.name; color: Pal.text2; font-size: TypeScale.small; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+    }
+
+    // A hit: 40px cover (round for artists) + name/sub (+ duration for songs).
+    if !root.is-header && !root.is-top && !root.is-recent : HorizontalLayout {
+        padding-left: Space.m;
+        padding-right: Space.m;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 40px; height: 40px;
+                border-radius: root.kind == "artist" ? 20px : 4px;
+                clip: true;
+                background: Pal.surface2;
+                if root.art.width > 0 : Image { source: root.art; width: parent.width; height: parent.height; image-fit: cover; }
+                if root.art.width == 0 : Path {
+                    width: 16px; height: 16px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 24; viewbox-height: 24;
+                    fill: Pal.faint;
+                    commands: root.kind == "track" ? "M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"
+                        : root.kind == "playlist" ? "M3 6h13v2H3V6zm0 5h13v2H3v-2zm0 5h9v2H3v-2z"
+                        : root.kind == "album" ? "M12 3a9 9 0 100 18 9 9 0 000-18zm0 12a3 3 0 110-6 3 3 0 010 6z"
+                        : "M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5z";
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text { text: root.name; color: Pal.text; font-size: TypeScale.small; overflow: elide; }
+            Text { text: root.sub; color: Pal.text3; font-size: TypeScale.caption; overflow: elide; }
+        }
+        if root.kind == "track" && root.meta != "" : Text {
+            text: root.meta;
+            color: Pal.text3;
+            font-size: TypeScale.caption;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Beatport chart-mode chip (TOP 100 / HYPE / RELEASES).
+component BpModeBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    height: 22px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.active ? Pal.accent : Pal.border;
+    background: root.active ? Pal.accent.with-alpha(0.12) : (ta.has-hover ? Pal.surface : transparent);
+    ta := TouchArea { }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            color: root.active ? Pal.accent : Pal.text3;
+            font-size: TypeScale.micro;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+        }
+    }
+}
+
+// Beatport chart-mode icon button (TOP 100 / HYPE / RELEASES) — the original renders
+// these as icon-only buttons (custom art in `ui-icons/beatport-{tracks,hype,releases}.png`,
+// no visible label, just a `title` tooltip), not text chips (`.bp-mode-btn img`: 18px,
+// opacity 0.72 → 1 on active/hover; `.bp-mode-btn.active`: a soft accent wash + a 2px
+// accent line on the bottom edge, ported here as a Rectangle since Slint has no
+// `box-shadow: inset`). Ported as real image assets, not redrawn paths, since these are
+// hand-designed art (see `icon_factory.py`), not simple glyphs.
+component BpModeIconBtn inherits Rectangle {
+    in property <image> icon;
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    height: 26px;
+    border-radius: 8px;
+    background: root.active ? Pal.accent.with-alpha(0.12) : (ta.has-hover ? #ffffff08 : transparent);
+    ta := TouchArea { }
+    Image {
+        source: root.icon;
+        width: 18px; height: 18px;
+        opacity: (root.active || ta.has-hover) ? 1.0 : 0.72;
+    }
+    if root.active : Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        background: Pal.accent;
+    }
+}
+
+// A Beatport chart row: "N. Title" over "artists • label".
+component BpRow inherits Rectangle {
+    in property <string> title;
+    in property <string> sub;
+    in property <bool> selectable: true;
+    in property <bool> selected: false;
+    callback clicked();
+    callback menu(mx: length, my: length);
+    callback select-click(ctrl: bool, shift: bool);
+    property <bool> skip-click: false;
+    height: 42px;
+    background: ta.has-hover ? Pal.surface : transparent;
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                if (e.button == PointerEventButton.right) {
+                    root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+                } else if (root.selectable && e.button == PointerEventButton.left
+                        && (e.modifiers.control || e.modifiers.shift)) {
+                    root.skip-click = true;
+                    root.select-click(e.modifiers.control, e.modifiers.shift);
+                }
+            }
+        }
+        clicked => {
+            if (root.skip-click) {
+                root.skip-click = false;
+            } else {
+                root.clicked();
+            }
+        }
+    }
+    // `.list-item.selected`
+    if root.selected : Rectangle {
+        background: Pal.accent.with-alpha(0.12);
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 9px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text { text: root.title; color: Pal.text; font-size: 12px; overflow: elide; }
+            Text { text: root.sub; color: Pal.text2; font-size: TypeScale.caption; overflow: elide; }
+        }
+    }
+}
+
+// One segment: just a label and a hit target. No border of its own - the track and
+// the sliding pill carry all the chrome.
+// One search filter chip, sized to its label.
+component FilterChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    height: 24px;
+    width: t.preferred-width + 14px;
+    border-radius: 12px;
+    background: root.active ? Pal.accent.with-alpha(0.16) : (ta.has-hover ? Pal.surface : transparent);
+    border-width: 1px;
+    border-color: root.active ? Pal.accent.with-alpha(0.5) : Pal.border;
+    animate background { duration: Motion.reduced ? 0ms : 120ms; }
+    ta := TouchArea { }
+    t := Text {
+        text: root.label;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        color: root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text2);
+        font-size: TypeScale.caption;
+        font-weight: 600;
+    }
+}
+
+// Search result filters: All · Songs · Artists · Albums · Playlists (Spotify's order).
+// Label-sized chips — the old five equal segments couldn't hold "PLAYLISTS" in a
+// 264px panel and clipped "ALBUMS" off the end.
+component FilterBar inherits Rectangle {
+    // 0 all · 1 songs · 2 artists · 3 albums · 4 playlists
+    in property <int> active;
+    callback pick(int);
+    height: 24px;
+    HorizontalLayout {
+        spacing: 3px;
+        alignment: start;
+        FilterChip { label: "All";       active: root.active == 0; clicked => { root.pick(0); } }
+        FilterChip { label: "Songs";     active: root.active == 1; clicked => { root.pick(1); } }
+        FilterChip { label: "Artists";   active: root.active == 2; clicked => { root.pick(2); } }
+        FilterChip { label: "Albums";    active: root.active == 3; clicked => { root.pick(3); } }
+        FilterChip { label: "Playlists"; active: root.active == 4; clicked => { root.pick(4); } }
+    }
+}
+
+// One button of the titlebar mini-player snap control (#mini-modes): a mode glyph
+// in a small hover/active target. square = portrait outline · bar = wide outline ·
+// nano = filled square (mirrors the shipped SVG glyphs).
+component MiniSnapBtn inherits Rectangle {
+    in property <string> kind;      // square | bar | nano
+    in property <bool> active;
+    callback clicked <=> ta.clicked;
+    width: 22px; height: 20px; border-radius: 4px;
+    background: root.active ? Pal.accent.with-alpha(0.12) : (ta.has-hover ? Pal.bg : transparent);
+    ta := TouchArea { }
+    property <color> tint: root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text3);
+    if root.kind == "square" : Rectangle {
+        width: 8px; height: 11px; border-radius: 1.5px;
+        border-width: 1.4px; border-color: root.tint; background: transparent;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+    }
+    if root.kind == "bar" : Rectangle {
+        width: 12px; height: 5px; border-radius: 1.5px;
+        border-width: 1.4px; border-color: root.tint; background: transparent;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+    }
+    if root.kind == "nano" : Rectangle {
+        width: 9px; height: 9px; border-radius: 1.5px;
+        background: root.tint;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+    }
+}
+
+// The reduced mini transport (prev / play-pause / next only — shuffle & repeat are
+// hidden in mini, per the shipped layout). Sizes scale per mode.
+component MiniTransport inherits HorizontalLayout {
+    in property <bool> playing;
+    in property <length> play-size: 44px;
+    in property <length> nav-icon: 20px;
+    in property <length> gap: 8px;
+    callback prev();
+    callback toggle();
+    callback next();
+    alignment: center;
+    spacing: root.gap;
+    VerticalLayout { alignment: center; IconBtn { cmds: "M6 6h2v12H6zm3.5 6l8.5 6V6z"; icon: root.nav-icon; clicked => { root.prev(); } } }
+    Rectangle {
+        width: root.play-size; height: root.play-size; border-radius: self.width / 2;
+        // Hover-brighten off the live accent (was a fixed mint) so it still reads
+        // right once the accent itself has shifted to the cover's colour.
+        background: pta.has-hover ? Pal.accent.brighter(0.3) : Pal.accent;
+        pta := TouchArea { clicked => { root.toggle(); } }
+        Path {
+            width: root.play-size * 0.47; height: self.width;
+            x: (parent.width - self.width) / 2 + (root.playing ? 0px : root.play-size * 0.03);
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 24; viewbox-height: 24;
+            fill: #0b0f0d;
+            commands: root.playing ? "M6 19h4V5H6v14zm8-14v14h4V5h-4z" : "M8 5v14l11-7z";
+        }
+    }
+    VerticalLayout { alignment: center; IconBtn { cmds: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"; icon: root.nav-icon; clicked => { root.next(); } } }
+}
+
+// The inline mini progress bar (bar mode): click / drag to seek, mirrors the full
+// #progress-bar but compact. Self-contained scrub state.
+component MiniSeekBar inherits Rectangle {
+    in property <float> progress;
+    callback seek(float);
+    property <float> scrub;
+    property <bool> scrubbing;
+    property <float> shown: root.scrubbing ? root.scrub : root.progress;
+    height: 14px;
+    ta := TouchArea {
+        moved => {
+            if (self.pressed) {
+                root.scrub = clamp(self.mouse-x / root.width, 0.0, 1.0);
+                root.scrubbing = true;
+            }
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.scrub = clamp(self.mouse-x / root.width, 0.0, 1.0);
+                root.scrubbing = true;
+            }
+            if (ev.kind == PointerEventKind.up) {
+                root.seek(root.scrub);
+                root.scrubbing = false;
+            }
+        }
+    }
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: parent.width; height: 3px; border-radius: 2px; background: Pal.surface2;
+        Rectangle { x: 0; height: parent.height; width: parent.width * root.shown; border-radius: 2px; background: Pal.accent; }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Lightify";
+    // The live window's icon (titlebar-less, so this is what the taskbar button and
+    // Alt-Tab show while it runs). The .exe's own icon - what Explorer and a pinned
+    // shortcut read - is embedded separately as a Win32 resource in build.rs; they
+    // are two different things and the app needs both.
+    icon: @image-url("../assets/lightify-icon.png");
+    no-frame: true;
+    background: Pal.bg;
+    // Segoe UI Variable (Windows 11's UI font) when installed, else Segoe UI —
+    // chosen by the host, which checks the font file (UI-PLAN B5).
+    in property <string> ui-font: "Segoe UI";
+    default-font-family: root.ui-font;
+    preferred-width: 980px;
+    preferred-height: 660px;
+    // Relax the min-size in a mini mode so the window can shrink below the full min
+    // (the mini targets are far smaller); Rust sets the exact per-mode min via winit.
+    min-width: root.mini-mode == "off" ? 640px : 180px;
+    min-height: root.mini-mode == "off" ? 460px : 100px;
+
+    // Playback state (mock defaults; wired to the host in the real port).
+    in-out property <bool> playing: true;
+    in property <string> track-name: "Midnight City";
+    in property <string> track-artist: "M83";
+    in property <float> progress: 0.42;      // 0..1
+    in property <string> elapsed: "2:38";
+    in property <string> duration: "4:04";
+    in property <float> volume: 0.8;          // 0..1
+    in property <string> status-text: "Connecting\u{2026}";
+
+    // Library sort toolbar (#library-toolbar). The worker keeps a separate mode/dir
+    // per surface (playlist list vs drilled track list) and pushes the visible one.
+    in property <string> lib-sort-mode: "recent";   // "recent" | "alpha"
+    in property <string> lib-sort-dir: "asc";       // "asc" | "desc"
+
+    // Library drill-in (slice 2): when drilled, the left panel shows a track list.
+    // Infinite scroll for the drilled track list. `tracks-more` is false while a
+    // page is in flight and once the list is complete, so the scroll handler can't
+    // fire the same page twice (the original's `pager.loading` / `pager.done`).
+    in-out property <bool> tracks-more: false;
+    in property <bool> drilled: false;
+    in property <string> drill-title: "";
+    in-out property <[Trk]> tracks: [];
+
+    // Now-playing album art + its extracted accent glow colour.
+    in property <image> album-art;
+    // The cover being replaced, kept under the new one while it fades in (A6). The
+    // host sets it just before `album-art`; it is released once the fade is done.
+    in-out property <image> prev-art;
+    property <image> no-image;
+    out property <float> art-fade: 1;
+    // Instant on the way down, eased on the way up (`fade-in` picks which).
+    property <bool> fade-in: false;
+    animate art-fade { duration: root.fade-in ? 220ms : 0ms; easing: ease-out; }
+    changed album-art => {
+        if (!Motion.reduced && root.prev-art.width > 0) {
+            root.fade-in = false;
+            root.art-fade = 0;
+            art-fade-start.running = true;
+        } else {
+            root.fade-in = false;
+            root.art-fade = 1;
+            root.prev-art = root.no-image;
+        }
+    }
+    // Two steps: drop to 0 without animating, then (next frame) rise to 1 animated.
+    art-fade-start := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.fade-in = true;
+            root.art-fade = 1;
+            art-fade-done.running = true;
+        }
+    }
+    art-fade-done := Timer {
+        interval: 260ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.prev-art = root.no-image;
+        }
+    }
+    in property <color> glow: #34d39955;
+
+    // Tabs + search (slice 3). tab: 0=library, 1=search, 2=beatport.
+    // Search drill-in (`#search-drill` / `#btn-search-back`): drilling a playlist or
+    // album hit stays INSIDE the search tab instead of hijacking the library list.
+    in property <bool> search-drilled: false;
+    in property <string> search-drill-title: "";
+    in-out property <[Trk]> search-tracks: [];
+    in-out property <bool> search-tracks-more: false;
+    // More playlist hits available. The original pages search results only under the
+    // PLAYLISTS filter (`searchResultsPagerIsActive`), so this is only ever set there.
+    in-out property <bool> search-more: false;
+    in property <int> tab: 0;
+    in-out property <string> search-filter: "all";
+    in-out property <[SearchRow]> search-results: [];
+
+    // Now-playing extras: Liked-Songs state for the current track (me/tracks/contains).
+    in property <bool> liked-current: false;
+    in property <bool> like-pending: false;   // a save/un-save is in flight
+
+    // Now-playing control states (live from me/player).
+    in property <bool> shuffle-on: false;
+    in property <string> repeat-mode: "off";      // "off" | "context" | "track"
+    // Local drag feedback for the progress + volume bars (committed on release).
+    in-out property <float> scrub-progress: 0;
+    in-out property <bool> scrubbing-progress: false;
+    in-out property <float> scrub-volume: 0;
+    in-out property <bool> scrubbing-volume: false;
+    // A volume change the user just made, which Spotify has not echoed back yet.
+    // Playback polls keep reporting the OLD level for a beat after the write, and
+    // writing that back is exactly the "slider snaps back, then jumps" flicker.
+    // While `volume-pending` is set, only a report that matches `volume-target` is
+    // allowed to move the slider.
+    in-out property <bool> volume-pending: false;
+    in-out property <float> volume-target: 0;
+
+    // Sidebar overlay (queue / recent / downloads). 0=hidden 1=queue 2=recent 3=downloads.
+    in property <int> sidebar-mode: 0;
+    in-out property <[SideRow]> sidebar-rows: [];
+    in property <string> sidebar-empty: "No queued tracks";
+    // DOWNLOADS mode rows (their own model: a download row shows progress, not a
+    // track's artist/time). Only read when `sidebar-mode == 3`.
+    in-out property <[DlRow]> sidebar-dl-rows: [];
+    // `updateSidebarClearButton` disables Clear in DOWNLOADS mode when no row is in a
+    // finished state (nothing for `/api/clear_items` to drop).
+    in property <bool> downloads-clearable: false;
+
+    // Beatport tab.
+    in-out property <[string]> bp-genres: [];
+    in property <string> bp-genre-label: "Overall";
+    in property <int> bp-genre-idx: 0;
+    in-out property <bool> bp-genre-open: false;
+    in property <string> bp-kind: "tracks";      // tracks | hype | releases
+    in-out property <[BpItem]> bp-rows: [];
+    in property <string> bp-status: "Select a genre to load a Beatport chart";
+
+    // Settings modal.
+    in-out property <bool> settings-open: false;
+    in-out property <[DeviceRow]> settings-devices: [];
+    in property <string> settings-device-status: "Loading\u{2026}";
+    in property <int> poll-ms: 5000;             // 5000 (default) | 3000 | 1000
+    // Bundled playback engine (lightify-audio) — Lightify's own Connect device.
+    in property <string> engine-status: "Starting\u{2026}";
+    in property <bool> engine-ok: false;
+    // Where the engine sends sound. Row 0 is always "System default".
+    in-out property <[DeviceRow]> settings-outputs: [];
+    in property <string> settings-output-note: "";
+    // Downloader (bundled OnTheSpot bridge).
+    in-out property <string> settings-download-path: "";
+    in property <string> downloader-status: "Checking\u{2026}";
+    in property <bool> downloader-ready: false;
+    in property <bool> downloader-busy: false;
+    in property <string> account: "";
+    // Shown in Settings → About (the host sets it from CARGO_PKG_VERSION).
+    in property <string> app-version: "";
+
+    // Window chrome (`minimized` / `maximized` are builtin Window properties).
+    in-out property <bool> left-collapsed: false;
+
+    // Mini-player (compact always-on-top layouts). "off" | "square" | "bar" | "nano".
+    in-out property <string> mini-mode: "off";
+    in-out property <string> mini-last: "square";     // last active layout (persisted; recalled by the toggle)
+    in property <color> mini-accent: Pal.accent;      // album-sampled tint for the frame + edge line
+    in-out property <float> mini-prev-w: 0;           // pre-mini logical size, restored on exit
+    in-out property <float> mini-prev-h: 0;
+    // Pre-mini outer POSITION and maximized state. Restoring only the size left the
+    // full window wherever the (draggable, always-on-top) mini player happened to be
+    // parked, and silently un-maximized a window that had been maximized.
+    in-out property <float> mini-prev-x: 0;
+    in-out property <float> mini-prev-y: 0;
+    in-out property <bool> mini-prev-pos-valid: false;
+    in-out property <bool> mini-prev-max: false;
+
+    // Command palette (Ctrl+K).
+    // Right-click menu (`.ctx-menu`) + the delete-playlist confirm dialog
+    // (`#confirm-overlay`). `ctx-x`/`ctx-y` are window coordinates of the pointer.
+    // Track-list multi-select. Only track rows are selectable — in the original
+    // `registerSelectableRow` is never used for playlist rows.
+    in property <int> sel-count: 0;
+
+    in-out property <bool> ctx-open: false;
+    in-out property <[MenuItem]> ctx-items: [];
+    // `.ctx-menu` is min-width:156px and grows to fit its longest label; the width
+    // is measured in Rust because a non-layout element can't size to its content.
+    in-out property <length> ctx-w: 156px;
+    in-out property <length> ctx-x: 0;
+    in-out property <length> ctx-y: 0;
+    in-out property <bool> confirm-open: false;
+    in property <string> confirm-title: "DELETE PLAYLIST";
+    in property <string> confirm-message: "Are you sure?";
+
+    in-out property <bool> palette-open: false;
+    in-out property <[CmdRow]> cmdk-rows: [];
+    in-out property <int> cmdk-selected: 0;
+    in-out property <string> search-text: "";     // controlled search-box text
+
+    // Cover thumbnails, index-parallel to `playlists` (a `Row` can't carry an image:
+    // rows are built off the UI thread). Missing entries draw the placeholder glyph.
+    in property <[image]> playlist-art;
+    in-out property <[Row]> playlists: [
+        { name: "Liked Songs",        sub: "1,240", liked: true },
+        { name: "Deep Focus",         sub: "86" },
+        { name: "Late Night Drive",   sub: "132", active: true, playing: true },
+        { name: "Techno Bunker",      sub: "204" },
+        { name: "Sunday Coffee",      sub: "57" },
+        { name: "Rooftop Sunsets",    sub: "91" },
+        { name: "Workout Heat",       sub: "148" },
+        { name: "Ambient Rain",       sub: "40" },
+        { name: "90s Throwback",      sub: "220" },
+        { name: "Beatport Hype 100",  sub: "100" },
+        { name: "Jazz & Vinyl",       sub: "63" },
+        { name: "Lo-fi Beats",        sub: "310" },
+    ];
+
+    // Fired when anything Windows' media flyout shows changes (the host mirrors
+    // it into the System Media Transport Controls). Change handlers, so every path
+    // that updates now-playing is covered without each one having to remember.
+    callback media-changed();
+
+    // Search (rework): covers index-parallel to `search-results`, a busy flag for the
+    // empty state, and Enter-to-open-the-top-result.
+    in property <[image]> search-art;
+    in property <bool> search-loading: false;
+    callback search-enter();
+
+    // Type-to-filter (UI-PLAN D7): typing over the Library tab filters the visible
+    // left list (playlists, or the open track list). The host does the filtering.
+    in-out property <string> list-filter: "";
+    in property <int> list-filter-count: -1;   // matches, -1 = no filter
+    callback list-filter-edited(string);
+    pure callback is-printable(string) -> bool;
+    pure callback chop-last(string) -> string;
+    function list-filter-chop() -> string { return root.chop-last(root.list-filter); }
+    changed track-name => { root.media-changed(); }
+    changed track-artist => { root.media-changed(); }
+    changed playing => { root.media-changed(); }
+
+    callback close-clicked();
+    callback start-drag();
+    callback toggle-left-panel();
+    callback toggle-play();
+    callback next-clicked();
+    callback prev-clicked();
+    callback open-row(int);
+    callback back-clicked();
+    callback play-track(int);
+    callback select-tab(int);
+    callback query-changed(string);
+    callback set-search-filter(string);
+    callback open-search(int);
+    callback toggle-shuffle();
+    callback cycle-repeat();
+    callback add-queue();
+    callback start-station();        // #btn-station — Spotify song radio for the current track
+    callback toggle-like();          // save / un-save the current track
+    callback sort-recent();          // #btn-library-sort-recent
+    callback sort-alpha();           // #btn-library-sort-alpha (2nd press flips direction)
+    callback seek(float);           // 0..1 fraction of the track
+    callback set-volume(float);     // 0..1
+    callback toggle-sidebar(int);   // 1=queue 2=recent 3=downloads (same mode closes)
+    callback close-sidebar();
+    // Click on the centre pane: close the RIGHT sidebar if it is open, otherwise
+    // collapse the LEFT panel — never both at once (`app.js:1668`). `sidebar-mode`
+    // is worker-owned so that half goes through `close-sidebar()`, while
+    // `left-collapsed` is in-out and can be set here directly.
+    callback dismiss-overlays();
+    // `#btn-sidebar-clear` in QUEUE mode: reset the device's queue back to just
+    // the current track (`.sidebar-clear-btn`). Only meaningful for QUEUE — the
+    // original also allows it for its own local recent-history list and finished
+    // downloads, neither of which exist here (RECENT is Spotify's own live
+    // recently-played history, nothing local to clear; downloads are host-only).
+    callback clear-queue();
+    // Per-row × on a QUEUE sidebar row (`SideTrackRow.removable`).
+    callback remove-queued-track(int);
+    callback sidebar-play(int);
+    callback bp-ensure();           // fired when the Beatport tab is first shown
+    callback bp-toggle-genre();
+    callback bp-select-genre(int);
+    callback bp-set-mode(string);
+    callback bp-play(int);
+    callback bp-open-external();     // open the current chart in the default browser
+    callback open-settings();
+    callback close-settings();
+    callback settings-refresh-devices();
+    callback settings-select-device(int);
+    callback set-poll-rate(int);     // poll interval in ms
+    callback restart-engine();       // relaunch the bundled playback engine
+    callback settings-select-output(int); // pick the engine's audio output device
+    // Downloader (bundled OnTheSpot bridge).
+    callback settings-apply-download-path(string);
+    callback settings-start-downloader-login();
+    // `#btn-sidebar-clear` in DOWNLOADS mode: drop every finished/cancelled row.
+    callback clear-downloads();
+    callback load-palette();         // ask the worker to (re)build the command list
+    callback cmdk-query-changed(string);
+    callback run-palette();          // run the currently-selected command
+    callback set-mini-mode(string);  // enter/switch/exit a mini-player mode ("off" exits)
+    // Row menus: `kind` 0 = library row (0 = Liked Songs), 1 = drilled track row.
+    callback open-context(int, int);
+    callback run-context(int);       // run the menu row at this index
+    callback play-row(int);          // double-click a library row → play the whole thing
+    callback confirm-accept();       // the confirm dialog's Yes
+
+    // Sign-in page (`#auth-page`): shown when there's no usable Spotify session.
+    in-out property <bool> signin-open: false;
+    in-out property <string> signin-client-id;
+    in property <string> signin-status;
+    in property <bool> signin-error;       // `.status.error`
+    in property <bool> signin-ok;          // `.status.ok`
+    in property <bool> signin-waiting;     // browser open, waiting for the redirect
+    callback signin-authorise(string);
+    callback signin-retry();               // re-open the browser, or start over
+    callback signin-open-dashboard();
+    // (surface, row, ctrl, shift). Surfaces match open-context's `kind`:
+    // 1 = drilled tracks, 2 = search results, 3 = Beatport, 4 = sidebar.
+    callback select-click(int, int, bool, bool);
+    callback bp-select-all();          // #btn-bp-select-all
+    callback bp-create-playlist();     // #btn-bp-create
+    callback sidebar-create-playlist();// #btn-sidebar-create-pl
+    callback clear-selection();
+    callback load-more-tracks();   // near the bottom of the drilled track list
+    callback search-back();              // `#btn-search-back` ("\u{2190} Results")
+    callback play-search-track(int);     // a row in the search drill-in
+    callback load-more-search-tracks();  // near the bottom of the search drill-in
+    callback load-more-search-results(); // near the bottom of the results list
+
+    // Focus the root key handler on startup so Ctrl+K works before any click.
+    forward-focus: rootkeys;
+
+    function open-palette() {
+        root.palette-open = true;
+        root.cmdk-selected = 0;
+        root.load-palette();
+    }
+    function close-palette() {
+        root.palette-open = false;
+        rootkeys.focus();
+    }
+    function toggle-palette() {
+        if (root.palette-open) {
+            root.close-palette();
+        } else {
+            root.open-palette();
+        }
+    }
+    function palette-move(delta: int) {
+        if (root.cmdk-rows.length > 0) {
+            root.cmdk-selected = clamp(root.cmdk-selected + delta, 0, root.cmdk-rows.length - 1);
+        }
+    }
+
+    // Root key handler: global Ctrl/Cmd+K toggles the palette from anywhere.
+    rootkeys := FocusScope {
+        key-pressed(e) => {
+            if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") {
+                root.toggle-palette();
+                return accept;
+            }
+            // Type-to-filter: only over the Library tab of the full window, with no
+            // overlay open (a focused text field takes its own keys before this).
+            if (root.tab == 0 && root.mini-mode == "off" && !root.palette-open && !root.settings-open
+                && !root.signin-open && !root.ctx-open && !root.confirm-open
+                && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
+                if (e.text == Key.Escape && root.list-filter != "") {
+                    root.list-filter = "";
+                    root.list-filter-edited("");
+                    return accept;
+                }
+                if (e.text == Key.Backspace && root.list-filter != "") {
+                    root.list-filter = root.list-filter.character-count <= 1 ? "" : root.list-filter-chop();
+                    root.list-filter-edited(root.list-filter);
+                    return accept;
+                }
+                if (root.is-printable(e.text) && (root.list-filter != "" || e.text != " ")) {
+                    root.list-filter += e.text;
+                    root.list-filter-edited(root.list-filter);
+                    return accept;
+                }
+            }
+            return reject;
+        }
+
+    VerticalLayout {
+        spacing: 0;
+
+        // ── Title bar ────────────────────────────────────────────────────────
+        if root.mini-mode == "off" : Rectangle {
+            height: 30px;
+            background: Pal.bg;
+            // Bottom-layer drag region: pressing empty titlebar starts a native
+            // window move. Buttons/brand sit on top (their TouchAreas grab first).
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        root.start-drag();
+                    }
+                }
+            }
+            // Centered status line. Sits above the drag region but below the
+            // brand/caption buttons, and is width-clamped so it never collides
+            // with either group on a narrow window.
+            Rectangle {
+                width: max(60px, min(parent.width - 340px, 520px));
+                height: parent.height;
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                clip: true;
+                Text {
+                    text: root.status-text;
+                    color: Pal.text3;
+                    font-size: TypeScale.caption;
+                    overflow: elide;
+                    width: 100%;
+                    horizontal-alignment: center;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 6px;
+                spacing: 8px;
+
+                // Brand: the "L" mark + spaced wordmark (compact group).
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: 8px;
+                    alignment: start;
+                    VerticalLayout {
+                        alignment: center;
+                        // The "L" mark doubles as the collapse-left-panel toggle.
+                        Rectangle {
+                            width: 22px; height: 22px; border-radius: 4px;
+                            background: lta.has-hover ? Pal.surface : transparent;
+                            lta := TouchArea { clicked => { root.toggle-left-panel(); } }
+                            Rectangle { x: 4px;   y: 4px;    width: 3.4px; height: 13px;  border-radius: 1px; background: root.left-collapsed ? Pal.text3 : Pal.text2; }
+                            Rectangle { x: 4px;   y: 14.4px; width: 10px;  height: 3.4px; border-radius: 1px; background: root.left-collapsed ? Pal.text3 : Pal.text2; }
+                            Rectangle { x: 14px;  y: 4px;    width: 4.6px; height: 4.6px; border-radius: 2.3px; background: Pal.accent; }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "I G H T I F Y";
+                            color: Pal.text2;
+                            font-size: 11px;
+                            font-weight: 600;
+                            letter-spacing: 3px;
+                            font-family: "Cascadia Code";
+                        }
+                    }
+                }
+
+                // Drag fill — stretch spacer pushes the caption buttons to the right.
+                Rectangle { horizontal-stretch: 1; }
+
+                // Window caption buttons.
+                min-btn := Rectangle {
+                    width: 30px; height: 30px;
+                    background: mta.has-hover ? Pal.surface : transparent;
+                    mta := TouchArea { clicked => { root.minimized = true; } }
+                    Text { text: "\u{2015}"; color: Pal.text2; font-size: 12px;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 1px; }
+                }
+                max-btn := Rectangle {
+                    width: 30px; height: 30px;
+                    background: xta.has-hover ? Pal.surface : transparent;
+                    xta := TouchArea { clicked => { root.maximized = !root.maximized; } }
+                    // Drawn, not typed. The restore glyph this used (U+2750) is absent
+                    // from the Windows UI font, so the button rendered EMPTY whenever
+                    // the window was maximized - which is exactly when you need it.
+                    // Maximize = one square; restore = two offset squares.
+                    if !root.maximized : Rectangle {
+                        width: 11px; height: 11px;
+                        border-width: 1.3px; border-color: Pal.text2; background: transparent;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+                    }
+                    if root.maximized : Rectangle {
+                        width: 13px; height: 13px; background: transparent;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+                        // Back square, then the front one over it. The front square is
+                        // filled with the titlebar colour so the overlap reads as depth
+                        // rather than crossed outlines.
+                        Rectangle {
+                            x: 3px; y: 0px; width: 10px; height: 10px;
+                            border-width: 1.3px; border-color: Pal.text2; background: transparent;
+                        }
+                        Rectangle {
+                            x: 0px; y: 3px; width: 10px; height: 10px;
+                            border-width: 1.3px; border-color: Pal.text2;
+                            background: xta.has-hover ? Pal.surface : Pal.bg;
+                        }
+                    }
+                }
+                // Mini-player toggle (#btn-miniplayer): enters the last-used mini layout
+                // (picture-in-picture glyph: outline frame + small inner rect).
+                mini-btn := Rectangle {
+                    width: 30px; height: 30px;
+                    background: pipta.has-hover ? Pal.surface : transparent;
+                    pipta := TouchArea { clicked => { root.set-mini-mode(root.mini-last); } }
+                    Rectangle {
+                        width: 15px; height: 12px; border-radius: 2px;
+                        border-width: 1.4px; border-color: pipta.has-hover ? Pal.text : Pal.text2; background: transparent;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+                        Rectangle {
+                            width: 7px; height: 5px; border-radius: 1px;
+                            background: pipta.has-hover ? Pal.text : Pal.text2;
+                            x: parent.width - self.width - 1.5px; y: parent.height - self.height - 1.5px;
+                        }
+                    }
+                }
+                close-btn := Rectangle {
+                    width: 30px; height: 30px;
+                    background: cta.has-hover ? #e0575722 : transparent;
+                    cta := TouchArea { clicked => { root.close-clicked(); } }
+                    Text { text: "\u{00D7}"; color: cta.has-hover ? #f87171 : Pal.text2; font-size: 15px;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 1px; }
+                }
+            }
+            // bottom border
+            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+        }
+
+        // ── Body ─────────────────────────────────────────────────────────────
+        if root.mini-mode == "off" : HorizontalLayout {
+            spacing: 0;
+
+            // Left panel (collapsible via the titlebar "L" mark).
+            Rectangle {
+                width: root.left-collapsed ? 0px : 264px;
+                background: Pal.panel;
+                clip: true;
+                animate width { duration: Motion.reduced ? 0ms : 160ms; easing: ease-in-out; }
+                VerticalLayout {
+                    width: 264px;
+                    // Tabs (clickable) + animated underline.
+                    Rectangle {
+                        height: 34px;
+                        HorizontalLayout {
+                            TabBtn { label: "LIBRARY"; active: root.tab == 0; clicked => { root.select-tab(0); } }
+                            TabBtn { label: "SEARCH"; active: root.tab == 1; clicked => { root.select-tab(1); } }
+                            TabBtn { label: "BEATPORT"; active: root.tab == 2; clicked => { root.select-tab(2); } }
+                        }
+                        // Divider under the whole tab row — tinted towards the sampled
+                        // accent (blended with the neutral border) rather than staying flat
+                        // grey, per the same "everything accented tints to the song" rule.
+                        Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border.mix(Pal.accent, 0.5); }
+                        Rectangle {
+                            x: root.tab * (parent.width / 3);
+                            y: parent.height - 2px;
+                            width: parent.width / 3; height: 2px;
+                            background: Pal.accent;
+                            animate x { duration: Motion.reduced ? 0ms : 150ms; easing: ease-out; }
+                        }
+                    }
+                    // Library list (or, when drilled, the track list with a Back bar).
+                    if root.tab == 0 && !root.drilled : LibraryToolbar {
+                        mode: root.lib-sort-mode;
+                        dir: root.lib-sort-dir;
+                        recent-clicked => { root.sort-recent(); }
+                        alpha-clicked => { root.sort-alpha(); }
+                    }
+                    if root.tab == 0 && !root.drilled : ListView {
+                        vertical-stretch: 1;
+                        for pl[i] in root.playlists : ListRow {
+                            art: root.playlist-art[i];
+                            name: pl.name;
+                            sub: pl.sub;
+                            active: pl.active;
+                            playing: pl.playing;
+                            liked: pl.liked;
+                            clicked => { root.open-row(i); }
+                            double-clicked => { root.play-row(i); }
+                            menu(mx, my) => {
+                                root.ctx-x = mx;
+                                root.ctx-y = my;
+                                root.open-context(0, i);
+                            }
+                        }
+                    }
+                    if root.tab == 0 && root.drilled : VerticalLayout {
+                        vertical-stretch: 1;
+                        // Back bar + drilled title
+                        Rectangle {
+                            height: 30px;
+                            background: Pal.panel;
+                            // No `alignment` here on purpose: `alignment: start` sizes
+                            // children to their content and ignores stretch, so the
+                            // title had nothing to elide against and a long playlist
+                            // name ran straight off the panel.
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                // Wrapped so the layout cannot stretch the button to the
+                                // bar height. Without this its hover fill grew to the full
+                                // 30px and spilled over the rule above it - a plain
+                                // `height: 24px` on a layout child is only a *preferred*
+                                // size, and this row has no `alignment` to hold it back.
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                Rectangle {
+                                    width: 24px; height: 24px; border-radius: 4px;
+                                    background: transparent;
+                                    bta := TouchArea { clicked => { root.back-clicked(); } }
+                                    // Hover reads as a GLOW, not a box: a soft accent disc
+                                    // inset inside the button plus an accent chevron. It is
+                                    // smaller than its own bounds, so it can never touch
+                                    // the divider however tight the bar gets.
+                                    Rectangle {
+                                        width: 20px; height: 20px; border-radius: 10px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        background: bta.has-hover ? Pal.accent.with-alpha(0.15) : transparent;
+                                        animate background { duration: Motion.reduced ? 0ms : 120ms; easing: ease-out; }
+                                    }
+                                    Path {
+                                        width: 15px; height: 15px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        viewbox-width: 24; viewbox-height: 24;
+                                        fill: bta.has-hover ? Pal.accent : Pal.text2;
+                                        commands: "M15.4 7.4L14 6l-6 6 6 6 1.4-1.4L10.8 12z";
+                                    }
+                                }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: root.drill-title; color: Pal.text; font-size: 11px; font-weight: 600; overflow: elide; }
+                                }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+                        }
+                        LibraryToolbar {
+                            mode: root.lib-sort-mode;
+                            dir: root.lib-sort-dir;
+                            recent-clicked => { root.sort-recent(); }
+                            alpha-clicked => { root.sort-alpha(); }
+                        }
+                        if root.tracks.length > 0 : trklist := ListView {
+                            vertical-stretch: 1;
+                            // `nearTrackListBottom()` — the original's 320px threshold.
+                            // viewport-y is negative as the list scrolls down.
+                            function check-more() {
+                                if (root.tracks-more
+                                    && -trklist.viewport-y + trklist.visible-height
+                                        >= trklist.viewport-height - 320px) {
+                                    root.tracks-more = false;
+                                    root.load-more-tracks();
+                                }
+                            }
+                            changed viewport-y => { trklist.check-more(); }
+                            // A page that doesn't fill the viewport must pull the next
+                            // one straight away — the original re-fires from its own
+                            // requestAnimationFrame for exactly this case. The gate
+                            // reopening is the signal that a page just landed.
+                            property <bool> more: root.tracks-more;
+                            changed more => { trklist.check-more(); }
+                            for t[i] in root.tracks : TrackRow {
+                                name: t.name;
+                                artist: t.artist;
+                                playable: t.playable;
+                                active: t.active;
+                                playing: t.playing;
+                                selected: t.selected;
+                                clicked => { root.play-track(i); }
+                                double-clicked => { root.clear-selection(); }
+                                menu(mx, my) => {
+                                    root.ctx-x = mx;
+                                    root.ctx-y = my;
+                                    root.open-context(1, i);
+                                }
+                                select-click(ctrl, shift) => { root.select-click(1, i, ctrl, shift); }
+                            }
+                        }
+                        if root.tracks.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: 14px;
+                            Text {
+                                text: "No tracks to show";
+                                color: Pal.text3;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Search view.
+                    if root.tab == 1 : VerticalLayout {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            height: 42px;
+                            HorizontalLayout {
+                                padding: 10px;
+                                Rectangle {
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: Pal.border;
+                                    background: Pal.surface;
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        si := TextInput {
+                                            vertical-alignment: center;
+                                            color: Pal.text;
+                                            font-size: 12px;
+                                            single-line: true;
+                                            text: root.search-text;
+                                            edited => { root.search-text = self.text; root.query-changed(self.text); }
+                                            key-pressed(e) => {
+                                                if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") {
+                                                    root.toggle-palette();
+                                                    return accept;
+                                                }
+                                                // Enter opens the top result; Esc clears the box.
+                                                if (e.text == Key.Return && self.text != "") {
+                                                    root.search-enter();
+                                                    return accept;
+                                                }
+                                                if (e.text == Key.Escape && self.text != "") {
+                                                    self.text = "";
+                                                    root.search-text = "";
+                                                    root.query-changed("");
+                                                    return accept;
+                                                }
+                                                return reject;
+                                            }
+                                        }
+                                    }
+                                    if si.text == "" : Text {
+                                        text: "What do you want to hear?";
+                                        color: Pal.text3; font-size: 12px;
+                                        x: 20px; y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            height: 32px;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 8px; padding-bottom: 8px;
+                                FilterBar {
+                                    active: root.search-filter == "tracks" ? 1
+                                          : root.search-filter == "artists" ? 2
+                                          : root.search-filter == "albums" ? 3
+                                          : root.search-filter == "playlists" ? 4
+                                          : 0;
+                                    pick(i) => {
+                                        root.set-search-filter(
+                                            i == 1 ? "tracks"
+                                          : i == 2 ? "artists"
+                                          : i == 3 ? "albums"
+                                          : i == 4 ? "playlists"
+                                          : "all");
+                                    }
+                                }
+                            }
+                        }
+                        // `#btn-search-back` — only while drilled, like the original.
+                        if root.search-drilled : Rectangle {
+                            height: 32px;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                padding-bottom: 4px;
+                                spacing: 8px;
+                                alignment: start;
+                                ActionBtn {
+                                    label: "\u{2190} Results";
+                                    clicked => { root.search-back(); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.search-drill-title;
+                                        color: Pal.text; font-size: 11px; font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                        if root.search-drilled : sdlist := ListView {
+                            vertical-stretch: 1;
+                            function check-more() {
+                                if (root.search-tracks-more
+                                    && -sdlist.viewport-y + sdlist.visible-height
+                                        >= sdlist.viewport-height - 320px) {
+                                    root.search-tracks-more = false;
+                                    root.load-more-search-tracks();
+                                }
+                            }
+                            changed viewport-y => { sdlist.check-more(); }
+                            property <bool> more: root.search-tracks-more;
+                            changed more => { sdlist.check-more(); }
+                            for t[i] in root.search-tracks : TrackRow {
+                                name: t.name;
+                                artist: t.artist;
+                                playable: t.playable;
+                                active: t.active;
+                                playing: t.playing;
+                                selected: t.selected;
+                                clicked => { root.play-search-track(i); }
+                                double-clicked => { root.clear-selection(); }
+                                menu(mx, my) => {
+                                    root.ctx-x = mx;
+                                    root.ctx-y = my;
+                                    root.open-context(5, i);
+                                }
+                                select-click(ctrl, shift) => { root.select-click(5, i, ctrl, shift); }
+                            }
+                        }
+                        if root.search-drilled && root.search-tracks.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: 14px;
+                            Text {
+                                text: "No tracks to show";
+                                color: Pal.text3;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        // Empty states (UI-PLAN search rework): searching, no results, and
+                        // an empty box with no recent searches yet.
+                        if !root.search-drilled && root.search-results.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: Space.xl;
+                            padding-left: Space.l;
+                            padding-right: Space.l;
+                            spacing: Space.xs;
+                            Text {
+                                text: root.search-loading ? "Searching\u{2026}"
+                                    : root.search-text == "" ? "Search Spotify"
+                                    : "No results for \u{201c}" + root.search-text + "\u{201d}";
+                                color: Pal.text2;
+                                font-size: TypeScale.body;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            if !root.search-loading : Text {
+                                text: root.search-text == ""
+                                    ? "Songs, artists, albums and playlists. Your recent searches will show up here."
+                                    : "Check the spelling, or try fewer or different words.";
+                                color: Pal.text3;
+                                font-size: TypeScale.caption;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if !root.search-drilled : srlist := ListView {
+                            vertical-stretch: 1;
+                            // `nearSearchResultsBottom()` — the original's 220px threshold.
+                            function check-more() {
+                                if (root.search-more
+                                    && -srlist.viewport-y + srlist.visible-height
+                                        >= srlist.viewport-height - 220px) {
+                                    root.search-more = false;
+                                    root.load-more-search-results();
+                                }
+                            }
+                            changed viewport-y => { srlist.check-more(); }
+                            property <bool> more: root.search-more;
+                            changed more => { srlist.check-more(); }
+                            for r[i] in root.search-results : SearchResultRow {
+                                name: r.name;
+                                sub: r.sub;
+                                kind: r.kind;
+                                meta: r.meta;
+                                art: root.search-art[i];
+                                selectable: r.kind == "track";
+                                selected: r.selected;
+                                clicked => { root.open-search(i); }
+                                menu(mx, my) => {
+                                    root.ctx-x = mx;
+                                    root.ctx-y = my;
+                                    root.open-context(2, i);
+                                }
+                                select-click(ctrl, shift) => { root.select-click(2, i, ctrl, shift); }
+                            }
+                        }
+                    }
+
+                    // Beatport charts — genre picker + chart mode + scraped Top 100.
+                    if root.tab == 2 : VerticalLayout {
+                        vertical-stretch: 1;
+                        // Genre trigger (label + caret) → toggles the genre picker list.
+                        Rectangle {
+                            height: 42px;
+                            HorizontalLayout {
+                                padding: 8px;
+                                Rectangle {
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: root.bp-genre-open ? Pal.accent : Pal.border;
+                                    background: gta.has-hover ? Pal.surface : Pal.panel;
+                                    gta := TouchArea { clicked => { root.bp-toggle-genre(); } }
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            horizontal-stretch: 1;
+                                            Text { text: root.bp-genre-label; color: Pal.text; font-size: 11px; overflow: elide; }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text { text: root.bp-genre-open ? "\u{25B4}" : "\u{25BE}"; color: Pal.text3; font-size: TypeScale.caption; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Chart-mode cluster — icon-only, 3 equal columns (`.bp-mode-cluster`
+                        // is a `grid-template-columns: repeat(3, minmax(0,1fr))`, gap 8px).
+                        Rectangle {
+                            height: 34px;
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                padding-top: 8px; padding-bottom: 6px;
+                                spacing: 8px;
+                                BpModeIconBtn {
+                                    horizontal-stretch: 1;
+                                    icon: @image-url("icons/beatport-tracks.png");
+                                    active: root.bp-kind == "tracks";
+                                    clicked => { root.bp-set-mode("tracks"); }
+                                }
+                                BpModeIconBtn {
+                                    horizontal-stretch: 1;
+                                    icon: @image-url("icons/beatport-hype.png");
+                                    active: root.bp-kind == "hype";
+                                    clicked => { root.bp-set-mode("hype"); }
+                                }
+                                BpModeIconBtn {
+                                    horizontal-stretch: 1;
+                                    icon: @image-url("icons/beatport-releases.png");
+                                    active: root.bp-kind == "releases";
+                                    clicked => { root.bp-set-mode("releases"); }
+                                }
+                            }
+                        }
+                        // Genre picker (when open) OR the chart rows.
+                        if root.bp-genre-open : ListView {
+                            vertical-stretch: 1;
+                            for g[i] in root.bp-genres : Rectangle {
+                                height: 32px;
+                                background: gopt.has-hover ? Pal.surface : (i == root.bp-genre-idx ? #ffffff0a : transparent);
+                                gopt := TouchArea { clicked => { root.bp-select-genre(i); } }
+                                Rectangle {
+                                    x: 0; width: 2px; height: parent.height;
+                                    background: i == root.bp-genre-idx ? Pal.accent : transparent;
+                                }
+                                HorizontalLayout {
+                                    padding-left: 14px; padding-right: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: g;
+                                            color: i == root.bp-genre-idx ? Pal.accent : Pal.text;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !root.bp-genre-open && root.bp-rows.length > 0 : ListView {
+                            vertical-stretch: 1;
+                            for r[i] in root.bp-rows : BpRow {
+                                title: r.title;
+                                sub: r.sub;
+                                selected: r.selected;
+                                clicked => { root.bp-play(i); }
+                                menu(mx, my) => {
+                                    root.ctx-x = mx;
+                                    root.ctx-y = my;
+                                    root.open-context(3, i);
+                                }
+                                select-click(ctrl, shift) => { root.select-click(3, i, ctrl, shift); }
+                            }
+                        }
+                        // `.bp-actions`: Select all + Create playlist, above the status line.
+                        if !root.bp-genre-open && root.bp-rows.length > 0 : Rectangle {
+                            height: 34px;
+                            Rectangle { y: 0; height: 1px; background: Pal.border; }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 5px;
+                                padding-bottom: 5px;
+                                spacing: 8px;
+                                ActionBtn {
+                                    label: "Select all";
+                                    clicked => { root.bp-select-all(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                ActionBtn {
+                                    label: "Create playlist";
+                                    pad: 12px;
+                                    enabled: root.sel-count > 0;
+                                    clicked => { root.bp-create-playlist(); }
+                                }
+                            }
+                        }
+                        if !root.bp-genre-open && root.bp-rows.length == 0 : Rectangle {
+                            vertical-stretch: 1;
+                        }
+                        // Status line (loading / count / errors) + open-in-browser fallback.
+                        Rectangle {
+                            height: 34px;
+                            Rectangle { y: 0; height: 1px; background: Pal.border; }
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 8px; spacing: 8px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: root.bp-status; color: Pal.text3; font-size: TypeScale.caption; overflow: elide; wrap: word-wrap; }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        height: 22px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: Pal.border;
+                                        background: obta.has-hover ? Pal.surface : transparent;
+                                        obta := TouchArea { clicked => { root.bp-open-external(); } }
+                                        HorizontalLayout {
+                                            padding-left: 8px; padding-right: 8px;
+                                            Text {
+                                                text: "OPEN \u{2197}";
+                                                vertical-alignment: center;
+                                                color: obta.has-hover ? Pal.text : Pal.text2;
+                                                font-size: TypeScale.micro;
+                                                font-weight: 700;
+                                                letter-spacing: 0.4px;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Type-to-filter pill (D7): what's being filtered and how many match.
+                if root.list-filter != "" && root.tab == 0 : Rectangle {
+                    x: Space.s;
+                    y: parent.height - self.height - Space.s;
+                    width: 264px - 2 * Space.s;
+                    height: 30px;
+                    border-radius: 15px;
+                    background: Pal.surface2;
+                    border-width: 1px;
+                    border-color: Pal.accent.with-alpha(0.45);
+                    TouchArea { }   // clicks on the pill don't fall through to a row
+                    HorizontalLayout {
+                        padding-left: Space.m;
+                        padding-right: Space.xs;
+                        spacing: Space.s;
+                        Path {
+                            width: 13px; height: 13px;
+                            y: (parent.height - self.height) / 2;
+                            viewbox-width: 24; viewbox-height: 24;
+                            fill: transparent; stroke: Pal.accent; stroke-width: 2.2px;
+                            commands: "M10.5 17a6.5 6.5 0 110-13 6.5 6.5 0 010 13zM15.5 15.5L20 20";
+                        }
+                        Text {
+                            text: root.list-filter;
+                            color: Pal.text;
+                            font-size: TypeScale.small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: root.list-filter-count < 0 ? "" : (root.list-filter-count == 1 ? "1 match" : root.list-filter-count + " matches");
+                            color: root.list-filter-count == 0 ? Pal.danger : Pal.text3;
+                            font-size: TypeScale.caption;
+                            vertical-alignment: center;
+                        }
+                        IconBtn {
+                            box: 24px; icon: 12px;
+                            y: (parent.height - self.height) / 2;
+                            cmds: "M18.3 5.71L12 12.01 5.7 5.71 4.29 7.12l6.3 6.3-6.3 6.29 1.41 1.41 6.3-6.29 6.29 6.29 1.42-1.41-6.3-6.29 6.3-6.3z";
+                            clicked => { root.list-filter = ""; root.list-filter-edited(""); }
+                        }
+                    }
+                }
+                // right border
+                Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: Pal.border; }
+            }
+
+            // Right panel — now playing
+            npane := Rectangle {
+                background: Pal.bg;
+                horizontal-stretch: 1;
+                clip: true;
+                // Now-playing scales with the pane (UI-PLAN A3). `art-size` follows the
+                // smaller of the pane's width and its height left over for the controls;
+                // `k` runs 0 → 1 from the classic 236px cluster (unchanged at the
+                // default 980×660) to the largest, and every other size eases with it.
+                // Set from change handlers, not a binding: the art is part of this pane's
+                // own size request, so a binding on the pane's (or window's) size would be
+                // a layout binding loop.
+                property <length> art-size: 236px;
+                function fit-art() {
+                    self.art-size = clamp(min(self.width * 0.34, self.height - 390px), 236px, 420px);
+                }
+                init => { self.fit-art(); }
+                changed width => { self.fit-art(); }
+                changed height => { self.fit-art(); }
+                property <float> k: (self.art-size - 236px) / 184px;
+                // Clicking the centre pane — but never a control — dismisses an open
+                // overlay: the RIGHT sidebar first, then the LEFT panel on a second
+                // click. Ports the `#now-playing` click handler (`app.js:1659`).
+                // Declared first so every control's own TouchArea sits above it and
+                // takes its clicks, which is what the original's `closest(...)`
+                // exclusion list does by hand.
+                TouchArea {
+                    clicked => { root.dismiss-overlays(); }
+                }
+                // Album-colour glow halo behind the art (radial gradient — the software
+                // renderer has no drop-shadow, so we paint the glow explicitly).
+                //
+                // Centred on the ARTWORK, not on the pane. It used to sit at a constant
+                // `y: -110px`, so resizing the window moved the art (it is centred in a
+                // stretching layout) while the glow stayed where it was. The +12px drop
+                // matches the offset of the box-shadow this replaces
+                // (`0 12px 46px -8px var(--accent-dynamic-soft)`).
+                Rectangle {
+                    width: npane.art-size * 2.63;
+                    height: self.width;
+                    x: art.absolute-position.x - npane.absolute-position.x + (art.width - self.width) / 2;
+                    y: art.absolute-position.y - npane.absolute-position.y + (art.height - self.height) / 2 + 12px;
+                    background: @radial-gradient(circle, root.glow 0%, transparent 60%);
+                }
+                VerticalLayout {
+                    alignment: center;
+                    padding: 24px;
+                    spacing: 14px + 8px * npane.k;
+
+                    // Album art with the extracted album-colour glow (dynamic drop-shadow).
+                    HorizontalLayout {
+                        alignment: center;
+                        art := Rectangle {
+                            width: npane.art-size; height: npane.art-size; border-radius: 8px + 4px * npane.k;
+                            clip: true;
+                            // Small album-tinted frame — mirrors the mini-player's inset
+                            // accent border so the cover itself picks up the sampled colour.
+                            border-width: 1px;
+                            border-color: root.mini-accent.with-alpha(0.32);
+                            background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                            // `showCurrentTrackContextMenu` is bound to the album art
+                            // AND the track info in the original; both open the same menu.
+                            artta := TouchArea {
+                                clicked => { root.dismiss-overlays(); }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                        root.ctx-x = artta.absolute-position.x + artta.mouse-x;
+                                        root.ctx-y = artta.absolute-position.y + artta.mouse-y;
+                                        root.open-context(6, 0);
+                                    }
+                                }
+                            }
+                            if root.prev-art.width > 0 : Image {
+                                source: root.prev-art;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: cover;
+                            }
+                            Image {
+                                source: root.album-art;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: cover;
+                                opacity: root.art-fade;
+                            }
+                            // No cover loaded: the Lightify mark, dimmed into the placeholder
+                            // gradient (UI-PLAN A8), instead of a generic note glyph.
+                            if root.album-art.width == 0 : Image {
+                                source: @image-url("../assets/lightify-icon.png");
+                                width: parent.width * 0.34; height: self.width;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                opacity: 0.28;
+                            }
+                        }
+                    }
+
+                    // Title / artist
+                    Rectangle {
+                        height: 42px + 14px * npane.k;
+                        infota := TouchArea {
+                            clicked => { root.dismiss-overlays(); }
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                                    root.ctx-x = infota.absolute-position.x + infota.mouse-x;
+                                    root.ctx-y = infota.absolute-position.y + infota.mouse-y;
+                                    root.open-context(6, 0);
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 3px + 2px * npane.k;
+                            // Idle ("—" + "Nothing playing" from the host) reads as a title and a
+                            // hint instead of a lone dash (UI-PLAN A7).
+                            property <bool> idle: root.track-name == "\u{2014}" && root.track-artist == "Nothing playing";
+                            Text { text: parent.idle ? "Nothing playing" : root.track-name; color: parent.idle ? Pal.text2 : Pal.text; font-size: 15px + 7px * npane.k; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                            Text { text: parent.idle ? "Pick a playlist or a song to start" : root.track-artist; color: parent.idle ? Pal.text3 : Pal.text2; font-size: 12px + 2px * npane.k; horizontal-alignment: center; overflow: elide; }
+                        }
+                    }
+
+                    // Progress
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        Text { text: root.elapsed; color: Pal.text2; font-size: 11px; vertical-alignment: center; font-family: "Cascadia Code"; }
+                        VerticalLayout {
+                            alignment: center;
+                            // Taller invisible hit area around the 3px bar → click / drag to seek.
+                            pbar := Rectangle {
+                                width: 320px + 200px * npane.k; height: 14px;
+                                property <float> shown: root.scrubbing-progress ? root.scrub-progress : root.progress;
+                                pseek := TouchArea {
+                                    moved => {
+                                        if (self.pressed) {
+                                            root.scrub-progress = clamp(self.mouse-x / pbar.width, 0.0, 1.0);
+                                            root.scrubbing-progress = true;
+                                        }
+                                    }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.down) {
+                                            root.scrub-progress = clamp(self.mouse-x / pbar.width, 0.0, 1.0);
+                                            root.scrubbing-progress = true;
+                                        }
+                                        if (ev.kind == PointerEventKind.up) {
+                                            root.seek(root.scrub-progress);
+                                            root.scrubbing-progress = false;
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: parent.width; height: 3px; border-radius: 2px; background: Pal.surface2;
+                                    Rectangle { x: 0; height: parent.height; width: parent.width * pbar.shown; border-radius: 2px; background: Pal.accent; }
+                                }
+                                Rectangle {
+                                    width: pseek.has-hover || root.scrubbing-progress ? 11px : 9px;
+                                    height: self.width; border-radius: self.width / 2; background: Pal.accent;
+                                    x: pbar.width * pbar.shown - self.width / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                        }
+                        Text { text: root.duration; color: Pal.text2; font-size: 11px; vertical-alignment: center; font-family: "Cascadia Code"; }
+                    }
+
+                    // Transport controls
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 10px + 8px * npane.k;
+                        VerticalLayout { alignment: center; IconBtn { cmds: "M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"; icon: 17px + 3px * npane.k; box: 32px + 6px * npane.k; is-active: root.shuffle-on; clicked => { root.toggle-shuffle(); } } }
+                        VerticalLayout { alignment: center; IconBtn { cmds: "M6 6h2v12H6zm3.5 6l8.5 6V6z"; icon: 20px + 4px * npane.k; box: 32px + 6px * npane.k; clicked => { root.prev-clicked(); } } }
+                        // Play / pause — accent circle (colour follows the cover; hover
+                        // brightens off that live colour instead of a fixed mint).
+                        play := Rectangle {
+                            width: 46px + 10px * npane.k; height: self.width; border-radius: self.width / 2;
+                            background: pta.pressed ? Pal.accent.darker(0.15) : (pta.has-hover ? Pal.accent.brighter(0.3) : Pal.accent);
+                            pta := TouchArea { clicked => { root.toggle-play(); } }
+                            Path {
+                                width: 22px + 4px * npane.k; height: self.width;
+                                x: (parent.width - self.width)/2 + (root.playing ? 0px : 1.5px);
+                                y: (parent.height - self.height)/2;
+                                viewbox-width: 24; viewbox-height: 24;
+                                fill: #0b0f0d;
+                                commands: root.playing ? "M6 19h4V5H6v14zm8-14v14h4V5h-4z" : "M8 5v14l11-7z";
+                            }
+                        }
+                        VerticalLayout { alignment: center; IconBtn { cmds: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"; icon: 20px + 4px * npane.k; box: 32px + 6px * npane.k; clicked => { root.next-clicked(); } } }
+                        VerticalLayout { alignment: center; Rectangle {
+                            width: rpt.width; height: rpt.height;
+                            rpt := IconBtn { cmds: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"; icon: 17px + 3px * npane.k; box: 32px + 6px * npane.k; is-active: root.repeat-mode != "off"; clicked => { root.cycle-repeat(); } }
+                            // Repeat-one reads as its own state (the icon alone looked
+                            // identical for repeat-all and repeat-one).
+                            if root.repeat-mode == "track" : Rectangle {
+                                x: parent.width / 2 + 3px; y: parent.height / 2 - 11px;
+                                width: 11px; height: 11px; border-radius: 5.5px;
+                                background: Pal.accent;
+                                Text { text: "1"; color: #0b0f0d; font-size: 8px; font-weight: 800;
+                                       x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                            }
+                        } }
+                    }
+
+                    // Volume
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        VerticalLayout { alignment: center;
+                            Path { width: 14px + 3px * npane.k; height: self.width; viewbox-width: 24; viewbox-height: 24; fill: Pal.text2;
+                                commands: "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"; }
+                        }
+                        VerticalLayout { alignment: center;
+                            vbar := Rectangle {
+                                width: 130px + 40px * npane.k; height: 14px;
+                                property <float> shown: root.scrubbing-volume ? root.scrub-volume : root.volume;
+                                vta := TouchArea {
+                                    moved => {
+                                        if (self.pressed) {
+                                            root.scrub-volume = clamp(self.mouse-x / vbar.width, 0.0, 1.0);
+                                            root.scrubbing-volume = true;
+                                        }
+                                    }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.down) {
+                                            root.scrub-volume = clamp(self.mouse-x / vbar.width, 0.0, 1.0);
+                                            root.scrubbing-volume = true;
+                                        }
+                                        if (ev.kind == PointerEventKind.up) {
+                                            root.set-volume(root.scrub-volume);
+                                            root.scrubbing-volume = false;
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: parent.width; height: 3px; border-radius: 2px; background: Pal.surface2;
+                                    // `#volume-slider::-webkit-slider-thumb { background: var(--accent-dynamic, var(--accent)) }`
+                                    // — the fill/thumb are accent-tinted in the original; this
+                                    // used to sit on the neutral text colours instead.
+                                    Rectangle { x: 0; height: parent.height; width: parent.width * vbar.shown; border-radius: 2px; background: Pal.accent; }
+                                }
+                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: Pal.accent;
+                                    x: vbar.width * vbar.shown - self.width / 2; y: (parent.height - self.height) / 2; }
+                            }
+                        }
+                    }
+
+                    // Extras: like / station / queue
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px + 8px * npane.k;
+                        VerticalLayout { alignment: center; IconBtn {
+                            cmds: "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z";
+                            // Unliked keeps the neutral ctrl-btn tint; liked turns heart-red.
+                            tint: root.liked-current ? Pal.heart : Pal.text3;
+                            hover-tint: Pal.heart;
+                            icon: 17px + 3px * npane.k; box: 32px + 6px * npane.k;
+                            opacity: root.like-pending ? 0.4 : 1.0;
+                            clicked => { if (!root.like-pending) { root.toggle-like(); } }
+                        } }
+                        VerticalLayout { alignment: center; IconBtn {
+                            stroked: true; icon: 18px + 3px * npane.k; box: 32px + 6px * npane.k;
+                            cmds: "M9.2 9.2a4 4 0 000 5.6M14.8 9.2a4 4 0 010 5.6M6.4 6.4a8 8 0 000 11.2M17.6 6.4a8 8 0 010 11.2M12 10.6a1.4 1.4 0 100 2.8 1.4 1.4 0 100-2.8z";
+                            clicked => { root.start-station(); }
+                        } }
+                        VerticalLayout { alignment: center; IconBtn { cmds: "M3 6h13v2H3V6zm0 5h13v2H3v-2zm0 5h9v2H3v-2zM18 13h2v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"; icon: 17px + 3px * npane.k; box: 32px + 6px * npane.k; clicked => { root.add-queue(); } } }
+                    }
+                }
+
+                // ── Sidebar overlay (queue / recent / downloads) ─────────────
+                // Right-anchored panel that slides in over the now-playing area
+                // (mirrors #sidebar: 268px, panel bg, left border, slide-in).
+                Rectangle {
+                    width: 268px;
+                    height: parent.height;
+                    y: 0;
+                    // `x` itself is deliberately NOT animated — only `slide-offset` is.
+                    // `parent.width` changes for two unrelated reasons: (1) the left panel
+                    // collapsing/expanding, which is its OWN already-smooth 160ms width
+                    // animation (this panel fills the freed space), and (2) genuinely
+                    // opening/closing this sidebar. Animating `x` directly (bound straight
+                    // to a formula involving the live `parent.width`) conflated the two: on
+                    // every left-panel toggle, `x`'s own animation would chase whatever
+                    // `parent.width` was mid-transition, landing wherever the two 170ms/
+                    // 160ms curves happened to diverge — anywhere from a brief flash-open
+                    // when closed to a visibly wrong-speed "jump" when open. Splitting the
+                    // constant "hidden" offset into its own property and animating THAT
+                    // instead means `x` always tracks `parent.width` with **zero** lag when
+                    // the cause is a parent resize (correct — it's already smooth), and
+                    // only actually animates when `sidebar-mode` itself changes.
+                    property <length> slide-offset: root.sidebar-mode == 0 ? self.width : 0px;
+                    animate slide-offset { duration: Motion.reduced ? 0ms : 170ms; easing: ease; }
+                    x: parent.width - self.width + slide-offset;
+                    clip: true;
+                    background: Pal.panel;
+                    VerticalLayout {
+                        // Header: title + Clear (QUEUE only) + close × — mirrors
+                        // `.sidebar-header` (`padding: 8px 12px`) / `.sidebar-header-actions`
+                        // (`gap: 6px`).
+                        Rectangle {
+                            height: 40px;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+                                spacing: 6px;
+                                alignment: start;
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.sidebar-mode == 1 ? "QUEUE" : root.sidebar-mode == 2 ? "RECENT" : "DOWNLOADS";
+                                        color: Pal.text2;
+                                        font-size: TypeScale.micro;
+                                        font-weight: 700;
+                                        letter-spacing: 2px;
+                                    }
+                                }
+                                // `.sidebar-clear-btn` — QUEUE resets the device queue,
+                                // DOWNLOADS drops every finished row. RECENT is Spotify's
+                                // own live history, so it has nothing locally clearable.
+                                if root.sidebar-mode == 1 || root.sidebar-mode == 3 : Rectangle {
+                                    property <bool> enabled: root.sidebar-mode != 3 || root.downloads-clearable;
+                                    height: 24px;
+                                    border-radius: 6px;
+                                    background: self.enabled && clta.has-hover ? Pal.accent.with-alpha(0.06) : transparent;
+                                    clta := TouchArea {
+                                        enabled: parent.enabled;
+                                        clicked => {
+                                            if (root.sidebar-mode == 3) { root.clear-downloads(); }
+                                            else { root.clear-queue(); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        Text {
+                                            text: "Clear";
+                                            vertical-alignment: center;
+                                            font-size: 11px;
+                                            letter-spacing: 0.4px;
+                                            color: (root.sidebar-mode == 3 && !root.downloads-clearable)
+                                                ? Pal.faint
+                                                : (clta.has-hover ? Pal.accent : Pal.text2);
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    width: 24px; height: 24px; border-radius: 6px;
+                                    background: sxta.has-hover ? Pal.surface : transparent;
+                                    sxta := TouchArea { clicked => { root.close-sidebar(); } }
+                                    Text {
+                                        text: "\u{00D7}";
+                                        color: sxta.has-hover ? Pal.text : Pal.text2;
+                                        font-size: 14px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2 - 1px;
+                                    }
+                                }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+                        }
+                        // Body: track list (QUEUE/RECENT), download list, or an empty note.
+                        if root.sidebar-mode == 3 && root.sidebar-dl-rows.length > 0 : ListView {
+                            vertical-stretch: 1;
+                            for d[i] in root.sidebar-dl-rows : DlTrackRow {
+                                name: d.name;
+                                sub: d.sub;
+                                progress: d.progress;
+                                state: d.state;
+                                clicked => { root.sidebar-play(i); }
+                                menu(mx, my) => {
+                                    root.ctx-x = mx;
+                                    root.ctx-y = my;
+                                    root.open-context(7, i);
+                                }
+                            }
+                        }
+                        if root.sidebar-mode == 3 && root.sidebar-dl-rows.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: 16px;
+                            padding-left: Space.l;
+                            padding-right: Space.l;
+                            spacing: Space.xs;
+                            Text {
+                                text: root.sidebar-empty;
+                                color: Pal.text2;
+                                font-size: TypeScale.small;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            if root.sidebar-empty == "No downloads queued" : Text {
+                                text: "Right-click a song or playlist and choose Download.";
+                                color: Pal.text3;
+                                font-size: TypeScale.caption;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.sidebar-mode != 3 && root.sidebar-rows.length > 0 : ListView {
+                            vertical-stretch: 1;
+                            for r[i] in root.sidebar-rows : SideTrackRow {
+                                name: r.name;
+                                artist: r.artist;
+                                time: r.time;
+                                playing: r.playing;
+                                // Downloads are a host-only placeholder: no menu, no select.
+                                selectable: root.sidebar-mode != 3;
+                                selected: r.selected;
+                                removable: root.sidebar-mode == 1;
+                                clicked => { root.sidebar-play(i); }
+                                menu(mx, my) => {
+                                    if (root.sidebar-mode != 3) {
+                                        root.ctx-x = mx;
+                                        root.ctx-y = my;
+                                        root.open-context(4, i);
+                                    }
+                                }
+                                select-click(ctrl, shift) => { root.select-click(4, i, ctrl, shift); }
+                                remove => { root.remove-queued-track(i); }
+                            }
+                        }
+                        // `#sidebar-actions`: only the QUEUE mode offers it, like the original.
+                        if root.sidebar-mode == 1 && root.sidebar-rows.length > 0 : Rectangle {
+                            height: 36px;
+                            Rectangle { y: 0; height: 1px; background: Pal.border; }
+                            HorizontalLayout {
+                                padding: 6px;
+                                alignment: center;
+                                ActionBtn {
+                                    label: "Create playlist from queue";
+                                    clicked => { root.sidebar-create-playlist(); }
+                                }
+                            }
+                        }
+                        if root.sidebar-mode != 3 && root.sidebar-rows.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: 16px;
+                            padding-left: Space.l;
+                            padding-right: Space.l;
+                            spacing: Space.xs;
+                            Text {
+                                text: root.sidebar-empty;
+                                color: Pal.text2;
+                                font-size: TypeScale.small;
+                                horizontal-alignment: center;
+                            }
+                            // A pointer to how the list fills (UI-PLAN A7) — only under the
+                            // plain "empty" messages, never under an error or "Loading…".
+                            if root.sidebar-empty == "No queued tracks" || root.sidebar-empty == "No recent tracks yet" : Text {
+                                text: root.sidebar-mode == 1
+                                    ? "Right-click any song and choose Add to queue."
+                                    : "Songs you play will show up here.";
+                                color: Pal.text3;
+                                font-size: TypeScale.caption;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    // Left border (drawn on top of the content edge).
+                    Rectangle { x: 0; width: 1px; height: parent.height; background: Pal.border; }
+                }
+            }
+        }
+
+        // ── Status bar ───────────────────────────────────────────────────────
+        if root.mini-mode == "off" : Rectangle {
+            height: 26px;
+            background: Pal.bg;
+            Rectangle { y: 0; height: 1px; background: Pal.border; }
+            // Settings gear stays pinned to the left edge.
+            IconBtn {
+                box: 20px; icon: 13px;
+                x: 10px;
+                y: (parent.height - self.height) / 2;
+                is-active: root.settings-open;
+                clicked => { root.open-settings(); }
+                cmds: "M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z";
+            }
+            // Queue / recent / downloads toggles, centered in the footer.
+            // Labelled toggles (UI-PLAN A4). All three labels need ~220px and the full
+            // window's minimum width is 640px, so they always fit; the footer doesn't
+            // exist in the mini layouts.
+            HorizontalLayout {
+                alignment: center;
+                spacing: 6px;
+                VerticalLayout { alignment: center; FootTab { label: "Queue"; active: root.sidebar-mode == 1; cmds: "M4 7h9M4 12h11M4 17h7"; clicked => { root.toggle-sidebar(1); } } }
+                VerticalLayout { alignment: center; FootTab { label: "Recent"; active: root.sidebar-mode == 2; cmds: "M12 6.25a5.75 5.75 0 1 1-5.32 3.58M7.25 4.75v3.5h3.5M12 9.1v3.2l2.35 1.45"; clicked => { root.toggle-sidebar(2); } } }
+                VerticalLayout { alignment: center; FootTab { label: "Downloads"; active: root.sidebar-mode == 3; cmds: "M12 5.5v8.1M8.8 10.7L12 13.9l3.2-3.2M5.5 16.75h13"; clicked => { root.toggle-sidebar(3); } } }
+            }
+        }
+
+        // ── Mini-player titlebar (snap control + caption buttons) ─────────────
+        if root.mini-mode != "off" : Rectangle {
+            height: 30px;
+            background: Pal.bg;
+            TouchArea {
+                width: 100%; height: 100%;
+                pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.start-drag(); } }
+            }
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 6px; spacing: 6px;
+                // Snap control (#mini-modes): segmented pill — square / bar / nano.
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 24px; border-radius: 6px; background: Pal.surface2;
+                        HorizontalLayout {
+                            padding: 2px; spacing: 2px;
+                            MiniSnapBtn { kind: "square"; active: root.mini-mode == "square"; clicked => { root.set-mini-mode("square"); } }
+                            MiniSnapBtn { kind: "bar"; active: root.mini-mode == "bar"; clicked => { root.set-mini-mode("bar"); } }
+                            MiniSnapBtn { kind: "nano"; active: root.mini-mode == "nano"; clicked => { root.set-mini-mode("nano"); } }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                // Minimize.
+                Rectangle {
+                    width: 30px; height: 30px;
+                    background: mmta.has-hover ? Pal.surface : transparent;
+                    mmta := TouchArea { clicked => { root.minimized = true; } }
+                    Text { text: "\u{2015}"; color: Pal.text2; font-size: 12px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 1px; }
+                }
+                // Exit mini (back to the full window) — accent pip glyph.
+                Rectangle {
+                    width: 30px; height: 30px;
+                    background: exta.has-hover ? Pal.surface : transparent;
+                    exta := TouchArea { clicked => { root.set-mini-mode("off"); } }
+                    Rectangle {
+                        width: 15px; height: 12px; border-radius: 2px;
+                        border-width: 1.4px; border-color: Pal.accent; background: transparent;
+                        x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+                        Rectangle { width: 7px; height: 5px; border-radius: 1px; background: Pal.accent; x: parent.width - self.width - 1.5px; y: parent.height - self.height - 1.5px; }
+                    }
+                }
+                // Close.
+                Rectangle {
+                    width: 30px; height: 30px;
+                    background: cmta.has-hover ? #e0575722 : transparent;
+                    cmta := TouchArea { clicked => { root.close-clicked(); } }
+                    Text { text: "\u{00D7}"; color: cmta.has-hover ? #f87171 : Pal.text2; font-size: 15px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2 - 1px; }
+                }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+        }
+
+        // ── Mini-player content (square / bar / nano) ─────────────────────────
+        if root.mini-mode != "off" : Rectangle {
+            vertical-stretch: 1;
+            background: Pal.bg;
+            clip: true;
+            // Album-tinted inset frame (mirrors the shipped inset accent border).
+            border-width: 1px;
+            border-color: root.mini-accent.with-alpha(0.28);
+
+            // SQUARE: big cover + title; transport pinned to the bottom; edge line only.
+            if root.mini-mode == "square" : VerticalLayout {
+                padding-left: 18px; padding-right: 18px; padding-top: 18px; padding-bottom: 18px;
+                spacing: 12px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 236px; height: 236px; border-radius: 8px; clip: true;
+                        background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                        Image { source: root.album-art; width: 100%; height: 100%; image-fit: cover; }
+                        if root.album-art.width == 0 : Text { text: "\u{266B}"; color: #ffffff22; font-size: 64px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center; spacing: 2px;
+                    Text { text: root.track-name; color: Pal.text; font-size: 14px; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                    Text { text: root.track-artist; color: Pal.text2; font-size: 11px; horizontal-alignment: center; overflow: elide; }
+                }
+                Rectangle { vertical-stretch: 1; }
+                MiniTransport {
+                    playing: root.playing; play-size: 44px; nav-icon: 20px; gap: 8px;
+                    prev => { root.prev-clicked(); }
+                    toggle => { root.toggle-play(); }
+                    next => { root.next-clicked(); }
+                }
+            }
+
+            // BAR: horizontal strip — cover | title + inline progress | transport.
+            if root.mini-mode == "bar" : HorizontalLayout {
+                padding-left: 16px; padding-right: 16px; spacing: 12px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 84px; height: 84px; border-radius: 6px; clip: true;
+                        background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                        Image { source: root.album-art; width: 100%; height: 100%; image-fit: cover; }
+                        if root.album-art.width == 0 : Text { text: "\u{266B}"; color: #ffffff22; font-size: 30px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center; spacing: 4px; horizontal-stretch: 1;
+                    Text { text: root.track-name; color: Pal.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { text: root.track-artist; color: Pal.text2; font-size: TypeScale.caption; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: root.elapsed; color: Pal.text2; font-size: TypeScale.caption; vertical-alignment: center; font-family: "Cascadia Code"; min-width: 34px; }
+                        VerticalLayout { alignment: center; horizontal-stretch: 1; MiniSeekBar { progress: root.progress; seek(f) => { root.seek(f); } } }
+                        Text { text: root.duration; color: Pal.text2; font-size: TypeScale.caption; vertical-alignment: center; font-family: "Cascadia Code"; min-width: 34px; horizontal-alignment: right; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    MiniTransport {
+                        playing: root.playing; play-size: 32px; nav-icon: 16px; gap: 6px;
+                        prev => { root.prev-clicked(); }
+                        toggle => { root.toggle-play(); }
+                        next => { root.next-clicked(); }
+                    }
+                }
+            }
+
+            // NANO: cover fills; click the cover → expand to square; floating transport pill.
+            if root.mini-mode == "nano" : Rectangle {
+                width: 100%; height: 100%;
+                Rectangle {
+                    width: 100%; height: 100%; clip: true;
+                    background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                    Image { source: root.album-art; width: 100%; height: 100%; image-fit: cover; }
+                    if root.album-art.width == 0 : Text { text: "\u{266B}"; color: #ffffff22; font-size: 54px; x: (parent.width - self.width)/2; y: (parent.height - self.height)/2; }
+                    nta := TouchArea { mouse-cursor: pointer; clicked => { root.set-mini-mode("square"); } }
+                }
+                // Floating transport pill near the bottom.
+                Rectangle {
+                    width: 128px; height: 34px; border-radius: 17px; background: #00000085;
+                    x: (parent.width - self.width)/2; y: parent.height - self.height - 12px;
+                    TouchArea { }   // swallow clicks in the pill gaps (don't fall through to expand)
+                    MiniTransport {
+                        width: 100%; height: 100%;
+                        playing: root.playing; play-size: 26px; nav-icon: 15px; gap: 10px;
+                        prev => { root.prev-clicked(); }
+                        toggle => { root.toggle-play(); }
+                        next => { root.next-clicked(); }
+                    }
+                }
+            }
+
+            // Edge progress line — square + nano only (bar shows the inline bar instead).
+            if root.mini-mode != "bar" : Rectangle {
+                x: 0; y: parent.height - self.height; height: 2px;
+                width: parent.width * root.progress;
+                background: root.mini-accent;
+            }
+        }
+    }
+    }
+    // end rootkeys FocusScope
+
+    // ── Settings modal ───────────────────────────────────────────────────────
+    // Full-window overlay + centered panel. Portable sections only (device picker
+    // + poll rate + account/about); host-only features are noted, not faked.
+    if root.settings-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000a6;
+        TouchArea { clicked => { root.close-settings(); } }   // backdrop closes
+        Rectangle {
+            width: 440px;
+            // `#settings-panel`: `max-height: min(82vh, 760px)` with `overflow-y: auto`.
+            // Slint has no auto-height outside a layout, so height-to-content is spelled
+            // out: the body's own preferred height plus the 40px header, capped. Past
+            // that cap the body scrolls, exactly like the original.
+            //
+            // The cap deliberately reads `parent.height - 32px` rather than the CSS's
+            // 82vh: this panel draws its own scrollbar, and in the software renderer
+            // that scrollbar is near-invisible against the dark panel -- so taking the
+            // full window height keeps the controls on screen instead of hiding them
+            // behind a scroll affordance the user cannot see.
+            height: min(sbody.preferred-height + 40px, min(760px, parent.height - 32px));
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Pal.panel;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Pal.border-hi;
+            clip: true;
+            TouchArea { }   // swallow clicks so they don't reach the backdrop
+            VerticalLayout {
+                // Header
+                Rectangle {
+                    height: 40px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text { text: "SETTINGS"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 2px; }
+                        }
+                        Rectangle {
+                            width: 26px; height: 26px; border-radius: 6px;
+                            background: scx.has-hover ? Pal.surface : transparent;
+                            scx := TouchArea { clicked => { root.close-settings(); } }
+                            Text { text: "\u{00D7}"; color: scx.has-hover ? Pal.text : Pal.text2; font-size: 15px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 1px; }
+                        }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+                }
+                // Body. Scrollable because the panel outgrew a short window once the
+                // DOWNLOADER section landed — without this the last section (ABOUT)
+                // is simply clipped off the bottom at 660px tall.
+                ScrollView {
+                    vertical-stretch: 1;
+                    viewport-height: sbody.preferred-height;
+                    sbody := VerticalLayout {
+                        width: parent.viewport-width;
+                        padding: 14px;
+                        spacing: 14px;
+
+                        // PLAYBACK ENGINE — Lightify's own Spotify Connect device.
+                        // This is the whole point: audio is decoded here, so the Spotify
+                        // desktop app is never part of the chain.
+                        VerticalLayout {
+                            spacing: 6px;
+                            HorizontalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: "PLAYBACK ENGINE"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                                }
+                                Rectangle {
+                                    width: 58px; height: 20px; border-radius: 4px; border-width: 1px; border-color: Pal.border;
+                                    background: reng.has-hover ? Pal.surface : transparent;
+                                    reng := TouchArea { clicked => { root.restart-engine(); } }
+                                    Text { text: "Restart"; color: reng.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.caption;
+                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 7px; height: 7px; border-radius: 3.5px;
+                                        background: root.engine-ok ? Pal.accent : Pal.text3;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: root.engine-status; color: root.engine-ok ? Pal.text : Pal.text2; font-size: 11px; overflow: elide; }
+                                }
+                            }
+                            Text {
+                                text: "Lightify decodes audio itself and registers as a Spotify Connect device \u{2014} the Spotify app is never required.";
+                                color: Pal.text3; font-size: TypeScale.caption; wrap: word-wrap;
+                            }
+                        }
+
+                        // AUDIO OUTPUT \u{2014} which sound card the engine plays through.
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "AUDIO OUTPUT"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                            Rectangle {
+                                // Exactly three 27px rows, so the list never cuts a row's
+                                // text in half; the rest scrolls.
+                                height: 83px;
+                                border-radius: 6px; border-width: 1px; border-color: Pal.border; background: Pal.bg;
+                                clip: true;
+                                if root.settings-outputs.length > 0 : ListView {
+                                    for o[i] in root.settings-outputs : Rectangle {
+                                        height: 27px;
+                                        background: outr.has-hover ? Pal.surface : transparent;
+                                        outr := TouchArea { clicked => { root.settings-select-output(i); } }
+                                        HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: o.active ? o.name + "  \u{2713}" : o.name;
+                                                    color: o.active ? Pal.accent : (outr.has-hover ? Pal.text : #c8c8c8);
+                                                    font-size: 11px;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.settings-outputs.length == 0 : VerticalLayout {
+                                    alignment: start;
+                                    padding: 10px;
+                                    Text { text: "No audio outputs found"; color: Pal.text3; font-size: TypeScale.caption; }
+                                }
+                            }
+                            if root.settings-output-note != "" : Text {
+                                text: root.settings-output-note;
+                                color: Pal.danger; font-size: TypeScale.caption; wrap: word-wrap;
+                            }
+                        }
+
+                        // PLAYBACK DEVICE
+                        VerticalLayout {
+                            spacing: 6px;
+                            HorizontalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: "PLAYBACK DEVICE"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                                }
+                                Rectangle {
+                                    width: 58px; height: 20px; border-radius: 4px; border-width: 1px; border-color: Pal.border;
+                                    background: rfd.has-hover ? Pal.surface : transparent;
+                                    rfd := TouchArea { clicked => { root.settings-refresh-devices(); } }
+                                    Text { text: "Refresh"; color: rfd.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.caption;
+                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                }
+                            }
+                            Rectangle {
+                                // Exactly three 34px rows (the AUDIO OUTPUT list above is
+                                // sized the same way, so a row is never cut in half); the
+                                // rest scrolls. Was 118px, which only ever showed dead space.
+                                height: 104px;
+                                border-radius: 6px; border-width: 1px; border-color: Pal.border; background: Pal.bg;
+                                clip: true;
+                                if root.settings-devices.length > 0 : ListView {
+                                    for d[i] in root.settings-devices : Rectangle {
+                                        height: 34px;
+                                        background: dvr.has-hover ? Pal.surface : transparent;
+                                        dvr := TouchArea { clicked => { root.settings-select-device(i); } }
+                                        HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px; spacing: 8px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                horizontal-stretch: 1;
+                                                Text { text: d.active ? d.name + "  \u{2713}" : d.name; color: d.active ? Pal.accent : Pal.text; font-size: 11px; overflow: elide; }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 48px; height: 20px; border-radius: 4px; border-width: 1px;
+                                                    border-color: dvr.has-hover ? Pal.accent : Pal.border;
+                                                    Text { text: "Select"; color: dvr.has-hover ? Pal.accent : Pal.text2; font-size: TypeScale.caption;
+                                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.settings-devices.length == 0 : VerticalLayout {
+                                    alignment: start;
+                                    padding: 10px;
+                                    Text { text: root.settings-device-status; color: Pal.text3; font-size: TypeScale.caption; wrap: word-wrap; }
+                                }
+                            }
+                        }
+
+                        // POLL RATE
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "POLL RATE"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                            HorizontalLayout {
+                                spacing: 6px; alignment: start;
+                                BpModeBtn { label: "SLOW \u{2014} 5S"; active: root.poll-ms == 5000; clicked => { root.set-poll-rate(5000); } }
+                                BpModeBtn { label: "NORMAL \u{2014} 3S"; active: root.poll-ms == 3000; clicked => { root.set-poll-rate(3000); } }
+                                BpModeBtn { label: "FAST \u{2014} 1S"; active: root.poll-ms == 1000; clicked => { root.set-poll-rate(1000); } }
+                            }
+                        }
+
+                        // DOWNLOADER — the bundled OnTheSpot bridge. It needs a Spotify
+                        // account of its own (librespot credentials); the Web-API OAuth the
+                        // rest of the app uses cannot pull audio.
+                        VerticalLayout {
+                            spacing: 6px;
+                            HorizontalLayout {
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text { text: "DOWNLOADER"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                                }
+                                Rectangle {
+                                    width: dltxt.preferred-width + 20px; height: 20px; border-radius: 4px; border-width: 1px;
+                                    border-color: root.downloader-ready ? Pal.border : Pal.border-hi;
+                                    background: dlogin.has-hover && !root.downloader-ready ? Pal.surface : transparent;
+                                    dlogin := TouchArea {
+                                        // Stays clickable while busy: the sign-in this
+                                        // starts resolves in the background (success or
+                                        // a timeout) with nothing to force this open panel
+                                        // to notice on its own — this is the fallback way
+                                        // to ask again besides the automatic poll.
+                                        enabled: !root.downloader-ready;
+                                        clicked => { root.settings-start-downloader-login(); }
+                                    }
+                                    dltxt := Text {
+                                        text: root.downloader-busy ? "Waiting\u{2026} (retry)" : "Connect Spotify Downloader";
+                                        color: root.downloader-ready ? Pal.faint : (dlogin.has-hover ? Pal.text : Pal.text2);
+                                        font-size: TypeScale.caption;
+                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 7px; height: 7px; border-radius: 3.5px;
+                                        background: root.downloader-ready ? Pal.accent : Pal.text3;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.downloader-status;
+                                        color: root.downloader-ready ? Pal.text : Pal.text2;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                            // Download folder — shared with the shipped app (same config key),
+                            // so a path set in either one is what both write into.
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle {
+                                    height: 26px;
+                                    border-radius: 4px; border-width: 1px; border-color: Pal.border;
+                                    background: Pal.bg;
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 8px;
+                                        dlpath := TextInput {
+                                            vertical-alignment: center;
+                                            color: Pal.text;
+                                            font-size: 11px;
+                                            single-line: true;
+                                            text: root.settings-download-path;
+                                            edited => { root.settings-download-path = self.text; }
+                                            accepted => { root.settings-apply-download-path(self.text); }
+                                        }
+                                    }
+                                    if dlpath.text == "" : Text {
+                                        text: "Download folder";
+                                        color: Pal.text3; font-size: 11px;
+                                        x: 8px; y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 52px; height: 26px; border-radius: 4px; border-width: 1px; border-color: Pal.border;
+                                    background: dlsave.has-hover ? Pal.surface : transparent;
+                                    dlsave := TouchArea { clicked => { root.settings-apply-download-path(dlpath.text); } }
+                                    Text { text: "Save"; color: dlsave.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.caption;
+                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                }
+                            }
+                        }
+
+                        // ACCOUNT
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "ACCOUNT"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                            Text { text: root.account == "" ? "Not connected" : root.account; color: Pal.text3; font-size: 11px; overflow: elide; }
+                        }
+
+                        // ABOUT
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "ABOUT"; color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 1.5px; }
+                            Text { text: root.app-version == "" ? "Lightify" : "Lightify " + root.app-version; color: Pal.text3; font-size: 11px; }
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Command palette (Ctrl+K) ─────────────────────────────────────────────
+    if root.palette-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000a6;
+        TouchArea { clicked => { root.close-palette(); } }   // backdrop closes
+        Rectangle {
+            width: 520px;
+            height: 380px;
+            x: (parent.width - self.width) / 2;
+            y: 90px;
+            background: Pal.panel;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Pal.border-hi;
+            clip: true;
+            TouchArea { }   // swallow clicks so they don't reach the backdrop
+            VerticalLayout {
+                // Query input (fuzzy filters the command list; keys drive navigation).
+                Rectangle {
+                    height: 46px;
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        cmdk := TextInput {
+                            vertical-alignment: center;
+                            color: Pal.text;
+                            font-size: 13px;
+                            single-line: true;
+                            init => { self.focus(); }
+                            edited => { root.cmdk-query-changed(self.text); }
+                            key-pressed(e) => {
+                                if (e.text == Key.UpArrow) { root.palette-move(-1); return accept; }
+                                if (e.text == Key.DownArrow) { root.palette-move(1); return accept; }
+                                if (e.text == Key.Return) { root.run-palette(); return accept; }
+                                if (e.text == Key.Escape) { root.close-palette(); return accept; }
+                                if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") { root.close-palette(); return accept; }
+                                return reject;
+                            }
+                        }
+                    }
+                    if cmdk.text == "" : Text {
+                        text: "Search actions, playlists\u{2026}";
+                        color: Pal.text3; font-size: 13px;
+                        x: 14px; y: (parent.height - self.height) / 2;
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Pal.border; }
+                }
+                // Results.
+                if root.cmdk-rows.length > 0 : ListView {
+                    vertical-stretch: 1;
+                    for r[i] in root.cmdk-rows : Rectangle {
+                        height: 38px;
+                        background: i == root.cmdk-selected ? Pal.accent.with-alpha(0.1) : (cta2.has-hover ? Pal.surface : transparent);
+                        cta2 := TouchArea { clicked => { root.cmdk-selected = i; root.run-palette(); } }
+                        Rectangle { x: 0; width: 2px; height: parent.height; background: i == root.cmdk-selected ? Pal.accent : transparent; }
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text { text: r.title; color: i == root.cmdk-selected ? Pal.text : #d8d8d8; font-size: 12px; overflow: elide; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: r.hint; color: Pal.text3; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 0.5px; }
+                            }
+                        }
+                    }
+                }
+                if root.cmdk-rows.length == 0 : VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: start;
+                    padding-top: 16px;
+                    Text { text: "No matches"; color: Pal.text3; font-size: 11px; horizontal-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // ═══ Right-click menu (`.ctx-menu` / `.ctx-menu-item`) ═══
+    // 156px is the original's min-width; every label we ship fits inside it, so the
+    // rendered box is the same size the browser's would be.
+    if root.ctx-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        // The original closes on any document click; a full-window catcher is the
+        // native equivalent (same as the settings / palette backdrops).
+        TouchArea { clicked => { root.ctx-open = false; } }
+        Rectangle {
+            // "Adjust if off-screen" — the original nudges the menu back inside by 4px.
+            x: max(4px, min(root.ctx-x, root.width - self.width - 4px));
+            y: max(4px, min(root.ctx-y, root.height - self.height - 4px));
+            width: root.ctx-w;
+            height: root.ctx-items.length * 28px + 8px;      // 4px top/bottom padding
+            background: Pal.surface2;
+            border-width: 1px;
+            border-color: Pal.border-hi;
+            border-radius: 6px;
+            TouchArea { }   // swallow clicks inside the panel
+            VerticalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
+                for it[i] in root.ctx-items : Rectangle {
+                    height: 28px;
+                    background: cta3.has-hover
+                        ? (it.danger ? #f871711a : Pal.accent.with-alpha(0.08))
+                        : transparent;
+                    cta3 := TouchArea { clicked => { root.run-context(i); } }
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: it.label;
+                                font-size: 12px;
+                                color: it.danger
+                                    ? (cta3.has-hover ? #ffd0d0 : Pal.danger)
+                                    : (it.muted
+                                        ? Pal.text3
+                                        : (cta3.has-hover ? Pal.text : Pal.text2));
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ Confirm dialog (`#confirm-overlay` / `#confirm-panel`) ═══
+    // Only "Delete playlist" uses it, and only because that call is destructive.
+    if root.confirm-open : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0000009e;
+        TouchArea { clicked => { root.confirm-open = false; } }   // backdrop cancels
+        Rectangle {
+            // `#confirm-panel`: 360px wide, 14px padding. Height is fixed (a
+            // non-layout element can't size to its content) and sized for a
+            // two-line message, so long playlist names never clip.
+            width: 360px;
+            height: 130px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Pal.panel;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Pal.border-hi;
+            TouchArea { }
+            VerticalLayout {
+                padding: 14px;
+                spacing: 0px;
+                Text {
+                    text: root.confirm-title;
+                    color: Pal.text2; font-size: TypeScale.micro; font-weight: 700; letter-spacing: 2px;
+                }
+                Rectangle { height: 10px; }     // .confirm-hdr margin-bottom
+                Text {
+                    text: root.confirm-message;
+                    color: Pal.text2; font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+                Rectangle { height: 18px; }     // .confirm-actions margin-top
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    // `.btn-primary.btn-xs`
+                    Rectangle {
+                        width: 52px; height: 24px; border-radius: 4px;
+                        border-width: 1px;
+                        border-color: cno.has-hover ? Pal.border-hi : Pal.border;
+                        background: cno.has-hover ? Pal.surface2 : transparent;
+                        cno := TouchArea { clicked => { root.confirm-open = false; } }
+                        Text { text: "No"; font-size: TypeScale.caption; color: cno.has-hover ? Pal.text : Pal.text2;
+                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                    }
+                    // `.btn-primary.btn-xs.confirm-danger`
+                    Rectangle {
+                        width: 52px; height: 24px; border-radius: 4px;
+                        border-width: 1px;
+                        border-color: cyes.has-hover ? Pal.danger : #f8717159;
+                        background: cyes.has-hover ? #f871711a : transparent;
+                        cyes := TouchArea {
+                            clicked => { root.confirm-open = false; root.confirm-accept(); }
+                        }
+                        Text { text: "Yes"; font-size: TypeScale.caption; color: cyes.has-hover ? #ffd0d0 : Pal.danger;
+                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Sign-in page (`#auth-page` / `.auth-box`) ──────────────────────────
+    if root.signin-open : Rectangle {
+        y: 30px;
+        width: 100%;
+        height: parent.height - 30px;
+        background: Pal.bg;
+        TouchArea { }   // swallow clicks meant for the (hidden) player underneath
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                VerticalLayout {
+                    width: 460px;
+                    padding-left: 32px;
+                    padding-right: 32px;
+                    spacing: 0px;
+                    Text {
+                        text: "S P O T I F Y";
+                        horizontal-alignment: center;
+                        color: Pal.text; font-size: 18px; font-weight: 300; letter-spacing: 4px;
+                    }
+                    Rectangle { height: 20px; }
+                    // Step 1, with the dashboard as a link (`.auth-link-btn`).
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Text { text: "1. Go to"; color: Pal.text2; font-size: 12px; }
+                        Text {
+                            text: "developer.spotify.com/dashboard";
+                            color: dash.has-hover ? #6ee7b7 : Pal.accent; font-size: 12px;
+                            dash := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.signin-open-dashboard(); }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; background: parent.color; }
+                        }
+                    }
+                    Rectangle { height: 5px; }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 5px;
+                        Text { text: "2. Create an app \u{2014} set redirect URI to"; color: Pal.text2; font-size: 12px; }
+                        // `.auth-box code`
+                        Rectangle {
+                            background: #34d39917;
+                            border-radius: 3px;
+                            HorizontalLayout {
+                                padding-left: 5px; padding-right: 5px;
+                                Text {
+                                    text: "http://127.0.0.1:8901/callback";
+                                    color: Pal.accent; font-size: 11px; font-family: "Cascadia Code";
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { height: 5px; }
+                    Text {
+                        text: "3. Paste your Client ID below and authorise";
+                        horizontal-alignment: center;
+                        color: Pal.text2; font-size: 12px;
+                    }
+                    Rectangle { height: 24px; }
+                    // `.auth-row`
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "Client ID"; vertical-alignment: center; color: Pal.text2; font-size: 12px; font-weight: 500; }
+                        Rectangle {
+                            height: 33px;
+                            horizontal-stretch: 1;
+                            background: Pal.surface;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: cid.has-focus ? Pal.accent : Pal.border;
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                cid := TextInput {
+                                    vertical-alignment: center;
+                                    single-line: true;
+                                    color: Pal.text;
+                                    font-size: 12px;
+                                    font-family: "Cascadia Code";
+                                    text: root.signin-client-id;
+                                    edited => { root.signin-client-id = self.text; }
+                                    accepted => { if (!root.signin-waiting) { root.signin-authorise(self.text); } }
+                                }
+                            }
+                            if cid.text == "" : Text {
+                                text: "paste your Spotify Client ID here";
+                                color: Pal.text3; font-size: 12px; font-family: "Cascadia Code";
+                                x: 12px; y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                    Rectangle { height: 16px; }
+                    // `.auth-actions`
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        // `.btn-primary`
+                        Rectangle {
+                            width: 96px; height: 31px; border-radius: 4px; border-width: 1px;
+                            border-color: auth.has-hover && !root.signin-waiting ? Pal.accent : Pal.border-hi;
+                            background: auth.has-hover && !root.signin-waiting ? #34d39914 : transparent;
+                            opacity: root.signin-waiting ? 0.45 : 1.0;
+                            auth := TouchArea {
+                                clicked => { if (!root.signin-waiting) { root.signin-authorise(cid.text); } }
+                            }
+                            Text {
+                                text: "Authorise";
+                                color: auth.has-hover && !root.signin-waiting ? Pal.text : Pal.text2;
+                                font-size: 12px; font-weight: 500; letter-spacing: 0.3px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                            }
+                        }
+                        // `.btn-primary.btn-xs`
+                        Rectangle {
+                            width: 58px; height: 24px; border-radius: 4px; border-width: 1px;
+                            y: 3px;
+                            border-color: retry.has-hover ? Pal.border-hi : Pal.border;
+                            background: retry.has-hover ? Pal.surface2 : transparent;
+                            retry := TouchArea { clicked => { root.signin-retry(); } }
+                            Text {
+                                text: "Retry";
+                                color: retry.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.caption;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                    Rectangle { height: 12px; }
+                    // `#auth-status.status`
+                    Text {
+                        min-height: 18px;
+                        text: root.signin-status;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                        font-size: 12px;
+                        color: root.signin-error ? Pal.danger : root.signin-ok ? Pal.accent : Pal.text2;
+                    }
+                }
+            }
+        }
+    }
+}

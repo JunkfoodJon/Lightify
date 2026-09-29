@@ -1,0 +1,16 @@
+# Rust build output
+target/
+
+# Local test renders and logs
+*.log
+*.png.tmp
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Never commit Spotify sessions or app data
+.lightify_cache
+lightify_config.json

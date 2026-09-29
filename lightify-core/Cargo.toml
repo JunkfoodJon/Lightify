@@ -1,0 +1,29 @@
+[package]
+name = "lightify-core"
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "Tauri-free core: cached Spotify session, Web API client, and data models. Shared by the native shell (Tier 2) and, eventually, the host."
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+regex = "1"
+# Async Mutex (single-flight token refresh) + the sign-in callback listener.
+tokio = { version = "1", features = ["sync", "net", "io-util", "macros"] }
+# Sign-in (PKCE): the same crates, at the same versions, as the shipped host's auth.rs.
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+# Chrome TLS/HTTP2 fingerprint impersonation, used only for the Beatport
+# Cloudflare-challenge fetch (see beatport.rs) -- Cloudflare's managed challenge
+# re-triggers for a reused clearance cookie whenever the connection's TLS
+# fingerprint doesn't match the browser that originally solved it, and plain
+# reqwest (schannel on Windows) can't be made to look like real Chromium/BoringSSL.
+wreq = "0.16"
+wreq-util = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

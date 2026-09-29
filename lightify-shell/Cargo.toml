@@ -1,0 +1,93 @@
+[package]
+name = "lightify-shell"
+version = "2.2.3"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "Tier 2 spike: native Slint UI shell for Lightify (software renderer, no WebView2)."
+
+# The binary is named for the product, not the crate: Task Manager lists a process
+# by its file name, so this is what makes it show up as "Lightify" rather than
+# "lightify-shell". The crate keeps its own name.
+[[bin]]
+name = "Lightify"
+path = "src/main.rs"
+
+[dependencies]
+slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030"] }
+png = "0.17"
+lightify-core = { path = "../lightify-core" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Command/event plumbing for the in-process playback engine (src/audio_engine.rs) —
+# commands still travel as the same JSON lines the old subprocess protocol used
+# (cheap, and every call site in main.rs already builds them that way).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Loopback HTTP to the bundled OnTheSpot downloader bridge (src/downloader.rs) and
+# strict parsing of the open.spotify.com URLs it is handed. Same reqwest major the
+# core already pulls in, so this shares one client stack rather than adding another.
+reqwest = { version = "0.12", features = ["json"] }
+url = "2"
+# Resolve the default download root (~/Music/LightifyDownloads) and the bridge's
+# own state directory.
+dirs = "5"
+# Enumerate real OS audio outputs, so a stale/absent device name is never handed
+# to the engine (librespot's rodio backend panics on DeviceNotAvailable).
+cpal = "0.15"
+# The playback engine itself, embedded in-process (see src/audio_engine.rs) — one
+# .exe, not two. `lightify-audio/` remains a separate binary only because the
+# shipped Tauri host still spawns it as its own subprocess; that is a different
+# app's architecture and is untouched by this.
+librespot-core = "0.8"
+librespot-playback = { version = "0.8", default-features = false, features = ["rodio-backend"] }
+librespot-connect = "0.8"
+librespot-metadata = "0.8"
+librespot-oauth = "0.8"
+
+# Non-Windows platform support. Windows gets these from Win32 directly (no extra
+# dependency there); everywhere else needs a crate:
+#   arboard - the row menu's "Share" (there is no Slint clipboard API)
+#   chrono  - local time for "Queue <timestamp>" playlist names, which on Windows
+#             comes from GetLocalTime
+[target.'cfg(not(windows))'.dependencies]
+arboard = { version = "3", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Win32 clipboard for the row menu's "Share" (Slint has no clipboard API), and the
+# notification-area (tray) icon. `tray-icon` reuses muda + crossbeam-channel, which
+# the Slint winit backend already pulls in, so the marginal cost here is small;
+# default features are off because the ones it would add are Linux-only (gtk3 /
+# libappindicator) and this dependency is Windows-scoped anyway.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.25", default-features = false }
+# System Media Transport Controls (the Windows media flyout + hardware media keys,
+# src/media_controls.rs) and the taskbar thumbnail toolbar (src/taskbar.rs). 0.62 is
+# already in the tree via other crates; this only adds the bindings those use.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_WinRT",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "1"
+
