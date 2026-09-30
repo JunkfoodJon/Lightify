@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/JunkfoodJon/Lightify/security/advisories/new
+    about: Please don't file security problems as public issues.
+  - name: Setup help (Spotify developer app and Client ID)
+    url: https://github.com/JunkfoodJon/Lightify/blob/main/devappinstall.md
+    about: Most sign-in problems are covered in the setup guide.

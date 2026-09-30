@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in Lightify doesn't work the way it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. **Security problems:** please don't file them here;
+        use the private report on the Security tab instead (see SECURITY.md).
+
+        **Never paste** anything from `.lightify_cache`, `lightify-audio-cache` or
+        `lightify_config.json`: they hold your Spotify sign-in and Client ID.
+  - type: input
+    id: version
+    attributes:
+      label: Lightify version
+      description: Shown in Settings (the gear, bottom left).
+      placeholder: "2.2.3"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 23H2"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a playlist
+        2. Start the second track
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: |
+        The relevant lines from `%APPDATA%\Lightify\lightify-shell-audio.log` or
+        `lightify-shell-media.log`, if any. Check them for anything personal first.
+      render: text
