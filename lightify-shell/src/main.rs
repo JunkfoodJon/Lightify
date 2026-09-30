@@ -12099,6 +12099,10 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
     app.global::<Motion>().set_reduced(reduce_motion());
     if let Some(snap) = snap.as_ref() {
         apply_snapshot(&app, snap);
+    } else {
+        // Sample data stands in for a signed-in session; the property's default
+        // ("Connecting…") made every sample render look stuck.
+        app.set_status_text("Connected".into());
     }
     window.set_size(slint::PhysicalSize::new(w, h));
     slint::platform::update_timers_and_animations();

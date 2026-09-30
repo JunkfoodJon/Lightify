@@ -1,17 +1,45 @@
 # Lightify
 
-A small, fast Windows player for your Spotify library.
+**A small, fast Windows player for your Spotify library.**
+
+[![Release](https://img.shields.io/github/v/release/JunkfoodJon/Lightify?label=release&color=2fd49a)](https://github.com/JunkfoodJon/Lightify/releases/latest)
+[![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0078D4)](#download)
+[![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Made with Slint](https://img.shields.io/badge/UI-Slint-2379F4?logo=slint&logoColor=white)](https://slint.dev)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-lightgrey)](LICENSE.md)
+[![Spotify Premium required](https://img.shields.io/badge/Spotify-Premium%20required-1DB954)](#download)
 
 Lightify is a native Windows app written in Rust with the [Slint](https://slint.dev) UI
 toolkit. There's no web browser hidden inside it, and the part that plays your music runs
 in the same small program. It plays your library, your queue and your searches, and
 leaves the podcast storefront to Spotify.
 
-**Download the installer:** [lightify.stream](https://lightify.stream) ·
+<p align="center">
+  <img src="docs/screenshot.png" alt="Lightify showing a playlist library on the left and the now-playing track with playback controls on the right" width="880">
+</p>
+
+> **Status:** stable and used daily by its author (2.x). It's a one-person project, so
+> expect the odd rough edge; bug reports are welcome in
+> [Issues](https://github.com/JunkfoodJon/Lightify/issues).
+
+> Not affiliated with, endorsed by, or connected to Spotify.
+
+## Download
+
+**Installer:** [lightify.stream](https://lightify.stream) ·
 **Setup guide:** [devappinstall.md](devappinstall.md)
 
-> Needs a **Spotify Premium** account and **Windows 10 or 11** (64-bit).
-> Not affiliated with, endorsed by, or connected to Spotify.
+Needs a **Spotify Premium** account and **Windows 10 or 11** (64-bit). The installer
+isn't code-signed yet, so Windows SmartScreen may say the publisher is unknown; choose
+*More info*, then *Run anyway*. Checksums for every download are in
+[SHA256SUMS.txt](https://lightify.stream/downloads/SHA256SUMS.txt). Check yours in
+PowerShell and compare:
+
+```powershell
+Get-FileHash .\Lightify_2.2.3_x64-setup.exe -Algorithm SHA256
+```
+
+If you'd rather not trust a prebuilt file, [build it yourself](#build-from-source).
 
 ## Features
 
@@ -83,6 +111,14 @@ the downloader bridge wasn't found; everything else works as normal.
 
 A few code comments refer to design notes (`PARITY.md`, `UI-PLAN.md`) that are kept out of
 this repository.
+
+## Privacy and security
+
+Lightify has no telemetry, analytics, crash reporting or account of its own. It talks to
+Spotify (and to Beatport, only when you open a Beatport chart), and everything it keeps
+stays in your own Windows profile. [PRIVACY.md](PRIVACY.md) lists exactly what it stores
+and what goes over the network. To report a security problem privately, see
+[SECURITY.md](SECURITY.md).
 
 ## Please read before using
 
