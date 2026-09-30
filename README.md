@@ -78,8 +78,8 @@ itself closed and briefly play a few seconds at low volume on your account.
 | `lightify-shell/installer/` | Inno Setup script for the Windows installer |
 
 The Downloads panel talks to an optional, separately distributed downloader bridge that
-is **not** part of this repository. Builds from this source show the panel with a note
-that the downloader isn't included.
+is **not** part of this repository. In builds from this source, downloading reports that
+the downloader bridge wasn't found; everything else works as normal.
 
 A few code comments refer to design notes (`PARITY.md`, `UI-PLAN.md`) that are kept out of
 this repository.
