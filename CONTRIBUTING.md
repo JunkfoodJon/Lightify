@@ -1,7 +1,8 @@
 # Contributing
 
 Thanks for your interest in Lightify. It's a one-person project, so this page keeps
-things simple.
+things simple. Everyone taking part is expected to follow the
+[code of conduct](CODE_OF_CONDUCT.md).
 
 ## Bugs and ideas
 
