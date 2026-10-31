@@ -1,7 +1,8 @@
 # Security policy
 
-Lightify signs in to your Spotify account, keeps that sign-in on your PC, and parses data
-from Spotify, Beatport and the network. Security reports are welcome and taken seriously.
+Lightify signs in to your Spotify account, keeps that sign-in on your PC, parses data
+from Spotify, Beatport and the network, reads your own audio files in Local mode, and
+updates itself from lightify.stream. Security reports are welcome and taken seriously.
 
 ## Reporting a vulnerability
 
@@ -22,14 +23,17 @@ unless they'd rather not be.
 ## In scope
 
 - Anything that lets untrusted input run code or crash the app. Untrusted input includes
-  responses from Spotify and Beatport, images, playlist and track names, and requests
-  to the sign-in callback listener on `127.0.0.1:8901`.
+  responses from Spotify, Beatport and lightify.stream, images, audio files and their tags,
+  playlist and track names, and requests to the sign-in callback listener on
+  `127.0.0.1:8901`.
 - A way for another user or program to get Lightify's saved Spotify sign-in, or to make
   it act on your account in a way you didn't choose.
 - Any path by which the app sends data somewhere beyond what [PRIVACY.md](PRIVACY.md)
   lists.
 - DLL search-order or file-replacement problems in how the app or its installer loads
   code.
+- A way to make Lightify download, keep or run an update that wasn't signed with the
+  release key, or whose installer doesn't match the signed SHA-256.
 
 ## Out of scope
 
@@ -45,7 +49,7 @@ Every release on [lightify.stream](https://lightify.stream) lists SHA-256 checks
 PowerShell:
 
 ```powershell
-Get-FileHash .\Lightify_2.2.3_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.12_x64-setup.exe -Algorithm SHA256
 ```
 
 The result must match the line for that file. The installer isn't code-signed yet, so

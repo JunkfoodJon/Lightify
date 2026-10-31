@@ -11,10 +11,50 @@ pub mod model;
 pub mod net;
 pub mod ratelimit;
 pub mod spotify;
+pub mod update;
 
 pub use beatport::BeatportTrack;
 pub use model::{Album, Artist, Device, PlaybackState, Playlist, Track};
 pub use spotify::TrackPage;
+
+/// Successful "play this" requests (`me/player/play` with something to load) made by
+/// any `Session` in this process.
+static PLAY_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many loads this process has asked Spotify for. A device that loads something
+/// resets its shuffle/repeat (librespot's `handle_load` → `reset_options`) without
+/// announcing it, so the shell watches this to know a load is on its way.
+pub fn play_requests() -> u64 {
+    PLAY_REQUESTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+static LAST_PLAY_REQUEST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long ago the latest of [`play_requests`] was made.
+pub fn last_play_request_age() -> Option<std::time::Duration> {
+    LAST_PLAY_REQUEST.lock().ok().and_then(|g| g.map(|t| t.elapsed()))
+}
+
+/// `artists/{id}/top-tracks` answered 403/400 — it's forbidden for this client id, so
+/// [`Session::artist_tracks`] goes straight to the discography from then on.
+static TOP_TRACKS_FORBIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Append the songs of `batch` that `list` doesn't already hold. An artist's
+/// discography repeats songs (the single, then the album it's on, then a compilation,
+/// each with its own track id), so a song is one title — compared the way Beatport
+/// matching compares them, so case/punctuation variants count as the same — not one id.
+pub fn append_new_songs(list: &mut Vec<Track>, batch: Vec<Track>) {
+    let mut seen: std::collections::HashSet<String> =
+        list.iter().map(|t| beatport::normalize_match_text(&t.name)).collect();
+    list.extend(batch.into_iter().filter(|t| seen.insert(beatport::normalize_match_text(&t.name))));
+}
+
+fn note_play_request() {
+    if let Ok(mut g) = LAST_PLAY_REQUEST.lock() {
+        *g = Some(std::time::Instant::now());
+    }
+    PLAY_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// The full Beatport genre list (name, slug). Static — no network, no auth.
 pub fn beatport_genres() -> Vec<(String, String)> {
@@ -92,6 +132,11 @@ impl Session {
         &self.token.cached_display_name
     }
 
+    /// The account's Spotify user id (empty until the first profile read).
+    pub fn user_id(&self) -> &str {
+        &self.token.cached_user_id
+    }
+
     /// The current Web-API access token. Handed to the bundled playback engine on
     /// stdin so it can call the Web API on the user's behalf; call `ensure_fresh`
     /// first if the token might be stale.
@@ -123,13 +168,18 @@ impl Session {
     /// more importantly, instead of presenting a refresh token that a rotation may
     /// already have replaced.
     pub async fn ensure_fresh(&mut self) -> Result<(), String> {
-        if !self.token.is_expired() {
+        use std::sync::atomic::Ordering;
+        if !self.token.is_expired() && !spotify::TOKEN_REJECTED.load(Ordering::Relaxed) {
             return Ok(());
         }
         static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _single_flight = REFRESH.lock().await;
+        // Cleared once, inside the single flight: one refresh answers every Session.
+        let rejected = spotify::TOKEN_REJECTED.swap(false, Ordering::Relaxed);
         if let Some(disk) = config::load_token(&self.data_dir) {
-            if !disk.is_expired() {
+            // After a 401 only a DIFFERENT token on disk is worth adopting (someone
+            // else refreshed); the one that was just refused is not.
+            if !disk.is_expired() && !(rejected && disk.access_token == self.token.access_token) {
                 self.adopt(disk);
                 return Ok(());
             }
@@ -194,10 +244,9 @@ impl Session {
         let (limit, mut offset) = (100u32, 0u32);
         let mut out: Vec<Track> = Vec::new();
         loop {
-            let batch =
+            let (batch, n) =
                 spotify::get_playlist_tracks(&self.http, self.access(), playlist_id, limit, offset)
                     .await?;
-            let n = batch.len();
             out.extend(batch);
             offset += limit;
             if n < limit as usize || out.len() >= cap {
@@ -215,9 +264,8 @@ impl Session {
         let (limit, mut offset) = (50u32, 0u32);
         let mut out: Vec<Track> = Vec::new();
         loop {
-            let batch =
+            let (batch, n) =
                 spotify::get_saved_tracks(&self.http, self.access(), limit, offset).await?;
-            let n = batch.len();
             out.extend(batch);
             offset += limit;
             if n < limit as usize || out.len() >= cap {
@@ -236,17 +284,10 @@ impl Session {
     /// Search across tracks, playlists, artists and albums.
     pub async fn search(&mut self, q: &str) -> Result<SearchResults, String> {
         self.ensure_fresh().await?;
-        // The general (track/artist/album) and playlist requests are independent, so
-        // they go out together: one round trip of waiting instead of two.
-        let (general, playlists) = tokio::join!(
-            spotify::search_general(&self.http, self.access(), q),
-            spotify::search_playlists(&self.http, self.access(), q),
-        );
-        let mut out = spotify::parse_search_results(&general?);
-        if let Ok(p) = playlists {
-            out.playlists = spotify::parse_search_results(&p).playlists;
-        }
-        Ok(out)
+        // One request for all four types (it used to be two: tracks/artists/albums,
+        // then playlists).
+        let general = spotify::search_general(&self.http, self.access(), q).await?;
+        Ok(spotify::parse_search_results(&general))
     }
 
     /// One more page of a single search type (`track`/`artist`/`album`/`playlist`)
@@ -262,59 +303,91 @@ impl Session {
         spotify::get_album_tracks(&self.http, self.access(), album_id).await
     }
 
-    /// An artist's tracks, for playing one from a search hit. `artists/{id}/top-tracks`
-    /// is the "real" endpoint but 403s/400s under this dev-mode token — falls back to
-    /// a plain track search scoped to the artist's name, keeping only hits whose own
-    /// `artist_ids` include this artist. Search embeds full artist metadata per track,
-    /// so this needs no elevated scope at all and is actually more precise than a name
-    /// match would be (which is what the shipped host has to fall back to, since its
-    /// own track parser doesn't carry artist ids through from a search response).
-    pub async fn artist_tracks(&mut self, artist_id: &str, artist_name: &str) -> Result<Vec<Track>, String> {
+    /// An artist's tracks, for queueing a search hit whole: `artists/{id}/top-tracks`
+    /// when Spotify serves it, otherwise the first releases of their discography
+    /// ([`Self::artist_tracks_page`]), up to `ARTIST_QUEUE_TRACKS` distinct songs.
+    ///
+    /// The fallback used to be a track search for `artist:"<name>"`, filtered by
+    /// artist id — but dev-mode search is fuzzy and capped (for "Spor" it reported 8
+    /// hits in total, none of them by Spor), so most artists came back empty.
+    /// `top-tracks` itself 403s for this client id; once it has, it isn't asked again
+    /// this run (it would only cost a request per artist click).
+    pub async fn artist_tracks(&mut self, artist_id: &str, _artist_name: &str) -> Result<Vec<Track>, String> {
+        const ARTIST_QUEUE_TRACKS: usize = 50;
+        const ARTIST_QUEUE_PAGES: u32 = 3;
         self.ensure_fresh().await?;
-        let path = format!("artists/{artist_id}/top-tracks?market=from_token");
-        match spotify::sp_get(&self.http, self.access(), &path).await {
-            Ok(Some(v)) => Ok(v["tracks"]
-                .as_array()
-                .map(|items| items.iter().filter_map(spotify::parse_track).collect())
-                .unwrap_or_default()),
-            Ok(None) => Ok(Vec::new()),
-            Err(e) if e.contains(" 403 ") || e.contains(" 400 ") => {
-                let name = artist_name.replace('"', "");
-                let name = name.trim();
-                if name.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let q = format!("artist:\"{name}\"");
-                // Paged at SEARCH_MAX_LIMIT (10) — this client id 400s past that on
-                // ANY search request (see the constant's own doc). A handful of pages,
-                // not the shipped host's full 90-offset sweep: this is an approximation
-                // already (search hits, not real top-tracks), the API quota is shared
-                // with the shipped host, and every extra page is one more request per
-                // artist click.
-                let mut seen = std::collections::HashSet::new();
-                let mut matched = Vec::new();
-                let mut offset = 0u32;
-                for _ in 0..4 {
-                    let (page, total) = spotify::search_tracks_page(
-                        &self.http, self.access(), &q, spotify::SEARCH_MAX_LIMIT, offset,
-                    ).await?;
-                    if page.is_empty() {
-                        break;
-                    }
-                    offset += page.len() as u32;
-                    for t in page {
-                        if t.artist_ids.iter().any(|id| id == artist_id) && seen.insert(t.id.clone()) {
-                            matched.push(t);
-                        }
-                    }
-                    if offset >= total {
-                        break;
+        if !TOP_TRACKS_FORBIDDEN.load(std::sync::atomic::Ordering::Relaxed) {
+            let path = format!("artists/{artist_id}/top-tracks?market=from_token");
+            match spotify::sp_get(&self.http, self.access(), &path).await {
+                Ok(Some(v)) => {
+                    let tracks: Vec<Track> = v["tracks"]
+                        .as_array()
+                        .map(|items| items.iter().filter_map(spotify::parse_track).collect())
+                        .unwrap_or_default();
+                    if !tracks.is_empty() {
+                        return Ok(tracks);
                     }
                 }
-                Ok(matched)
+                Ok(None) => {}
+                Err(e) if e.contains(" 403 ") || e.contains(" 400 ") => {
+                    TOP_TRACKS_FORBIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => Err(e),
         }
+        let mut out: Vec<Track> = Vec::new();
+        let mut offset = 0u32;
+        for _ in 0..ARTIST_QUEUE_PAGES {
+            let page = self.artist_tracks_page(artist_id, offset).await?;
+            append_new_songs(&mut out, page.tracks);
+            offset += Self::ARTIST_RELEASE_PAGE;
+            if out.len() >= ARTIST_QUEUE_TRACKS || offset >= page.total {
+                break;
+            }
+        }
+        out.truncate(ARTIST_QUEUE_TRACKS);
+        Ok(out)
+    }
+
+    /// Releases per page of an artist's discography — the most `artists/{id}/albums`
+    /// accepts for this client id.
+    pub const ARTIST_RELEASE_PAGE: u32 = spotify::SEARCH_MAX_LIMIT;
+
+    /// The tracks of the next [`Self::ARTIST_RELEASE_PAGE`] releases of an artist's
+    /// discography at release `offset` — their albums and singles first, then what they
+    /// appear on — keeping only tracks the artist is credited on. `total` is the
+    /// artist's release count (what to page against), not a track count.
+    ///
+    /// Spotify's batch endpoints (`albums?ids=`) 403 for this client id, so each
+    /// release is its own request; they go out a few at a time rather than in one
+    /// burst, since the dev-mode quota is small and shared. A release that fails is
+    /// skipped (the rest of the page is still useful) unless the failure is a rate
+    /// limit, which is reported so the caller backs off.
+    pub async fn artist_tracks_page(&mut self, artist_id: &str, offset: u32) -> Result<TrackPage, String> {
+        use futures_util::StreamExt;
+        const CONCURRENT_RELEASES: usize = 4;
+        self.ensure_fresh().await?;
+        let (releases, total) = spotify::get_artist_releases_page(
+            &self.http, self.access(), artist_id, offset, Self::ARTIST_RELEASE_PAGE,
+        )
+        .await?;
+        let (http, token) = (&self.http, self.access());
+        let fetched: Vec<Result<Vec<Track>, String>> = futures_util::stream::iter(
+            releases.iter().map(|id| spotify::get_album_tracks(http, token, id)),
+        )
+        .buffered(CONCURRENT_RELEASES)
+        .collect()
+        .await;
+        let mut tracks = Vec::new();
+        for r in fetched {
+            match r {
+                Ok(t) => tracks.extend(t.into_iter().filter(|t| t.artist_ids.iter().any(|id| id == artist_id))),
+                Err(e) if ratelimit::is_rate_limited(&e) => return Err(e),
+                Err(_) => {}
+            }
+        }
+        let raw = tracks.len();
+        Ok(TrackPage { tracks, total, partial: false, raw })
     }
 
     /// Play a context (playlist/album) starting at a specific track.
@@ -549,11 +622,14 @@ impl Session {
         self.ensure_fresh().await?;
         let dev = self.ensure_device().await;
         let path = spotify::with_device_query(base_path, dev.as_deref());
+        // A play with a body loads something new on the device (a bare play is just
+        // "resume", which loads nothing).
+        let loads = base_path == "me/player/play" && body.is_some();
         let first = match body.clone() {
             Some(b) => spotify::sp_put_body(&self.http, self.access(), &path, b).await,
             None => spotify::sp_put(&self.http, self.access(), &path).await,
         };
-        match first {
+        let result = match first {
             Err(e) if spotify::is_no_device_error(&e) => {
                 let dev2 = self.refresh_device().await;
                 let path2 = spotify::with_device_query(base_path, dev2.as_deref());
@@ -563,7 +639,11 @@ impl Session {
                 }
             }
             other => other,
+        };
+        if result.is_ok() && loads {
+            note_play_request();
         }
+        result
     }
 
     /// A player POST aimed at our device, same retry.
@@ -610,13 +690,64 @@ impl Session {
         name: &str,
         artists: &str,
     ) -> Result<Option<Track>, String> {
+        Ok(self.beatport_match_with(name, artists, "").await?.0)
+    }
+
+    /// `beatport_match`, trying the recording's ISRC first when one is given (one
+    /// exact search) before the fuzzy name searches, and saying how the answer was
+    /// found — `MatchHow::Cached` cost no request at all, so a caller pacing itself
+    /// against the rate budget doesn't need to wait after it.
+    pub async fn beatport_match_with(
+        &mut self,
+        name: &str,
+        artists: &str,
+        isrc: &str,
+    ) -> Result<(Option<Track>, MatchHow), String> {
         self.ensure_fresh().await?;
+        let clean = beatport::clean_bp_name(name);
+        let target_name = beatport::normalize_match_text(&clean);
+        let target_artists = beatport::normalize_artist_list(artists);
+        let key = format!("{target_name}|{}", target_artists.join(","));
+        if !target_name.is_empty() {
+            if let Some(hit) = bp_match_cache::get(&key) {
+                return Ok((hit, MatchHow::Cached));
+            }
+        }
+        let isrc = isrc.trim();
+        let valid_isrc = isrc.len() == 12 && isrc.bytes().all(|b| b.is_ascii_alphanumeric());
+        if valid_isrc {
+            let q = format!("isrc:{isrc}");
+            if let Some(t) = spotify::search_tracks(&self.http, self.access(), &q, 3)
+                .await?
+                .into_iter()
+                .find(|t| t.is_playable && !t.uri.is_empty())
+            {
+                if !target_name.is_empty() {
+                    bp_match_cache::put(&key, &Some(t.clone()));
+                }
+                return Ok((Some(t), MatchHow::Isrc));
+            }
+        }
+        let found = self.beatport_match_by_name(name, artists).await?;
+        Ok((found, if valid_isrc { MatchHow::IsrcMissed } else { MatchHow::Name }))
+    }
+
+    /// The fuzzy half of `beatport_match_with`: field-filtered, then plain, search.
+    async fn beatport_match_by_name(
+        &mut self,
+        name: &str,
+        artists: &str,
+    ) -> Result<Option<Track>, String> {
         let clean = beatport::clean_bp_name(name);
         let target_name = beatport::normalize_match_text(&clean);
         if target_name.is_empty() {
             return Ok(None);
         }
         let target_artists = beatport::normalize_artist_list(artists);
+        let key = format!("{target_name}|{}", target_artists.join(","));
+        if let Some(hit) = bp_match_cache::get(&key) {
+            return Ok(hit);
+        }
         let first_artist = artists.split(',').next().unwrap_or(artists).trim();
         let queries = [
             format!("track:{clean} artist:{first_artist}"),
@@ -643,9 +774,100 @@ impl Session {
                 (s, t)
             })
             .max_by_key(|(s, _)| *s);
-        Ok(match best {
+        let found = match best {
             Some((s, t)) if s >= beatport::MATCH_THRESHOLD => Some(t),
             _ => None,
+        };
+        bp_match_cache::put(&key, &found);
+        Ok(found)
+    }
+}
+
+/// How `Session::beatport_match_with` found its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchHow {
+    /// From the on-disk match cache: no request was made.
+    Cached,
+    /// One exact `isrc:` search.
+    Isrc,
+    /// The ISRC search found nothing; the name searches were made as well.
+    IsrcMissed,
+    /// Name searches only (no ISRC to try).
+    Name,
+}
+
+/// Beatport row → Spotify track answers, kept on disk. Every play of a chart used to
+/// search Spotify once or twice for EVERY row again — 100–200 Web-API calls for a Top
+/// 100 the user had already played. A match rarely changes, so a hit is kept for 90
+/// days; a miss only for 7 (the track may reach Spotify later).
+mod bp_match_cache {
+    use crate::model::Track;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    const HIT_DAYS: u64 = 90;
+    const MISS_DAYS: u64 = 7;
+    const MAX_ENTRIES: usize = 5000;
+
+    #[derive(Serialize, Deserialize, Clone)]
+    struct Entry {
+        track: Option<Track>,
+        at: u64,
+    }
+
+    static CACHE: Mutex<Option<HashMap<String, Entry>>> = Mutex::new(None);
+
+    fn path() -> std::path::PathBuf {
+        crate::config::data_dir().join("lightify_bp_matches.json")
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn fresh(e: &Entry, now: u64) -> bool {
+        let days = if e.track.is_some() { HIT_DAYS } else { MISS_DAYS };
+        now.saturating_sub(e.at) < days * 86_400
+    }
+
+    fn with<R>(f: impl FnOnce(&mut HashMap<String, Entry>) -> R) -> Option<R> {
+        let mut g = CACHE.lock().ok()?;
+        let map = g.get_or_insert_with(|| {
+            std::fs::read(path())
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        });
+        Some(f(map))
+    }
+
+    /// `Some(answer)` when a fresh answer is cached (the answer itself may be "no
+    /// match"); `None` when Spotify has to be asked.
+    pub fn get(key: &str) -> Option<Option<Track>> {
+        let now = now();
+        with(|m| m.get(key).filter(|e| fresh(e, now)).map(|e| e.track.clone())).flatten()
+    }
+
+    pub fn put(key: &str, track: &Option<Track>) {
+        let now = now();
+        let bytes = with(|m| {
+            m.insert(key.to_string(), Entry { track: track.clone(), at: now });
+            if m.len() > MAX_ENTRIES {
+                m.retain(|_, e| fresh(e, now));
+                while m.len() > MAX_ENTRIES {
+                    let Some(oldest) = m.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| k.clone()) else { break };
+                    m.remove(&oldest);
+                }
+            }
+            serde_json::to_vec(&*m).ok()
         })
+        .flatten();
+        if let Some(bytes) = bytes {
+            let _ = crate::config::write_atomic(&path(), &bytes);
+        }
     }
 }

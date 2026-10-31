@@ -15,7 +15,7 @@ in the same small program. It plays your library, your queue and your searches, 
 leaves the podcast storefront to Spotify.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Lightify showing a playlist library on the left and the now-playing track with playback controls on the right" width="880">
+  <img src="docs/screenshot.png" alt="Lightify showing a playlist library on the left and the now-playing track with playback controls on the right, over the ASCII lava backdrop" width="880">
 </p>
 
 > **Status:** stable and used daily by its author (2.x). It's a one-person project, so
@@ -36,7 +36,7 @@ isn't code-signed yet, so Windows SmartScreen may say the publisher is unknown; 
 PowerShell and compare:
 
 ```powershell
-Get-FileHash .\Lightify_2.2.3_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.12_x64-setup.exe -Algorithm SHA256
 ```
 
 If you'd rather not trust a prebuilt file, [build it yourself](#build-from-source).
@@ -52,10 +52,18 @@ If you'd rather not trust a prebuilt file, [build it yourself](#build-from-sourc
 - **A queue you can trust.** Shows what will really play next, remembers it across
   restarts, and offers to pick up where you left off.
 - **Stations** seeded from any song, queued behind what's playing.
+- **Your own music too.** Local mode plays the audio files on your PC (MP3, FLAC, Ogg
+  Vorbis, WAV, AIFF, AAC and ALAC, and more): browse by artist, album, genre or folder,
+  filter by length and file type, keep local playlists, and drag folders in from Explorer.
+  The files stay where they are.
 - **Feels like Windows.** Track and cover in Windows' media controls and on the lock
-  screen, play and skip from the taskbar preview, media keys, mini-player sizes and a
-  tray icon.
+  screen, play and skip from the taskbar preview, media keys, mini-player sizes, a tray
+  icon, and a resizable window that remembers its size and place.
 - **Beatport charts** by genre, played from the matching tracks on Spotify.
+- **Keeps itself up to date.** New versions come from lightify.stream; each one is signed
+  and checked before it installs, and you choose whether it downloads on its own.
+- **ASCII lava** behind the now-playing view, if you want it, with a full-screen
+  screensaver one right-click away.
 - **Light on your PC.** One process; about 80 MB in use while open and around 6 MB once
   minimized.
 
@@ -80,11 +88,14 @@ cargo build --release --locked
 If a build fails in a C dependency with missing standard headers, make sure the `CC`
 environment variable is **not** set; it stops the build from finding the MSVC paths.
 
-To make an installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
+To make an installer (Lightify's own, built from `lightify-installer/`; nothing else to
+install), run:
 
 ```powershell
 pwsh -File lightify-shell\scripts\build-installer.ps1 -NoDownloader -NoFfmpeg
 ```
+
+It writes `lightify-shell\target\installer\Lightify-Setup-<version>.exe`.
 
 The first launch shows a Spotify sign-in page. You'll need your own free Spotify
 developer app's Client ID; the [setup guide](devappinstall.md) walks through it in about
@@ -101,9 +112,11 @@ itself closed and briefly play a few seconds at low volume on your account.
 
 | Path | What it is |
 |---|---|
-| `lightify-shell/` | The app: UI (`ui/app.slint`), worker, playback engine, Windows integration |
-| `lightify-core/` | Spotify session, sign-in, Web API client, Beatport client, data models |
-| `lightify-shell/installer/` | Inno Setup script for the Windows installer |
+| `lightify-shell/` | The app: UI (`ui/app.slint`), worker, playback engine, Local library, Windows integration |
+| `lightify-shell/vendor/` | Two upstream crates with small patches (`librespot-connect`, Slint's software renderer), used through `[patch.crates-io]` |
+| `lightify-core/` | Spotify session, sign-in, Web API client, Beatport client, update check, data models |
+| `lightify-installer/` | Lightify's own installer, updater and uninstaller, and the tools that pack and sign a release |
+| `lightify-shell/installer/` | The old Inno Setup script, kept for reference; no longer used |
 
 The Downloads panel talks to an optional, separately distributed downloader bridge that
 is **not** part of this repository. In builds from this source, downloading reports that
@@ -115,8 +128,8 @@ this repository.
 ## Privacy and security
 
 Lightify has no telemetry, analytics, crash reporting or account of its own. It talks to
-Spotify (and to Beatport, only when you open a Beatport chart), and everything it keeps
-stays in your own Windows profile. [PRIVACY.md](PRIVACY.md) lists exactly what it stores
+Spotify, to Beatport only when you open a Beatport chart, and to lightify.stream to check
+for updates. Everything it keeps stays in your own Windows profile. [PRIVACY.md](PRIVACY.md) lists exactly what it stores
 and what goes over the network. To report a security problem privately, see
 [SECURITY.md](SECURITY.md).
 

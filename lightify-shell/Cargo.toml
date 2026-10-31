@@ -1,6 +1,6 @@
 [package]
 name = "lightify-shell"
-version = "2.2.3"
+version = "2.3.12"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 description = "Tier 2 spike: native Slint UI shell for Lightify (software renderer, no WebView2)."
@@ -43,6 +43,16 @@ librespot-playback = { version = "0.8", default-features = false, features = ["r
 librespot-connect = "0.8"
 librespot-metadata = "0.8"
 librespot-oauth = "0.8"
+# librespot logs through the `log` facade; the engine forwards its warnings/errors
+# into lightify-shell-audio.log (already in the tree via librespot itself).
+log = "0.4"
+# Local library mode: decoding (librespot already pulls symphonia for mp3/flac/ogg;
+# these add wav/pcm and m4a/aac for local files) and resampling to the output's rate.
+symphonia = { version = "0.5", default-features = false, features = ["mp1", "mp2", "mp3", "flac", "vorbis", "ogg", "wav", "aiff", "caf", "pcm", "adpcm", "isomp4", "aac", "alac"] }
+rubato = "0.16"
+# The Local view's ASCII backdrop rasterises the bundled JetBrains Mono (already in the
+# tree through Slint).
+ab_glyph = "0.2"
 
 # Non-Windows platform support. Windows gets these from Win32 directly (no extra
 # dependency there); everywhere else needs a crate:
@@ -74,10 +84,12 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",
@@ -91,3 +103,18 @@ windows-sys = { version = "0.59", features = [
 [build-dependencies]
 slint-build = "1"
 
+
+# librespot-connect 0.8.0 with a fix for playlists that stop early (X of Y): the
+# upstream context resolver never retried a failed page (see PARITY.md). The diff
+# against the crates.io release is marked "Lightify patch" in
+# vendor/librespot-connect/src/context_resolver.rs and adds tokio's "time" feature.
+# Also marked "Lightify patch": Spirc::append_tracks, Spirc::add_to_queue and
+# Spirc::remove_from_queue (spirc.rs, state/tracks.rs) - local queue edits that cost
+# no Web-API request.
+[patch.crates-io]
+librespot-connect = { path = "vendor/librespot-connect" }
+# Slint's software renderer 1.17.1 with one fix, marked "Lightify patch" in
+# vendor/i-slint-renderer-software/lib.rs: vector paths (every icon) are clipped to the
+# repaint's dirty region like every other item. Upstream drew a path whole whenever it
+# touched that region, over anything above it that wasn't being repainted.
+i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }

@@ -271,6 +271,11 @@ fn url_for(path: &str) -> String {
 /// recognizable "Rate limited by Spotify — retry in {n}s" carrying the server's
 /// `Retry-After` (defaulting to 5s) so the caller can back off instead of hammering
 /// the endpoint (which only prolongs the limit). Consumes the response.
+/// How long to stand down after a `QUOTA_EXCEEDED` 429 that names no `Retry-After`.
+/// Spotify doesn't publish the quota's reset window; ten minutes keeps the app quiet
+/// without leaving it dead for long if the window is short.
+const QUOTA_EXCEEDED_WAIT_SECS: u64 = 600;
+
 async fn api_error(verb: &str, path: &str, resp: reqwest::Response) -> String {
     let status = resp.status();
     if status.as_u16() == 429 {
@@ -279,6 +284,12 @@ async fn api_error(verb: &str, path: &str, resp: reqwest::Response) -> String {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
+        // Spotify's body says WHICH limit: `QUOTA_EXCEEDED` is the app's allowance
+        // used up for a while, not a busy 30 s window. Without a `Retry-After`, the
+        // 5 s-and-doubling re-probes meant for the latter just kept spending into an
+        // empty quota; wait it out in minutes instead.
+        let body = resp.text().await.unwrap_or_default();
+        let retry = retry.or_else(|| body.contains("QUOTA_EXCEEDED").then_some(QUOTA_EXCEEDED_WAIT_SECS));
         // Starts the process-wide cool-down, so every other requester (other
         // `Session`s, background tasks) stands down too instead of re-tripping it.
         let secs = ratelimit::note_429(retry);
@@ -293,6 +304,16 @@ pub use ratelimit::is_rate_limited;
 /// Send one Web-API request through the process-wide rate gate: fails fast (no
 /// network) during a cool-down, and clears the 429 streak on any other answer.
 /// Every `api.spotify.com` call made with the user's token must go through here.
+/// Set when Spotify answers 401: `Session::ensure_fresh` then refreshes on its next
+/// call even though the token's own expiry hasn't passed.
+pub(crate) static TOKEN_REJECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A 401 from the user-token rungs is a token problem, not "Spotify refuses this
+/// playlist": don't fall through to the embed scrape and show ~100 thin rows.
+fn is_auth_error(e: &str) -> bool {
+    e.contains(" 401 ")
+}
+
 async fn send_api(
     verb: &str,
     path: &str,
@@ -309,6 +330,11 @@ async fn send_api(
     })?;
     // Any response at all — even an error status — means Spotify is reachable.
     crate::net::note_up();
+    // The token was refused before its local expiry (revoked, or invalidated early).
+    // Nothing else would refresh it until that expiry, so every call until then failed.
+    if resp.status().as_u16() == 401 {
+        TOKEN_REJECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if resp.status().as_u16() != 429 {
         ratelimit::note_ok();
     }
@@ -406,6 +432,9 @@ pub async fn get_playlists(http: &reqwest::Client, token: &str) -> Result<Vec<Pl
         if let Some(items) = v["items"].as_array() {
             for it in items {
                 if let Some(pl) = parse_playlist(it) {
+                    if let Some(snap) = it["snapshot_id"].as_str() {
+                        page_cache::note_snapshot(&pl.id, snap);
+                    }
                     out.push(pl);
                 }
             }
@@ -413,6 +442,64 @@ pub async fn get_playlists(http: &reqwest::Client, token: &str) -> Result<Vec<Pl
         next = v["next"].as_str().map(|s| s.to_string());
     }
     Ok(out)
+}
+
+/// Playlist pages already fetched this run, tied to the playlist's `snapshot_id`
+/// (Spotify changes it on every edit). Opening a playlist again — or scrolling back
+/// through one — used to re-fetch every page; while its snapshot is unchanged the
+/// pages can't have changed either. Bounded in size, and in age so an edit made in
+/// another app (which this run's snapshot can't know about) shows within minutes.
+mod page_cache {
+    use super::TrackPage;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const MAX_PAGES: usize = 40;
+    const MAX_AGE: Duration = Duration::from_secs(600);
+
+    struct State {
+        snapshots: HashMap<String, String>,
+        pages: Vec<((String, String, u32), Instant, TrackPage)>,
+    }
+
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+        let mut g = STATE.lock().ok()?;
+        Some(f(g.get_or_insert_with(|| State { snapshots: HashMap::new(), pages: Vec::new() })))
+    }
+
+    pub fn note_snapshot(id: &str, snap: &str) {
+        with(|s| {
+            if s.snapshots.get(id).is_some_and(|old| old != snap) {
+                s.pages.retain(|((pid, _, _), _, _)| pid != id);
+            }
+            s.snapshots.insert(id.to_string(), snap.to_string());
+        });
+    }
+
+    pub fn get(id: &str, offset: u32) -> Option<TrackPage> {
+        with(|s| {
+            let snap = s.snapshots.get(id)?.clone();
+            s.pages
+                .iter()
+                .find(|((pid, ps, o), at, _)| pid == id && *ps == snap && *o == offset && at.elapsed() < MAX_AGE)
+                .map(|(_, _, p)| p.clone())
+        })
+        .flatten()
+    }
+
+    pub fn put(id: &str, offset: u32, page: &TrackPage) {
+        with(|s| {
+            let Some(snap) = s.snapshots.get(id).cloned() else { return };
+            s.pages.retain(|((pid, _, o), at, _)| !(pid == id && *o == offset) && at.elapsed() < MAX_AGE);
+            if s.pages.len() >= MAX_PAGES {
+                s.pages.remove(0);
+            }
+            s.pages.push(((id.to_string(), snap, offset), Instant::now(), page.clone()));
+        });
+    }
 }
 
 /// Current playback state. `None` when nothing is active (204).
@@ -429,6 +516,14 @@ pub async fn get_playback(
 /// Track objects are wrapped inside each page item. `me/tracks` and the legacy
 /// `/playlists/{id}/tracks` use `track`; the current `/playlists/{id}/items` uses
 /// `item` (generic, since playlists can also hold episodes). Handle both.
+/// How many entries Spotify put in a page — before `parse_track_items` drops local
+/// files (`id: null`) and removed/unavailable items (`track: null`). "Is this the last
+/// page?" must be asked of THIS count: a 100-row page holding one local file parses
+/// to 99 rows, and treating that as a short last page cut long playlists off early.
+fn page_len(v: &Value) -> usize {
+    v["items"].as_array().map_or(0, |a| a.len())
+}
+
 fn parse_track_items(v: &Value) -> Vec<Track> {
     v["items"]
         .as_array()
@@ -460,25 +555,59 @@ pub async fn get_playlist_tracks(
     playlist_id: &str,
     limit: u32,
     offset: u32,
-) -> Result<Vec<Track>, String> {
+) -> Result<(Vec<Track>, usize), String> {
     // 1. user token /items — authoritative for owned playlists (return even if empty=end).
     let items_path =
         format!("playlists/{playlist_id}/items?limit={limit}&offset={offset}&market=from_token");
-    match sp_get(http, token, &items_path).await {
-        Ok(Some(v)) => return Ok(parse_track_items(&v)),
-        Err(e) if is_rate_limited(&e) => return Err(e),
-        _ => {}
+    if !refused_items(playlist_id) {
+        match sp_get(http, token, &items_path).await {
+            Ok(Some(v)) => return Ok((parse_track_items(&v), page_len(&v))),
+            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            Err(e) => note_refused_items(playlist_id, &e),
+            _ => {}
+        }
     }
-    // 2. user token full playlist — authoritative only when tracks is non-null.
-    let full_path =
-        format!("playlists/{playlist_id}?limit={limit}&offset={offset}&market=from_token");
-    match sp_get(http, token, &full_path).await {
-        Ok(Some(v)) if !v["tracks"].is_null() => return Ok(parse_track_items(&v["tracks"])),
-        Err(e) if is_rate_limited(&e) => return Err(e),
-        _ => {}
+    // 2. user token full playlist — authoritative only when tracks is non-null. It has
+    // no limit/offset of its own (always the FIRST 100), so it only stands in for the
+    // first page; for a later one it returned rows 0-99 again as if they were next.
+    if offset == 0 && !refused_items(playlist_id) {
+        let full_path = format!("playlists/{playlist_id}?market=from_token");
+        match sp_get(http, token, &full_path).await {
+            Ok(Some(v)) if !v["tracks"].is_null() => {
+                return Ok((parse_track_items(&v["tracks"]), page_len(&v["tracks"])))
+            }
+            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            _ => {}
+        }
     }
     // 3. anonymous web-player token (public / editorial playlists).
-    get_playlist_tracks_anon(http, playlist_id, limit, offset).await
+    let items = get_playlist_tracks_anon(http, playlist_id, limit, offset).await?;
+    let n = items.len();
+    Ok((items, n))
+}
+
+/// Playlists whose `/items` Spotify refused this run (403/404: since February 2026 the
+/// Web API only serves the contents of the user's own playlists). Remembered so every
+/// later page goes straight to the fallback instead of paying for the same two
+/// refusals again — two wasted requests per page of every playlist the user follows.
+static REFUSED_ITEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn refused_items(playlist_id: &str) -> bool {
+    REFUSED_ITEMS.lock().map(|g| g.iter().any(|id| id == playlist_id)).unwrap_or(false)
+}
+
+fn note_refused_items(playlist_id: &str, err: &str) {
+    if !(err.contains(" 403 ") || err.contains(" 404 ")) {
+        return;
+    }
+    if let Ok(mut g) = REFUSED_ITEMS.lock() {
+        if !g.iter().any(|id| id == playlist_id) {
+            if g.len() >= 500 {
+                g.remove(0);
+            }
+            g.push(playlist_id.to_string());
+        }
+    }
 }
 
 /// Set once the anonymous web-player token endpoint refuses us. Spotify deprecated
@@ -552,9 +681,9 @@ pub async fn get_saved_tracks_page(
     match sp_get(http, token, &path).await? {
         Some(v) => {
             let total = v["total"].as_u64().unwrap_or(0) as u32;
-            Ok(TrackPage::api(parse_track_items(&v), total))
+            Ok(TrackPage::api(parse_track_items(&v), total, page_len(&v)))
         }
-        None => Ok(TrackPage::api(vec![], 0)),
+        None => Ok(TrackPage::api(vec![], 0, 0)),
     }
 }
 
@@ -567,14 +696,19 @@ pub struct TrackPage {
     pub tracks: Vec<Track>,
     pub total: u32,
     pub partial: bool,
+    /// How many entries the page held before unplayable ones (local files, removed
+    /// tracks) were dropped from `tracks` — what "was that the last page?" must
+    /// compare against the page size. See `page_len`.
+    pub raw: usize,
 }
 
 impl TrackPage {
-    fn api(tracks: Vec<Track>, total: u32) -> Self {
-        Self { tracks, total, partial: false }
+    fn api(tracks: Vec<Track>, total: u32, raw: usize) -> Self {
+        Self { tracks, total, partial: false, raw }
     }
     fn embed(tracks: Vec<Track>, total: u32) -> Self {
-        Self { tracks, total, partial: true }
+        let raw = tracks.len();
+        Self { tracks, total, partial: true, raw }
     }
 }
 
@@ -665,29 +799,41 @@ pub async fn get_playlist_tracks_page(
     limit: u32,
     offset: u32,
 ) -> Result<TrackPage, String> {
+    if let Some(page) = page_cache::get(playlist_id, offset) {
+        return Ok(page);
+    }
     let items_path =
         format!("playlists/{playlist_id}/items?limit={limit}&offset={offset}&market=from_token");
     // A rate limit is NOT "this endpoint refuses this playlist": falling through to
     // the next rung on a 429 used to spend two more Web-API requests into the same
     // limit, then scrape the embed and show its partial ~100 rows as if that were
     // the playlist. Surface the limit instead so the caller backs off.
-    match sp_get(http, token, &items_path).await {
-        Ok(Some(v)) => {
-            let total = v["total"].as_u64().unwrap_or(0) as u32;
-            return Ok(TrackPage::api(parse_track_items(&v), total));
+    if !refused_items(playlist_id) {
+        match sp_get(http, token, &items_path).await {
+            Ok(Some(v)) => {
+                let total = v["total"].as_u64().unwrap_or(0) as u32;
+                let page = TrackPage::api(parse_track_items(&v), total, page_len(&v));
+                page_cache::put(playlist_id, offset, &page);
+                return Ok(page);
+            }
+            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            Err(e) => note_refused_items(playlist_id, &e),
+            _ => {}
         }
-        Err(e) if is_rate_limited(&e) => return Err(e),
-        _ => {}
     }
-    let full_path =
-        format!("playlists/{playlist_id}?limit={limit}&offset={offset}&market=from_token");
-    match sp_get(http, token, &full_path).await {
-        Ok(Some(v)) if !v["tracks"].is_null() => {
-            let total = v["tracks"]["total"].as_u64().unwrap_or(0) as u32;
-            return Ok(TrackPage::api(parse_track_items(&v["tracks"]), total));
+    // The full-playlist object has no limit/offset of its own (always the FIRST 100
+    // tracks), so it can only stand in for page one; for a later page it returned
+    // rows 0-99 again as if they came next.
+    if offset == 0 && !refused_items(playlist_id) {
+        let full_path = format!("playlists/{playlist_id}?market=from_token");
+        match sp_get(http, token, &full_path).await {
+            Ok(Some(v)) if !v["tracks"].is_null() => {
+                let total = v["tracks"]["total"].as_u64().unwrap_or(0) as u32;
+                return Ok(TrackPage::api(parse_track_items(&v["tracks"]), total, page_len(&v["tracks"])));
+            }
+            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            _ => {}
         }
-        Err(e) if is_rate_limited(&e) => return Err(e),
-        _ => {}
     }
     // The anonymous web-player token is deprecated (403 for everyone, the shipped
     // app included), so the public embed page is the real last resort.
@@ -699,7 +845,8 @@ pub async fn get_playlist_tracks_page(
             // works again it carries richer rows than the embed.
             if let Ok(items) = get_playlist_tracks_anon(http, playlist_id, limit, offset).await {
                 if !items.is_empty() {
-                    return Ok(TrackPage::api(items, 0));
+                    let n = items.len();
+                    return Ok(TrackPage::api(items, 0, n));
                 }
             }
             embed.map(|(tracks, total)| TrackPage::embed(tracks, total))
@@ -712,11 +859,11 @@ pub async fn get_saved_tracks(
     token: &str,
     limit: u32,
     offset: u32,
-) -> Result<Vec<Track>, String> {
+) -> Result<(Vec<Track>, usize), String> {
     let path = format!("me/tracks?limit={limit}&offset={offset}&market=from_token");
     match sp_get(http, token, &path).await? {
-        Some(v) => Ok(parse_track_items(&v)),
-        None => Ok(vec![]),
+        Some(v) => Ok((parse_track_items(&v), page_len(&v))),
+        None => Ok((vec![], 0)),
     }
 }
 
@@ -725,7 +872,9 @@ pub async fn search_general(http: &reqwest::Client, token: &str, q: &str) -> Res
     let req = http
         .get(format!("{BASE}/search"))
         .bearer_auth(token)
-        .query(&[("q", q), ("type", "track,artist,album"), ("limit", "10"), ("market", "from_token")]);
+        // Playlists ride along in the same request (they used to be a second one per
+        // search): `market` only filters tracks/episodes, so the playlist hits match.
+        .query(&[("q", q), ("type", "track,artist,album,playlist"), ("limit", "10"), ("market", "from_token")]);
     let resp = send_api("GET", "search", req).await?;
     // Through `api_error`, not a hand-rolled message: a 429 here used to come back as
     // "search 429 Too Many Requests: …", which the shell's backoff never recognised.
@@ -891,8 +1040,26 @@ pub async fn get_album_tracks(
         .to_string();
     let album_name = v["name"].as_str().unwrap_or("").to_string();
     let album_id = v["id"].as_str().unwrap_or("").to_string();
-    Ok(v["tracks"]["items"]
-        .as_array()
+    // `albums/{id}` embeds only the first 50 tracks; the rest come from following
+    // `tracks.next` (a 60-track album used to stop at 50 when played or queued).
+    let mut items: Vec<Value> = v["tracks"]["items"].as_array().cloned().unwrap_or_default();
+    let mut next = v["tracks"]["next"].as_str().map(|s| s.to_string());
+    let mut pages = 0;
+    while let Some(url) = next.take() {
+        pages += 1;
+        let Some(path) = url.strip_prefix("https://api.spotify.com/v1/") else { break };
+        if pages > 20 {
+            break;
+        }
+        let Some(page) = sp_get(http, token, path).await? else { break };
+        let got = page["items"].as_array().cloned().unwrap_or_default();
+        if got.is_empty() {
+            break;
+        }
+        items.extend(got);
+        next = page["next"].as_str().map(|s| s.to_string());
+    }
+    Ok(Some(items)
         .map(|items| {
             items
                 .iter()
@@ -924,6 +1091,36 @@ pub async fn get_album_tracks(
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Every release group an artist's discography page covers — their own albums and
+/// singles first (Spotify returns the groups in that order), then the releases they
+/// only appear on (remixes, features, label compilations).
+const ARTIST_RELEASE_GROUPS: &str = "album,single,appears_on,compilation";
+
+/// One page of an artist's releases (`artists/{id}/albums`): the release ids, plus
+/// Spotify's total across all groups. `limit` is clamped to `SEARCH_MAX_LIMIT` — this
+/// client id 400s ("Invalid limit") past 10 here too. Pages can come back short in
+/// the middle of the list (one per group boundary), so callers page by `total`, not
+/// by a short page.
+pub async fn get_artist_releases_page(
+    http: &reqwest::Client,
+    token: &str,
+    artist_id: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<String>, u32), String> {
+    let limit = limit.clamp(1, SEARCH_MAX_LIMIT);
+    let path = format!(
+        "artists/{artist_id}/albums?include_groups={ARTIST_RELEASE_GROUPS}&limit={limit}&offset={offset}&market=from_token"
+    );
+    let v = sp_get(http, token, &path).await?.ok_or("no artist albums response")?;
+    let total = v["total"].as_u64().unwrap_or(0) as u32;
+    let ids = v["items"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x["id"].as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    Ok((ids, total))
 }
 
 /// Available Spotify Connect devices (`me/player/devices`).
@@ -1146,6 +1343,17 @@ pub async fn set_saved(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_page_with_a_local_file_still_counts_as_full() {
+        let v = serde_json::json!({ "items": [
+            { "track": { "id": "a", "name": "A", "uri": "spotify:track:a" } },
+            { "track": { "id": null, "name": "Local", "uri": "spotify:local:x" } },
+            { "track": null },
+        ]});
+        assert_eq!(super::parse_track_items(&v).len(), 1);
+        assert_eq!(super::page_len(&v), 3);
+    }
+
     use super::{parse_playlist, pick_thumb};
     use serde_json::json;
 

@@ -25,9 +25,16 @@
 //! * **Never block without a bound.** Every wait has a deadline, and when no stream is
 //!   pulling audio the writer drops the oldest samples rather than waiting.
 //! * **`stop` must never fail.** librespot calls `exit(1)` if it does.
+//!
+//! **Local playback** (`local_player`) is a second source: a [`LocalSource`] ring of
+//! the same 44.1 kHz stereo. While it is active, the current output (see
+//! [`output_running`]) plays it *instead of* the librespot ring — never both — and
+//! the librespot ring is left untouched until local playback stops. When the engine
+//! isn't running, `local_player` starts an output of its own with
+//! [`start_if_none`]; an engine sink created later always takes over from it.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -102,6 +109,27 @@ struct Shared {
     shutdown: AtomicBool,
     /// `Some(name)` = the user pinned an output; `None` = follow the OS default.
     target: Mutex<Option<String>>,
+    /// Identity for [`OWNER`]: only the current output plays local audio.
+    id: u64,
+}
+
+/// Ids handed to each `Shared`, and the id of the one registered in [`active`] (the
+/// output that plays local audio). Any other output still alive at the same moment -
+/// `local_player`'s own one, during the brief overlap after an engine sink took over -
+/// outputs silence while local audio is active, so the two can never play it twice.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static OWNER: AtomicU64 = AtomicU64::new(0);
+
+/// The last target any output was created with or switched to (`None` inside = the OS
+/// default), so an output started for local playback lands where the user's audio was.
+fn last_target_slot() -> &'static Mutex<Option<Option<String>>> {
+    static LAST: OnceLock<Mutex<Option<Option<String>>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+/// `Some(target)` once any output has been created or `set_target` was called.
+pub fn last_target() -> Option<Option<String>> {
+    lock(last_target_slot()).clone()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -121,10 +149,33 @@ fn active() -> &'static Mutex<Weak<Shared>> {
 /// Move playback to `device` (or back to following the OS default with `None`)
 /// without touching the engine. Takes effect on the output thread's next pass.
 pub fn set_target(device: Option<String>) {
+    let device = device.filter(|d| !d.trim().is_empty());
+    *lock(last_target_slot()) = Some(device.clone());
     if let Some(shared) = lock(active()).upgrade() {
-        *lock(&shared.target) = device.filter(|d| !d.trim().is_empty());
+        *lock(&shared.target) = device;
         shared.reopen.store(true, Ordering::SeqCst);
     }
+}
+
+/// Is any output (the engine's, or one started by [`start_if_none`]) alive?
+pub fn output_running() -> bool {
+    lock(active()).upgrade().is_some()
+}
+
+/// Start an output for local playback, but only when none is running: the engine's
+/// sink, when there is one, is always the output. Checked and registered under one
+/// lock, so this can never displace an engine sink that registered first; an engine
+/// sink created afterwards displaces this one (see `OWNER`), and the caller drops it
+/// once [`SwitchableSink::is_current`] turns false.
+pub fn start_if_none(device: Option<String>, log: Logger, on_change: OnChange) -> Option<SwitchableSink> {
+    let mut slot = lock(active());
+    if slot.upgrade().is_some() {
+        return None;
+    }
+    let (shared, sink) = SwitchableSink::spawn(device, log, on_change);
+    *slot = Arc::downgrade(&shared);
+    OWNER.store(shared.id, Ordering::SeqCst);
+    Some(sink)
 }
 
 pub struct SwitchableSink {
@@ -137,6 +188,23 @@ impl SwitchableSink {
     /// `device`: the initial target — a pinned output name, or `None` for the OS
     /// default. `on_change` is told the device name every time output lands on one.
     pub fn new(device: Option<String>, log: Logger, on_change: OnChange) -> Self {
+        let (shared, sink) = Self::spawn(device, log, on_change);
+        let mut slot = lock(active());
+        *slot = Arc::downgrade(&shared);
+        OWNER.store(shared.id, Ordering::SeqCst);
+        drop(slot);
+        sink
+    }
+
+    /// Is this the output that plays local audio (the one `set_target` reaches)?
+    pub fn is_current(&self) -> bool {
+        OWNER.load(Ordering::SeqCst) == self.shared.id
+    }
+
+    /// Build the shared state and start the output thread, without registering it.
+    fn spawn(device: Option<String>, log: Logger, on_change: OnChange) -> (Arc<Shared>, Self) {
+        let device = device.filter(|d| !d.trim().is_empty());
+        *lock(last_target_slot()) = Some(device.clone());
         let shared = Arc::new(Shared {
             ring: Mutex::new(VecDeque::with_capacity(RING_CAP)),
             drained: Condvar::new(),
@@ -145,9 +213,9 @@ impl SwitchableSink {
             playing: AtomicBool::new(false),
             reopen: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
-            target: Mutex::new(device.filter(|d| !d.trim().is_empty())),
+            target: Mutex::new(device),
+            id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
         });
-        *lock(active()) = Arc::downgrade(&shared);
 
         let thread = {
             let shared = Arc::clone(&shared);
@@ -160,7 +228,7 @@ impl SwitchableSink {
         if thread.is_none() {
             log("audio output: could not start the output thread".into());
         }
-        Self { shared, thread, log }
+        (Arc::clone(&shared), Self { shared, thread, log })
     }
 }
 
@@ -188,6 +256,8 @@ impl Sink for SwitchableSink {
         let mut ring = lock(&self.shared.ring);
         while !ring.is_empty()
             && self.shared.alive.load(Ordering::SeqCst)
+            // While local audio owns the output nothing drains this ring at all.
+            && !local_source().is_active()
             && Instant::now() < deadline
             && !self.shared.shutdown.load(Ordering::SeqCst)
         {
@@ -214,11 +284,28 @@ impl Sink for SwitchableSink {
         let data = converter.f64_to_f32(samples);
         let sh = &self.shared;
         let mut ring = lock(&sh.ring);
+        // Set only while local audio owns the output (see below).
+        let mut local_deadline: Option<Instant> = None;
         while ring.len() + data.len() > RING_CAP {
             if sh.shutdown.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            if sh.alive.load(Ordering::SeqCst) {
+            if local_source().is_active() {
+                // Local playback owns the device, so nothing drains this ring until it
+                // stops (normally Spotify was paused first and we never get here).
+                // Waiting for room would stall librespot's player thread - and with it
+                // its command handling - for as long as local audio plays. Hold the
+                // packet about as long as it would take to play, then drop the oldest
+                // audio as for a dead device: librespot keeps a real-time pace, unheard.
+                let frames = data.len() / SRC_CHANNELS;
+                let deadline = *local_deadline
+                    .get_or_insert_with(|| Instant::now() + Duration::from_secs_f64(frames as f64 / SRC_RATE));
+                if Instant::now() >= deadline {
+                    let excess = (ring.len() + data.len()).saturating_sub(RING_CAP).min(ring.len());
+                    ring.drain(..excess);
+                    break;
+                }
+            } else if sh.alive.load(Ordering::SeqCst) {
                 *lock(&sh.dead_since) = None;
             } else {
                 let since = *lock(&sh.dead_since).get_or_insert_with(Instant::now);
@@ -458,12 +545,35 @@ where
         cur: [0.0; 2],
         nxt: [0.0; 2],
     };
+    // Local playback gets its own interpolator state, so switching source never carries
+    // one source's samples into the other.
+    let mut lrs = Resampler { step: rs.step, frac: 1.0, cur: [0.0; 2], nxt: [0.0; 2] };
+    let mut gain = 0.0f32;
     let data_shared = Arc::clone(shared);
     let err_shared = Arc::clone(shared);
+    let local = Arc::clone(local_source());
 
     device.build_output_stream(
         config,
         move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+            if local.is_active() {
+                // Local audio owns the output: play it (only on the current output) and
+                // leave the librespot ring untouched - the two are never mixed.
+                let play = data_shared.id == OWNER.load(Ordering::Relaxed) && !local.is_paused();
+                let target = local.volume();
+                let mut buf = lock(&local.buf);
+                let before = buf.ring.len();
+                for frame in out.chunks_mut(channels) {
+                    let (l, r) = if play { next_frame(&mut lrs, &mut buf.ring) } else { (0.0, 0.0) };
+                    // ~10 ms smoothing, so a volume change doesn't click.
+                    gain += (target - gain) * 0.002;
+                    let (l, r) = (l * gain, r * gain);
+                    write_frame(frame, l, r);
+                }
+                let consumed = (before - buf.ring.len()) / SRC_CHANNELS;
+                buf.played += consumed as u64;
+                return;
+            }
             let playing = data_shared.playing.load(Ordering::Relaxed);
             let mut ring = lock(&data_shared.ring);
             for frame in out.chunks_mut(channels) {
@@ -490,6 +600,166 @@ where
         },
         None,
     )
+}
+
+fn write_frame<T: SizedSample + FromSample<f32>>(frame: &mut [T], l: f32, r: f32) {
+    if frame.len() == 1 {
+        frame[0] = T::from_sample((l + r) * 0.5);
+    } else {
+        frame[0] = T::from_sample(l);
+        frame[1] = T::from_sample(r);
+        for s in frame.iter_mut().skip(2) {
+            *s = T::from_sample(0.0f32);
+        }
+    }
+}
+
+// ── The local playback source ──────────────────────────────────────────────────
+
+/// Sample rate of [`LocalSource`]: the same as the librespot ring, so the output
+/// thread's per-device conversion serves both.
+pub const LOCAL_RATE: u32 = SRC_RATE as u32;
+
+/// Capacity of the local ring, in frames (~500 ms). Seek and `stop` drop it, pause
+/// keeps it; its length is also how far ahead a gapless next file is decoded.
+pub const LOCAL_CAP_FRAMES: usize = LOCAL_RATE as usize / 2;
+
+/// The local player's ring and its play-position counters. Every write is tagged with
+/// the generation of the `play` it belongs to, so a superseded decoder thread can
+/// never sneak stale audio in after the ring was handed to the next one.
+pub struct LocalSource {
+    buf: Mutex<LocalBuf>,
+    active: AtomicBool,
+    paused: AtomicBool,
+    /// f32 bits, 0.0..=1.0.
+    volume: AtomicU32,
+}
+
+struct LocalBuf {
+    /// Interleaved stereo f32 at `LOCAL_RATE`.
+    ring: VecDeque<f32>,
+    /// Generation owning the ring; 0 = nobody.
+    gen: u64,
+    /// Frames ever pushed / consumed by the device. `pushed - played` = buffered.
+    pushed: u64,
+    played: u64,
+}
+
+impl Default for LocalSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LocalSource {
+    pub fn new() -> Self {
+        Self {
+            buf: Mutex::new(LocalBuf {
+                ring: VecDeque::with_capacity(LOCAL_CAP_FRAMES * SRC_CHANNELS),
+                gen: 0,
+                pushed: 0,
+                played: 0,
+            }),
+            active: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
+
+    /// Hand the ring to generation `gen` (dropping what's buffered) and make local
+    /// audio the output's source.
+    pub fn activate(&self, gen: u64) {
+        let mut b = lock(&self.buf);
+        b.ring.clear();
+        b.pushed = b.played;
+        b.gen = gen;
+        self.paused.store(false, Ordering::SeqCst);
+        self.active.store(true, Ordering::SeqCst);
+    }
+
+    /// Give the output back to librespot, if `gen` (or any, with `None`) still owns
+    /// the ring. Returns whether it did.
+    pub fn deactivate(&self, gen: Option<u64>) -> bool {
+        let mut b = lock(&self.buf);
+        if b.gen == 0 || gen.is_some_and(|g| g != b.gen) {
+            return false;
+        }
+        b.ring.clear();
+        b.pushed = b.played;
+        b.gen = 0;
+        self.active.store(false, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        true
+    }
+
+    /// Drop everything buffered (seek). No-op for a stale `gen`.
+    pub fn clear(&self, gen: u64) {
+        let mut b = lock(&self.buf);
+        if b.gen == gen {
+            b.ring.clear();
+            b.pushed = b.played;
+        }
+    }
+
+    /// Append whole frames of interleaved stereo, as many as fit. Returns the frames
+    /// taken, or `None` when `gen` no longer owns the ring. Never waits.
+    pub fn push(&self, gen: u64, data: &[f32]) -> Option<usize> {
+        let mut b = lock(&self.buf);
+        if b.gen != gen || gen == 0 {
+            return None;
+        }
+        let room = LOCAL_CAP_FRAMES.saturating_sub(b.ring.len() / SRC_CHANNELS);
+        let n = room.min(data.len() / SRC_CHANNELS);
+        b.ring.extend(data[..n * SRC_CHANNELS].iter().copied());
+        b.pushed += n as u64;
+        Some(n)
+    }
+
+    /// (frames pushed, frames played) since this source was created.
+    pub fn counters(&self) -> (u64, u64) {
+        let b = lock(&self.buf);
+        (b.pushed, b.played)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::SeqCst);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// What a device callback does, minus rate conversion and volume: take up to
+    /// `max_frames` (nothing while paused or inactive). For tests without a device.
+    #[cfg(test)]
+    pub fn pull(&self, max_frames: usize) -> Vec<f32> {
+        if !self.is_active() || self.is_paused() {
+            return Vec::new();
+        }
+        let mut b = lock(&self.buf);
+        let n = max_frames.min(b.ring.len() / SRC_CHANNELS);
+        let out: Vec<f32> = b.ring.drain(..n * SRC_CHANNELS).collect();
+        b.played += n as u64;
+        out
+    }
+}
+
+/// The one local source the real outputs play.
+pub fn local_source() -> &'static Arc<LocalSource> {
+    static LOCAL: OnceLock<Arc<LocalSource>> = OnceLock::new();
+    LOCAL.get_or_init(|| Arc::new(LocalSource::new()))
 }
 
 /// One output frame, interpolated between source frames. On underrun it holds and

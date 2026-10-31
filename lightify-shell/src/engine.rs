@@ -42,7 +42,22 @@ pub enum Event {
     /// The Connect device registered; `device_id` is what `me/player` can target.
     Ready { device_id: String },
     Playing { playing: bool },
-    Track { name: String, artists: String },
+    /// The track now loaded, with everything librespot already fetched to play it, so
+    /// the shell can show it without asking the Web API (`id` is base62, like the Web
+    /// API's; `cover` is the widest image, empty when there is none).
+    Track {
+        name: String,
+        artists: String,
+        id: String,
+        uri: String,
+        artist_ids: Vec<String>,
+        album: String,
+        duration_ms: u64,
+        cover: String,
+    },
+    /// Spotify made another device the active one (or the session dropped): playback
+    /// is no longer ours, so the shell should find out where it went.
+    Inactive,
     Position { ms: u64 },
     Volume { percent: u16 },
     /// Shuffle and/or repeat ("off" | "context" | "track") as the device now has them.
@@ -281,7 +296,12 @@ mod tests {
         // instead of being written to a pipe.
         assert!(matches!(
             serde_json::from_str::<audio_engine::Cmd>(r#"{"cmd":"repeat","mode":"track"}"#),
-            Ok(audio_engine::Cmd::Repeat { ref mode }) if mode == "track"
+            Ok(audio_engine::Cmd::Repeat { ref mode, ref from }) if mode == "track" && from.is_empty()
+        ));
+        // With the device's current mode, so only the changing flag is sent.
+        assert!(matches!(
+            serde_json::from_str::<audio_engine::Cmd>(r#"{"cmd":"repeat","mode":"track","from":"context"}"#),
+            Ok(audio_engine::Cmd::Repeat { ref mode, ref from }) if mode == "track" && from == "context"
         ));
         assert!(matches!(
             serde_json::from_str::<audio_engine::Cmd>(r#"{"cmd":"autoplay","enabled":true}"#),
@@ -310,8 +330,13 @@ mod tests {
             serde_json::from_str::<audio_engine::Cmd>(
                 r#"{"cmd":"clearqueue","keep_uri":"spotify:track:x","position_ms":4200,"playing":true}"#
             ),
-            Ok(audio_engine::Cmd::ClearQueue { ref keep_uri, position_ms: 4200, playing: true })
-                if keep_uri == "spotify:track:x"
+            Ok(audio_engine::Cmd::ClearQueue { ref keep_uri, position_ms: 4200, playing: true, ref repeat })
+                if keep_uri == "spotify:track:x" && repeat.is_empty()
+        ));
+        // The user's repeat mode rides along so the reset doesn't lose it.
+        assert!(matches!(
+            serde_json::from_str::<audio_engine::Cmd>(r#"{"cmd":"clearqueue","repeat":"context"}"#),
+            Ok(audio_engine::Cmd::ClearQueue { ref repeat, .. }) if repeat == "context"
         ));
         assert!(matches!(
             serde_json::from_str::<audio_engine::Cmd>(r#"{"cmd":"expect","ids":["a","b"]}"#),

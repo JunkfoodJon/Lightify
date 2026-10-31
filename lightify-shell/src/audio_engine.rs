@@ -70,22 +70,63 @@ pub enum Cmd {
     #[serde(rename = "seek")] Seek { position_ms: u32 },
     #[serde(rename = "volume")] Volume { percent: u16 },
     #[serde(rename = "shuffle")] Shuffle { enabled: bool },
-    #[serde(rename = "repeat")] Repeat { #[serde(default)] mode: String },
+    /// `from` is the mode the device has now, when the sender knows it: only the
+    /// flags that differ are then sent (see `repeat_calls`).
+    #[serde(rename = "repeat")] Repeat { #[serde(default)] mode: String, #[serde(default)] from: String },
     #[serde(rename = "stop")] Stop,
     #[serde(rename = "expect")] Expect { #[serde(default)] ids: Vec<String> },
     #[serde(rename = "autoplay")] Autoplay { enabled: bool },
     #[serde(rename = "station")] Station { context_uri: String },
-    #[serde(rename = "stationtracks")] StationTracks { context_uri: String, #[serde(default)] seq: u64 },
+    /// `raw`: resolve `context_uri` as given rather than as a seed's station (the
+    /// `--probe-station <context uri>` diagnostic).
+    #[serde(rename = "stationtracks")] StationTracks { context_uri: String, #[serde(default)] seq: u64, #[serde(default)] raw: bool },
+    /// Play a plain list of track uris from `index` — the local twin of the Web API's
+    /// `me/player/play` with `uris`, without its practical length limit (the shell
+    /// used to send at most 50, so a long Liked Songs run stopped after 50) or its
+    /// round trip. `shuffle`/`repeat` ride along as load options: a load otherwise
+    /// resets both on the device.
+    /// Play `context_uri` from `track_uri`, resolved by the engine itself. For
+    /// contexts the Web API won't start — Liked Songs (`spotify:user:<id>:collection`),
+    /// which librespot resolves whole (thousands of tracks in one answer).
+    #[serde(rename = "loadcontext")] LoadContext {
+        context_uri: String,
+        #[serde(default)] track_uri: String,
+        #[serde(default)] position_ms: u32,
+        #[serde(default)] shuffle: bool,
+        #[serde(default)] repeat: String,
+    },
+    /// Grow the list a `loadtracks` started, at its end, while it plays (the vendored
+    /// librespot's `Spirc::append_tracks`). Dropped unless the playing list still
+    /// holds `anchor`, so a late append never lands in something loaded since.
+    #[serde(rename = "appendtracks")] AppendTracks { anchor: String, uris: Vec<String> },
+    /// Add to the user queue on the device itself (the vendored `Spirc::add_to_queue`):
+    /// the local twin of `POST me/player/queue`, without its one request per track.
+    #[serde(rename = "addtoqueue")] AddToQueue { uris: Vec<String> },
+    /// Drop one upcoming track (the `nth` occurrence of `uri`) and nothing else (the
+    /// vendored `Spirc::remove_from_queue`); there is no Web-API way to do this.
+    #[serde(rename = "removefromqueue")] RemoveFromQueue { uri: String, #[serde(default)] nth: usize },
+    #[serde(rename = "loadtracks")] LoadTracks {
+        uris: Vec<String>,
+        #[serde(default)] index: u32,
+        #[serde(default)] position_ms: u32,
+        #[serde(default)] shuffle: bool,
+        #[serde(default)] repeat: String,
+    },
     /// Empty the device queue.
     ///
     /// With `keep_uri` set, the current track is preserved: the whole context is
     /// replaced by that single track, resumed at `position_ms`. Without it, this is
     /// the hard disconnect+activate reset (what ending a station needs, where
     /// whatever plays next is loaded immediately afterwards anyway).
+    ///
+    /// `repeat` is the user's repeat mode. The reset wipes it on the device (and its
+    /// "activate" reports that as a change), so when it's given the engine keeps the
+    /// reset's repeat reports to itself and, on the keep path, puts the mode back.
     #[serde(rename = "clearqueue")] ClearQueue {
         #[serde(default)] keep_uri: String,
         #[serde(default)] position_ms: u32,
         #[serde(default)] playing: bool,
+        #[serde(default)] repeat: String,
     },
     /// Move audio to another output without restarting anything. Empty = follow the
     /// OS default.
@@ -180,6 +221,7 @@ where
         .spawn(move || {
             let _finished = FinishedGuard(finished_for_thread);
             let log = Arc::new(Log::open());
+            install_librespot_log(&log);
             // Two workers, not one per CPU thread (the default — 20 here, most of the
             // process's threads). The engine's async side is session I/O + Spirc;
             // decoding runs on librespot's own player thread and track loads on
@@ -239,9 +281,18 @@ where
 struct Log(Mutex<Option<std::fs::File>>);
 
 impl Log {
+    /// Fresh per app launch, appended to across engine restarts within it — a
+    /// restart used to truncate the file and with it the record of why the previous
+    /// engine stopped.
     fn open() -> Self {
+        static OPENED: AtomicBool = AtomicBool::new(false);
         let path = lightify_core::config::data_dir().join("lightify-shell-audio.log");
-        Self(Mutex::new(std::fs::File::create(path).ok()))
+        let file = if OPENED.swap(true, Ordering::SeqCst) {
+            std::fs::OpenOptions::new().create(true).append(true).open(path)
+        } else {
+            std::fs::File::create(path)
+        };
+        Self(Mutex::new(file.ok()))
     }
 
     fn line(&self, msg: &str) {
@@ -251,6 +302,50 @@ impl Log {
             }
         }
     }
+}
+
+/// librespot's own warnings and errors ("unexpected shutdown", a playlist page that
+/// failed to resolve, ...) into the same log. No logger was ever installed, so those —
+/// exactly what explains a playlist stopping early — went nowhere.
+struct LibrespotLog;
+
+static LIBRESPOT_LOG_SINK: Mutex<Option<Arc<Log>>> = Mutex::new(None);
+
+impl log::Log for LibrespotLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::Level::Warn && m.target().starts_with("librespot")
+    }
+
+    fn log(&self, r: &log::Record) {
+        if !self.enabled(r.metadata()) {
+            return;
+        }
+        let msg = r.args().to_string();
+        // Said on every single load, by design (we activate before each one, and a
+        // fresh load has no context metadata yet) — noise that would bury the rest.
+        if msg.contains("will be ignored while already active") || msg.contains("couldn't load context info") {
+            return;
+        }
+        let sink = LIBRESPOT_LOG_SINK.lock().ok().and_then(|g| g.clone());
+        if let Some(sink) = sink {
+            sink.line(&format!("[{} {}] {msg}", r.level(), r.target()));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Point librespot's log at this engine's `Log` (installed once per process).
+fn install_librespot_log(log: &Arc<Log>) {
+    if let Ok(mut g) = LIBRESPOT_LOG_SINK.lock() {
+        *g = Some(Arc::clone(log));
+    }
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        if log::set_logger(&LibrespotLog).is_ok() {
+            log::set_max_level(log::LevelFilter::Warn);
+        }
+    });
 }
 
 struct SharedState {
@@ -264,6 +359,10 @@ struct SharedState {
     gate_expected: Mutex<Option<HashSet<String>>>,
     gate_muted: AtomicBool,
     gate_muted_since: Mutex<Option<std::time::Instant>>,
+    /// Until then, librespot's repeat reports are not passed on: a queue clear's
+    /// reset + activate announce "repeat off", which is the reset talking, not a
+    /// change anyone made (see `Cmd::ClearQueue`'s `repeat`).
+    repeat_quiet_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl SharedState {
@@ -273,8 +372,83 @@ impl SharedState {
             gate_expected: Mutex::new(None),
             gate_muted: AtomicBool::new(false),
             gate_muted_since: Mutex::new(None),
+            repeat_quiet_until: Mutex::new(None),
         }
     }
+
+    fn repeat_quiet(&self) -> bool {
+        self.repeat_quiet_until
+            .lock()
+            .unwrap()
+            .is_some_and(|t| std::time::Instant::now() < t)
+    }
+}
+
+/// How long a queue clear keeps the device's repeat reports quiet. Covers the reset,
+/// the reload, and the Web-API play the app sends after a hard reset (≤ ~2.6 s).
+const CLEAR_REPEAT_QUIET: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The spirc calls that take the device from repeat mode `from` to `to`, in order.
+/// Modes are Spotify's: "off", "context" (repeat all), "track" (repeat one, which
+/// rides on repeat all). An empty or unknown `from` means "not known": both flags
+/// are then set outright.
+///
+/// Only flags that actually change are touched, and that matters beyond tidiness:
+/// librespot's `handle_set_repeat_context` rebuilds the whole up-next list from the
+/// context *every* time `repeat(..)` is called, even with the value it already has —
+/// and with shuffle on it looks the current track up in the unshuffled list but
+/// rebuilds the shuffled one from that index. Going repeat-all → repeat-one used to
+/// call `repeat(true)` again for nothing and pay that rebuild.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum RepeatCall {
+    Context(bool),
+    Track(bool),
+}
+
+fn repeat_calls(from: &str, to: &str) -> Vec<RepeatCall> {
+    let flags = |m: &str| match m {
+        "track" => Some((true, true)),
+        "context" => Some((true, false)),
+        "off" => Some((false, false)),
+        _ => None,
+    };
+    let (ctx, track) = flags(to).unwrap_or((false, false));
+    let mut calls = Vec::new();
+    match flags(from) {
+        Some((had_ctx, had_track)) => {
+            // Repeat-one off before repeat-all changes, and repeat-all on before
+            // repeat-one, so the device never sits in a mode nobody asked for.
+            if had_track && !track {
+                calls.push(RepeatCall::Track(false));
+            }
+            if had_ctx != ctx {
+                calls.push(RepeatCall::Context(ctx));
+            }
+            if !had_track && track {
+                calls.push(RepeatCall::Track(true));
+            }
+        }
+        None => {
+            if track {
+                calls.push(RepeatCall::Context(true));
+                calls.push(RepeatCall::Track(true));
+            } else {
+                calls.push(RepeatCall::Track(false));
+                calls.push(RepeatCall::Context(ctx));
+            }
+        }
+    }
+    calls
+}
+
+fn apply_repeat(spirc: &Spirc, from: &str, to: &str) -> Result<(), librespot_core::Error> {
+    for call in repeat_calls(from, to) {
+        match call {
+            RepeatCall::Context(on) => spirc.repeat(on)?,
+            RepeatCall::Track(on) => spirc.repeat_track(on)?,
+        }
+    }
+    Ok(())
 }
 
 struct TappedSink {
@@ -518,9 +692,15 @@ async fn run(
         Err(e) => {
             // Cached credentials went stale — drop them plus the marker so the
             // next launch runs a fresh keymaster sign-in instead of failing here again.
-            let _ = std::fs::remove_file(cache_dir.join("credentials.json"));
-            let _ = std::fs::remove_file(cache_dir.join(STREAM_AUTH_MARKER));
-            return Err(format!("Auth failed: {e}"));
+            // Only on a real login refusal: a network failure here (an engine restart
+            // racing a connection that is still coming back) used to throw away good
+            // credentials too and demand a browser sign-in for nothing.
+            if e.kind == librespot_core::error::ErrorKind::PermissionDenied {
+                let _ = std::fs::remove_file(cache_dir.join("credentials.json"));
+                let _ = std::fs::remove_file(cache_dir.join(STREAM_AUTH_MARKER));
+                return Err(format!("Auth failed: {e}"));
+            }
+            return Err(format!("Couldn't reach Spotify: {e}"));
         }
     };
 
@@ -566,8 +746,21 @@ async fn run(
     let cmd_log = Arc::clone(&log);
     std::thread::spawn(move || command_loop(cmd_state, cmd_spirc, cmd_session, cmd_rt, cmd_rx, cmd_on_event, cmd_log));
 
+    // Why the loop below ended, when it wasn't asked to. librespot has no reconnect:
+    // a network blip, sleep/wake or a dealer reconnect that fails invalidates the
+    // session and ends Spirc's task, while the player (held here) stays up. The song
+    // then plays out and nothing ever loads the next one: playback quietly stopped
+    // partway through a playlist with the engine still reported "running". Ending the
+    // engine instead reports `Exited`, so the shell's watchdog restarts it.
+    let mut lost: Option<&str> = None;
+    let mut spirc_done = false;
     while state.running.load(Ordering::Relaxed) {
         tokio::select! {
+            _ = &mut spirc_handle => {
+                spirc_done = true;
+                lost = Some("Spotify connection ended");
+                break;
+            }
             maybe_event = player_events.recv() => {
                 use librespot_playback::player::PlayerEvent;
                 let Some(event) = maybe_event else {
@@ -607,12 +800,22 @@ async fn run(
                         on_event(Event::Options { shuffle: Some(shuffle), repeat: None });
                     }
                     PlayerEvent::RepeatChanged { context, track } => {
-                        let mode = if track { "track" } else if context { "context" } else { "off" };
-                        on_event(Event::Options { shuffle: None, repeat: Some(mode.to_string()) });
+                        // A queue clear's reset reporting "off" isn't a change anyone
+                        // made; the clear puts the user's mode back itself.
+                        if !state.repeat_quiet() {
+                            let mode = if track { "track" } else if context { "context" } else { "off" };
+                            on_event(Event::Options { shuffle: None, repeat: Some(mode.to_string()) });
+                        }
                     }
                     PlayerEvent::VolumeChanged { volume } => {
                         let percent = ((volume as u32 * 100) / u16::MAX as u32) as u16;
                         on_event(Event::Volume { percent });
+                    }
+                    // Spirc emits this when the cluster names another device active
+                    // (`handle_disconnect`) — a handoff the shell would otherwise only
+                    // learn about from its next Web-API poll.
+                    PlayerEvent::SessionDisconnected { .. } => {
+                        on_event(Event::Inactive);
                     }
                     PlayerEvent::TrackChanged { audio_item } => {
                         let tid = audio_item.track_id.to_string(); // base62, matches Web-API ids
@@ -629,32 +832,82 @@ async fn run(
                                 log.line(&format!("gate: muting unsanctioned track {tid}"));
                             }
                         }
-                        let artists = match &audio_item.unique_fields {
-                            UniqueFields::Track { artists, .. } => {
-                                artists.0.iter().map(|a| a.name.clone()).collect::<Vec<String>>().join(", ")
-                            }
-                            _ => String::new(),
+                        let (artists, artist_ids, album) = match &audio_item.unique_fields {
+                            UniqueFields::Track { artists, album, .. } => (
+                                artists.0.iter().map(|a| a.name.clone()).collect::<Vec<String>>().join(", "),
+                                artists.0.iter().filter_map(|a| a.id.to_id().ok()).collect::<Vec<String>>(),
+                                album.clone(),
+                            ),
+                            _ => (String::new(), Vec::new(), String::new()),
                         };
-                        on_event(Event::Track { name: audio_item.name.clone(), artists });
+                        // The 640 px LARGE cover is the one the Web API lists first (what
+                        // `album_art` holds), so a later poll sees the same URL and does
+                        // not fetch and redraw the cover a second time.
+                        let cover = audio_item
+                            .covers
+                            .iter()
+                            .find(|c| c.size == librespot_metadata::image::ImageSize::LARGE)
+                            .or_else(|| audio_item.covers.first())
+                            .map(|c| c.url.clone())
+                            .unwrap_or_default();
+                        on_event(Event::Track {
+                            name: audio_item.name.clone(),
+                            artists,
+                            id: audio_item.track_id.to_id().unwrap_or_default(),
+                            uri: audio_item.uri.clone(),
+                            artist_ids,
+                            album,
+                            duration_ms: audio_item.duration_ms as u64,
+                            cover,
+                        });
                     }
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                if session.is_invalid() {
+                    lost = Some("Spotify connection lost");
+                    break;
+                }
+            }
         }
     }
 
-    let _ = spirc.shutdown();
-    // `shutdown()` only queues the request; the Spirc task is what then sends
-    // Spotify the "device left" update. Aborting it straight away (as this used
-    // to) cancelled that every time, leaving a phantom "Lightify" device on the
-    // account. Let it finish, bounded, and abort only if it overruns.
-    if tokio::time::timeout(SPIRC_SHUTDOWN_WAIT, &mut spirc_handle).await.is_err() {
-        log.line("spirc did not shut down in time; aborting it");
-        spirc_handle.abort();
+    if !spirc_done {
+        let _ = spirc.shutdown();
+        // `shutdown()` only queues the request; the Spirc task is what then sends
+        // Spotify the "device left" update. Aborting it straight away (as this used
+        // to) cancelled that every time, leaving a phantom "Lightify" device on the
+        // account. Let it finish, bounded, and abort only if it overruns.
+        if tokio::time::timeout(SPIRC_SHUTDOWN_WAIT, &mut spirc_handle).await.is_err() {
+            log.line("spirc did not shut down in time; aborting it");
+            spirc_handle.abort();
+        }
     }
-    on_event(Event::Playing { playing: false });
-    Ok(())
+    // The player outlives Spirc; with nothing driving it, stop it rather than let a
+    // song play out on a device Spotify no longer knows about.
+    if lost.is_some() {
+        player.stop();
+    } else {
+        // Not on a lost connection: the shell reads "was it playing" off its last
+        // state when `Exited` arrives, to resume after the restart.
+        on_event(Event::Playing { playing: false });
+    }
+    match lost {
+        // Only when nobody asked us to stop (Quit clears `running`).
+        Some(why) if state.running.load(Ordering::Relaxed) => Err(why.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// The user's shuffle/repeat as load options — a load otherwise resets both.
+fn load_options(shuffle: bool, repeat: &str) -> librespot_connect::Options {
+    librespot_connect::Options {
+        shuffle,
+        // Spotify's model: repeat-one sits on top of repeat-all.
+        repeat: repeat == "context" || repeat == "track",
+        repeat_track: repeat == "track",
+    }
 }
 
 fn command_loop(
@@ -695,18 +948,12 @@ fn command_loop(
                     log.line(&format!("shuffle failed: {e}"));
                 }
             }
-            Cmd::Repeat { mode } => {
+            Cmd::Repeat { mode, from } => {
                 // Spotify's own model: repeat-one sits ON TOP of repeat-all (both flags
-                // set). This used to send repeat-one with repeat-all *off* — and since
-                // librespot clears repeat-one whenever you skip, one skip switched repeat
-                // off altogether, where Spotify drops back to repeat-all.
-                let r = match mode.as_str() {
-                    "track" => spirc.repeat(true).and_then(|()| spirc.repeat_track(true)),
-                    "context" => spirc.repeat_track(false).and_then(|()| spirc.repeat(true)),
-                    _ => spirc.repeat_track(false).and_then(|()| spirc.repeat(false)),
-                };
-                if let Err(e) = r {
-                    log.line(&format!("repeat({mode}) failed: {e}"));
+                // set), so a skip out of repeat-one (librespot clears it) leaves
+                // repeat-all, as in Spotify. Only the flags that change are sent.
+                if let Err(e) = apply_repeat(&spirc, &from, &mode) {
+                    log.line(&format!("repeat({from} -> {mode}) failed: {e}"));
                 }
             }
             Cmd::Stop => { if let Err(e) = spirc.pause() { log.line(&format!("stop failed: {e}")); } }
@@ -744,7 +991,10 @@ fn command_loop(
                     on_event(Event::Failed { msg: format!("Station failed: {e}") });
                 }
             }
-            Cmd::ClearQueue { keep_uri, position_ms, playing } => {
+            Cmd::ClearQueue { keep_uri, position_ms, playing, repeat } => {
+                if !repeat.is_empty() {
+                    *state.repeat_quiet_until.lock().unwrap() = Some(std::time::Instant::now() + CLEAR_REPEAT_QUIET);
+                }
                 if keep_uri.is_empty() {
                     // Hard reset. disconnect(true) pauses and tears the session's
                     // playback state down, so this MUST NOT be the path a user-facing
@@ -794,11 +1044,77 @@ fn command_loop(
                         )),
                         Err(e) => log.line(&format!("clearqueue: keep-current load failed: {e}")),
                     }
+                    // The reset and the load both leave repeat off (`reset_options`).
+                    // Clearing the queue isn't a reason to lose the user's repeat mode,
+                    // so put it back. Spirc runs its commands in order, so this lands
+                    // after the load.
+                    if !repeat.is_empty() && repeat != "off" {
+                        if let Err(e) = apply_repeat(&spirc, "off", &repeat) {
+                            log.line(&format!("clearqueue: restoring repeat({repeat}) failed: {e}"));
+                        }
+                    }
                 }
             }
-            Cmd::StationTracks { context_uri, seq } => {
+            Cmd::LoadContext { context_uri, track_uri, position_ms, shuffle, repeat } => {
+                if let Err(e) = spirc.activate() {
+                    log.line(&format!("loadcontext: activate failed: {e}"));
+                }
+                let request = LoadRequest::from_context_uri(
+                    context_uri.clone(),
+                    LoadRequestOptions {
+                        start_playing: true,
+                        seek_to: position_ms,
+                        context_options: Some(librespot_connect::LoadContextOptions::Options(load_options(shuffle, &repeat))),
+                        playing_track: (!track_uri.is_empty()).then(|| librespot_connect::PlayingTrack::Uri(track_uri)),
+                    },
+                );
+                match spirc.load(request) {
+                    Ok(()) => log.line(&format!("loadcontext: {context_uri}")),
+                    Err(e) => on_event(Event::Failed { msg: format!("Play failed: {e}") }),
+                }
+            }
+            Cmd::AppendTracks { anchor, uris } => {
+                let n = uris.len();
+                match spirc.append_tracks(anchor, uris) {
+                    Ok(()) => log.line(&format!("appendtracks: {n} tracks")),
+                    Err(e) => log.line(&format!("appendtracks failed: {e}")),
+                }
+            }
+            Cmd::RemoveFromQueue { uri, nth } => match spirc.remove_from_queue(uri, nth) {
+                Ok(()) => log.line(&format!("removefromqueue: #{nth}")),
+                Err(e) => log.line(&format!("removefromqueue failed: {e}")),
+            },
+            Cmd::AddToQueue { uris } => {
+                let n = uris.len();
+                match spirc.add_to_queue(uris) {
+                    Ok(()) => log.line(&format!("addtoqueue: {n} tracks")),
+                    Err(e) => log.line(&format!("addtoqueue failed: {e}")),
+                }
+            }
+            Cmd::LoadTracks { uris, index, position_ms, shuffle, repeat } => {
+                // Load is ignored by an inactive device; activate is a no-op on an
+                // active one. Spirc runs both in order.
+                if let Err(e) = spirc.activate() {
+                    log.line(&format!("loadtracks: activate failed: {e}"));
+                }
+                let n = uris.len();
+                let request = LoadRequest::from_tracks(
+                    uris,
+                    LoadRequestOptions {
+                        start_playing: true,
+                        seek_to: position_ms,
+                        context_options: Some(librespot_connect::LoadContextOptions::Options(load_options(shuffle, &repeat))),
+                        playing_track: Some(librespot_connect::PlayingTrack::Index(index)),
+                    },
+                );
+                match spirc.load(request) {
+                    Ok(()) => log.line(&format!("loadtracks: {n} tracks from #{index}")),
+                    Err(e) => on_event(Event::Failed { msg: format!("Play failed: {e}") }),
+                }
+            }
+            Cmd::StationTracks { context_uri, seq, raw } => {
                 let station_uri = match context_uri.strip_prefix("spotify:") {
-                    Some(rest) if !rest.starts_with("station:") => format!("spotify:station:{rest}"),
+                    Some(rest) if !raw && !rest.starts_with("station:") => format!("spotify:station:{rest}"),
                     _ => context_uri.clone(),
                 };
                 let sess = session.clone();
@@ -842,4 +1158,29 @@ fn command_loop(
         }
     }
     state.running.store(false, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{repeat_calls, RepeatCall};
+
+    #[test]
+    fn repeat_cycle_touches_only_the_flag_that_changes() {
+        use RepeatCall::{Context, Track};
+        // The button's cycle: off -> all -> one -> off.
+        assert_eq!(repeat_calls("off", "context"), [Context(true)]);
+        // All -> one must NOT call repeat(true) again: librespot rebuilds up-next on
+        // every repeat-context call, even one that changes nothing.
+        assert_eq!(repeat_calls("context", "track"), [Track(true)]);
+        // One -> off: repeat-one off first, then repeat-all.
+        assert_eq!(repeat_calls("track", "off"), [Track(false), Context(false)]);
+        // Restoring after a load (device is off): repeat-all goes on under repeat-one.
+        assert_eq!(repeat_calls("off", "track"), [Context(true), Track(true)]);
+        assert_eq!(repeat_calls("track", "context"), [Track(false)]);
+        assert!(repeat_calls("context", "context").is_empty());
+        // Device state unknown: set both outright, as before.
+        assert_eq!(repeat_calls("", "track"), [Context(true), Track(true)]);
+        assert_eq!(repeat_calls("", "context"), [Track(false), Context(true)]);
+        assert_eq!(repeat_calls("", "off"), [Track(false), Context(false)]);
+    }
 }

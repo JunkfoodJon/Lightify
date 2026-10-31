@@ -33,14 +33,16 @@ Lightify signs in through your own free Spotify developer app. That keeps your l
 
 ## Step 2: Install Lightify
 
-1. Download `Lightify_2.2.3_x64-setup.exe` from [lightify.stream](https://lightify.stream).
+1. Download `Lightify_2.3.12_x64-setup.exe` from [lightify.stream](https://lightify.stream).
 2. Run it. The installer isn't code-signed yet, so Windows may show **"Windows protected your PC"**. Click **More info**, then **Run anyway**.
-3. Choose whether to install for just you or everyone on the PC, then finish the installer.
+3. Choose whether to install for just you or everyone on the PC, tick **I accept the licence**, then click **Install**.
+
+Lightify keeps itself up to date: when a new version is ready, a **Restart** button appears at the bottom right. Turn this off under **Settings → Updates** if you prefer.
 
 To make sure the file wasn't changed on the way to you, compare it with `SHA256SUMS.txt` on the download page:
 
 ```powershell
-Get-FileHash .\Lightify_2.2.3_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.12_x64-setup.exe -Algorithm SHA256
 ```
 
 ---
@@ -66,8 +68,8 @@ You're done. Next time, Lightify opens straight to your library.
 
 - **Where Lightify keeps its files:** `%APPDATA%\Lightify` (paste that into File Explorer's address bar). The sign-in lives in `.lightify_cache`, and settings in `lightify_config.json`.
 - **Sign out or switch accounts:** close Lightify, delete `%APPDATA%\Lightify\.lightify_cache`, then open Lightify again.
-- **Remove Lightify:** Windows Settings → Apps → Installed apps → Lightify → Uninstall. Your sign-in and settings stay in `%APPDATA%\Lightify`; delete that folder too for a clean removal.
-- **Already used Lightify 2.0 or 2.1?** 2.2 picks up the same sign-in, so you won't be asked again.
+- **Remove Lightify:** Windows Settings → Apps → Installed apps → Lightify → Uninstall. Your sign-in and settings are kept unless you tick **Also remove my settings and Spotify sign-in**. Your downloaded music is never touched.
+- **Already have Lightify installed?** The 2.3 installer replaces the older version in place and keeps your sign-in, so you won't be asked again.
 
 ## Troubleshooting
 

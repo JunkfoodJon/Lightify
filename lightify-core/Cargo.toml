@@ -12,11 +12,14 @@ serde_json = "1"
 dirs = "5"
 regex = "1"
 # Async Mutex (single-flight token refresh) + the sign-in callback listener.
-tokio = { version = "1", features = ["sync", "net", "io-util", "macros"] }
+tokio = { version = "1", features = ["sync", "net", "io-util", "macros", "time"] }
 # Sign-in (PKCE): the same crates, at the same versions, as the shipped host's auth.rs.
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+# Bounded-concurrency fetches (an artist's releases, a few at a time). Already in the
+# tree through reqwest; same version.
+futures-util = "0.3"
 # Chrome TLS/HTTP2 fingerprint impersonation, used only for the Beatport
 # Cloudflare-challenge fetch (see beatport.rs) -- Cloudflare's managed challenge
 # re-triggers for a reused clearance cookie whenever the connection's TLS
@@ -24,6 +27,9 @@ rand = "0.8"
 # reqwest (schannel on Windows) can't be made to look like real Chromium/BoringSSL.
 wreq = "0.16"
 wreq-util = "0.2"
+# Self-update (src/update.rs): verifies the release manifest's ed25519 signature
+# against the public key compiled in. Uses the sha2 above (same 0.10 line).
+ed25519-dalek = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

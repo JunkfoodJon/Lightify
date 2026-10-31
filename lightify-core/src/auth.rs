@@ -189,19 +189,26 @@ fn parse_token(body: &serde_json::Value) -> Result<TokenInfo, String> {
 async fn wait_for_code(listener: TcpListener) -> Result<String, String> {
     loop {
         let (mut stream, _) = listener.accept().await.map_err(|e| format!("Sign-in callback: {e}"))?;
-        let mut reader = BufReader::new(&mut stream);
-        let mut request_line = String::new();
-        if reader.read_line(&mut request_line).await.is_err() {
-            continue;
-        }
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) if line.trim().is_empty() => break,
-                Ok(_) => {}
+        // Bounded: browsers open speculative connections that never send a request,
+        // and one of those used to hold this single-connection loop forever while
+        // the real `/callback` request queued up behind it.
+        let read_head = async {
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).await.ok()?;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line.trim().is_empty() => break,
+                    Ok(_) => {}
+                }
             }
-        }
+            Some(request_line)
+        };
+        let Ok(Some(request_line)) = tokio::time::timeout(std::time::Duration::from_secs(5), read_head).await else {
+            continue;
+        };
         let target = request_line.split_whitespace().nth(1).unwrap_or("");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if path != "/callback" {
@@ -213,13 +220,20 @@ async fn wait_for_code(listener: TcpListener) -> Result<String, String> {
             return Ok(code);
         }
         let error = query_param(query, "error").unwrap_or_else(|| "no code returned".into());
-        let _ = respond(&mut stream, "400 Bad Request", &page("Sign-in didn't finish", &format!("Spotify said: {error}. Go back to Lightify and try again."))).await;
+        let shown = html_escape(&error);
+        let _ = respond(&mut stream, "400 Bad Request", &page("Sign-in didn't finish", &format!("Spotify said: {shown}. Go back to Lightify and try again."))).await;
         return Err(if error == "access_denied" {
             "Sign-in was cancelled in the browser.".into()
         } else {
             format!("Spotify sign-in failed: {error}")
         });
     }
+}
+
+/// The `error` value comes straight from the redirect's query string; it must not be
+/// able to put markup into the page.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) -> std::io::Result<()> {

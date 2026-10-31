@@ -23,6 +23,10 @@ slint::include_modules!();
 mod audio_engine;
 mod audio_output;
 mod downloader;
+mod local_backdrop;
+mod local_library;
+mod local_player;
+mod local_ui;
 mod engine;
 #[cfg(windows)]
 mod media_controls;
@@ -34,6 +38,7 @@ mod thumbs;
 #[cfg(windows)]
 mod tray;
 mod visibility;
+mod window_geom;
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -126,6 +131,16 @@ enum Cmd {
         completed: bool,
         error: Option<String>,
     },
+    /// Self-sent by `bp_match_background`: the next chart rows matched on Spotify,
+    /// to append to the chart list playing on our engine (see `BpList`).
+    BpMatched {
+        seq_id: u64,
+        tracks: Vec<Track>,
+        /// Chart rows (of the matcher's source) looked up so far, found or not.
+        next_index: usize,
+        done: bool,
+        error: Option<String>,
+    },
     OpenSettings,
     RefreshDevices,
     SelectDevice(usize),
@@ -161,20 +176,34 @@ enum Cmd {
     /// A menu row that exists in the shipped app but not here (host-only download
     /// bridge, unported station): say so in the status bar instead of doing nothing.
     Note(String),
+    /// The backdrop menu's "ASCII lava screensaver".
+    LavaSaver,
     // ── Track-list multi-select ──
     /// Ctrl+click toggles one row; Shift+click extends from the last clicked row.
     /// `scope` is the surface the row belongs to (see `SEL_*`); selecting in a new
     /// surface drops the old selection, like the original's per-container scopes.
     SelectClick { scope: i32, row: usize, ctrl: bool, shift: bool },
+    /// Hold-to-select: a press held past the hold time starts a drag on `row`; each
+    /// drag is ADDED to whatever is already selected (gaps between groups allowed).
+    SelectDragBegin { scope: i32, row: usize },
+    /// The drag's pointer, as a y in the list's content (the host maps it to a row).
+    SelectDragTo { scope: i32, y: f32 },
+    SelectDragEnd,
     ClearSelection,
     PlaySelection,
     QueueSelection,
     CreatePlaylistFromSelection,
+    /// The name prompt for a new playlist: the name typed, or dismissed.
+    PlaylistNamed(String),
+    PlaylistNameCancelled,
+    /// Everything the Local library view does (`local_ui`).
+    Local(local_ui::LocalCmd),
     // ── Search result menus ──
     QueueSearchTrack(usize),
     LikeSearchTrack(usize),
     ShareSearchTrack(usize),
     PlaySearchContext(usize), // play a playlist/album hit from its first track
+    QueueSearchHit(usize),    // queue a playlist/album hit's tracks, or an artist's top songs
     SaveSearchItem(usize),    // follow a playlist / save an album
     // ── Beatport menus ──
     BpQueue(usize),
@@ -219,6 +248,8 @@ enum Cmd {
     DownloaderLogin,
     SetDownloadPath(String),
     SidebarCreatePlaylist, // #btn-sidebar-create-pl (the whole queue, not a selection)
+    /// RECENT is open and a track just finished: re-read recently-played.
+    RefreshRecentSidebar,
     // ── Sidebar menus ──
     SidebarQueueRow(usize),
     ShareSidebarTrack(usize),
@@ -274,6 +305,19 @@ fn main() -> Result<(), slint::PlatformError> {
         render_to_png(&path, 980, 660, Some(snap));
         return Ok(());
     }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-artfull") {
+        // --shot-artfull <out.png>: like --shot-live, with the cover double-clicked open
+        // (filling the pane behind the controls).
+        let path = args.get(pos + 1).cloned().unwrap_or_else(|| "shot-artfull.png".into());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let snap = rt.block_on(fetch_snapshot());
+        SHOT_ART_FULL.store(true, std::sync::atomic::Ordering::Relaxed);
+        render_to_png(&path, 980, 660, Some(snap));
+        return Ok(());
+    }
     if let Some(pos) = args.iter().position(|a| a == "--shot-drill") {
         // --shot-drill <row-index> <out.png> [alpha|alpha-desc]  (0 = Liked Songs)
         let index: usize = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -316,14 +360,15 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--shot-beatport") {
-        // --shot-beatport <kind> <out.png>  (kind = tracks | hype | releases)
+        // --shot-beatport <kind> <out.png> [genre index]  (kind = tracks | hype | releases)
         let kind = args.get(pos + 1).cloned().unwrap_or_else(|| "tracks".into());
         let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-beatport.png".into());
+        let genre = args.get(pos + 3).and_then(|g| g.parse::<usize>().ok()).unwrap_or(0);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        let snap = rt.block_on(fetch_beatport_snapshot(&kind));
+        let snap = rt.block_on(fetch_beatport_snapshot(&kind, genre));
         render_to_png(&path, 980, 660, Some(snap));
         return Ok(());
     }
@@ -338,19 +383,21 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--shot-search-drill") {
-        // --shot-search-drill <query> <out.png>
+        // --shot-search-drill <query> <out.png> [artist]  (default: first playlist hit)
         let query = args.get(pos + 1).cloned().unwrap_or_else(|| "m83".into());
         let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-search-drill.png".into());
+        let artist = args.get(pos + 3).is_some_and(|a| a == "artist");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        let snap = rt.block_on(fetch_search_drill_snapshot(&query));
+        let snap = rt.block_on(fetch_search_drill_snapshot(&query, artist));
         render_to_png(&path, 980, 660, Some(snap));
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--shot-ctx") {
-        // --shot-ctx <kind> <out.png>  (kind = library | liked | track | confirm)
+        // --shot-ctx <kind> <out.png>  (kind = library | liked | track | confirm | selection |
+        //   nowplaying | search | search-album | search-playlist | search-artist | bp | sidebar)
         let kind = args.get(pos + 1).cloned().unwrap_or_else(|| "library".into());
         let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-ctx.png".into());
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -433,6 +480,18 @@ fn main() -> Result<(), slint::PlatformError> {
         engine::shutdown();
         return Ok(());
     }
+    if args.iter().any(|a| a == "--selftest-bp-chart") {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+        rt.block_on(selftest_bp_chart());
+        engine::shutdown();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--selftest-long-lists") {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+        rt.block_on(selftest_long_lists());
+        engine::shutdown();
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--selftest-queue-order") {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
         rt.block_on(selftest_queue_order());
@@ -512,6 +571,87 @@ fn main() -> Result<(), slint::PlatformError> {
         selftest_menus();
         return Ok(());
     }
+    if args.iter().any(|a| a == "--selftest-lava") {
+        selftest_lava();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--selftest-lava-fullscreen") {
+        selftest_lava_fullscreen();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--selftest-local-hold") {
+        selftest_local_hold();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--selftest-hold") {
+        selftest_hold();
+        return Ok(());
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-nameprompt") {
+        // --shot-nameprompt <left|right> <out.png>: the new-playlist name prompt open
+        // over the left panel (a selection) or the queue drawer (sample data).
+        let side = if args.get(pos + 1).map(|s| s.as_str()) == Some("right") { 1 } else { 0 };
+        let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-nameprompt.png".into());
+        SHOT_NAME_PROMPT.store(side, std::sync::atomic::Ordering::Relaxed);
+        render_to_png(&path, 980, 660, None);
+        return Ok(());
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-update") {
+        // --shot-update <downloading|available|ready> <out.png> [closed]: Settings ›
+        // updates in that state (sample data); `closed` leaves Settings shut to show the
+        // footer cog asking for attention instead.
+        let state = args.get(pos + 1).cloned().unwrap_or_else(|| "downloading".into());
+        let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-update.png".into());
+        let closed = args.get(pos + 3).map(|s| s.as_str()) == Some("closed");
+        if let Ok(mut g) = SHOT_UPDATE.lock() {
+            *g = if closed { format!("{state}:closed") } else { state };
+        }
+        render_to_png(&path, 980, 660, None);
+        return Ok(());
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-lava") {
+        // --shot-lava <native|menu|saver|settings|off>[@secs] <out.png> [WxH]: the
+        // ASCII lava behind the Spotify now-playing pane (sample data), its right-click
+        // menu, the screensaver, Settings › ascii lava, or switched off.
+        let variant = args.get(pos + 1).cloned().unwrap_or_else(|| "native@4".into());
+        let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-lava.png".into());
+        let (w, h) = args
+            .get(pos + 3)
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .unwrap_or((980u32, 660u32));
+        if let Ok(mut g) = SHOT_LAVA.lock() {
+            *g = variant;
+        }
+        render_to_png(&path, w, h, None);
+        return Ok(());
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-local") {
+        // --shot-local <library|find|drop|carry|empty>[@secs] <out.png> [WxH]: Local
+        // library mode (sample data).
+        let variant = args.get(pos + 1).cloned().unwrap_or_else(|| "library".into());
+        let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-local.png".into());
+        let (w, h) = args
+            .get(pos + 3)
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .unwrap_or((980u32, 660u32));
+        if let Ok(mut g) = SHOT_LOCAL.lock() {
+            *g = variant;
+        }
+        render_to_png(&path, w, h, None);
+        return Ok(());
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--shot-bpqueue") {
+        // --shot-bpqueue <lining|done> <out.png>: the QUEUE panel while a Beatport chart
+        // lines up (found rows, the one being looked up, the rest waiting), or once
+        // it has (sample data).
+        let done = args.get(pos + 1).map(|s| s.as_str()) == Some("done");
+        let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-bpqueue.png".into());
+        SHOT_BP_QUEUE.store(if done { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+        render_to_png(&path, 980, 660, None);
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--selftest-dismiss") {
         selftest_dismiss();
         return Ok(());
@@ -555,12 +695,53 @@ fn main() -> Result<(), slint::PlatformError> {
     // Recall the last mini-player layout for the titlebar toggle (persisted on disk).
     app.set_mini_last(load_mini_mode().into());
 
+    // Reopen the window as it was: its normal size and place, then maximized on top of
+    // that if it was (so un-maximizing returns to the normal rect, not the default).
+    // Set before the window exists, so it never flashes at the default first.
+    restore_window_geometry(&app);
+    track_window_geometry(&app);
+
+    // Self-update: background check + download, "Restart" in the footer.
+    install_updater(&app);
+
     // UI → worker channel.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
+    local_ui::install(&app, tx.clone());
+    local_backdrop::install(&app);
 
-    app.on_close_clicked(|| {
-        let _ = slint::quit_event_loop();
-    });
+    {
+        let weak = app.as_weak();
+        app.on_close_clicked(move || {
+            if let Some(a) = weak.upgrade() {
+                capture_window_geometry(&a);
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
+    {
+        // Resize from the edges and corners of the frameless window (winit
+        // `drag_resize_window`: the OS runs the drag, so it is as smooth as a framed one).
+        let weak = app.as_weak();
+        app.on_start_resize(move |dir| {
+            use slint::winit_030::winit::window::ResizeDirection as D;
+            use slint::winit_030::WinitWindowAccessor;
+            let d = match dir {
+                0 => D::North,
+                1 => D::South,
+                2 => D::West,
+                3 => D::East,
+                4 => D::NorthWest,
+                5 => D::NorthEast,
+                6 => D::SouthWest,
+                _ => D::SouthEast,
+            };
+            if let Some(a) = weak.upgrade() {
+                a.window().with_winit_window(|w| {
+                    let _ = w.drag_resize_window(d);
+                });
+            }
+        });
+    }
     {
         // Mini-player: relax the min-size, resize + always-on-top, persist the layout.
         let weak = app.as_weak();
@@ -580,6 +761,28 @@ fn main() -> Result<(), slint::PlatformError> {
                     let _ = w.drag_window();
                 });
             }
+        });
+    }
+    {
+        // The main titlebar: a press starts a native window move — unless it is the
+        // second press of a double-click (Windows' own time and distance limits), which
+        // the UI turns into maximize / restore. The move loop eats the click events, so
+        // the double-click can't come from the UI's own `double-clicked`.
+        let weak = app.as_weak();
+        let last: Rc<std::cell::Cell<Option<(std::time::Instant, f32, f32)>>> = Rc::default();
+        app.on_titlebar_press(move |x, y| {
+            let Some(a) = weak.upgrade() else { return false };
+            let (limit, slop) = double_click_limits(a.window().scale_factor());
+            let now = std::time::Instant::now();
+            if is_double_press(last.take(), (now, x, y), limit, slop) {
+                return true;
+            }
+            last.set(Some((now, x, y)));
+            use slint::winit_030::WinitWindowAccessor;
+            a.window().with_winit_window(|w| {
+                let _ = w.drag_window();
+            });
+            false
         });
     }
     {
@@ -774,7 +977,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         // Right-before-left, one overlay per click (`app.js:1668`). The right sidebar
         // is the worker's state, so that half is a command; the left panel's collapse
-        // flag lives in the UI and is set here directly, exactly as the "L" mark does.
+        // flag lives in the UI and is set here directly, exactly as the titlebar wordmark does.
         let tx = tx.clone();
         let weak = app.as_weak();
         app.on_dismiss_overlays(move || {
@@ -1078,6 +1281,38 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let tx = tx.clone();
+        app.on_sel_drag_begin(move |scope, row| {
+            let cmd = Cmd::SelectDragBegin { scope, row: row.max(0) as usize };
+            let _ = tx.send(if (0..LIST_SURFACES as i32).contains(&scope) { stamp_shown(scope as usize, cmd) } else { cmd });
+        });
+    }
+    {
+        let tx = tx.clone();
+        app.on_sel_drag_move(move |scope, y| {
+            let cmd = Cmd::SelectDragTo { scope, y };
+            let _ = tx.send(if (0..LIST_SURFACES as i32).contains(&scope) { stamp_shown(scope as usize, cmd) } else { cmd });
+        });
+    }
+    {
+        let tx = tx.clone();
+        app.on_sel_drag_end(move || {
+            let _ = tx.send(Cmd::SelectDragEnd);
+        });
+    }
+    {
+        let tx = tx.clone();
+        app.on_name_prompt_accept(move |name| {
+            let _ = tx.send(Cmd::PlaylistNamed(name.to_string()));
+        });
+    }
+    {
+        let tx = tx.clone();
+        app.on_name_prompt_cancel(move || {
+            let _ = tx.send(Cmd::PlaylistNameCancelled);
+        });
+    }
+    {
+        let tx = tx.clone();
         app.on_bp_create_playlist(move || {
             let _ = tx.send(Cmd::BpCreatePlaylist);
         });
@@ -1131,6 +1366,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let _tray = tray::install(app.as_weak());
 
     let r = app.run();
+    // A quit from the tray menu skips the close paths that flush the window record;
+    // whatever the last settled capture saw goes to disk here.
+    window_geom::save_if_changed();
     // The event loop returns here on quit and the worker thread is never unwound,
     // so this is the only place that can retire the engine — leave it running and
     // a phantom "Lightify" device stays advertised on the account.
@@ -1161,6 +1399,8 @@ async fn worker(
     }
     let Some(mut session) = obtain_session(&weak, &mut rx).await else { return };
     set_account(&weak, connected_status(&session));
+    // Signed in: drop "Connecting…"; the titlebar pill is for notices only.
+    set_status(&weak, String::new());
 
     // Bring up our OWN Spotify Connect device before anything else. Lightify is a
     // player, not a remote: without this the Web API has no device to target and
@@ -1207,10 +1447,16 @@ async fn worker(
     // backoff `last` can't be refreshed, so it may still describe the previous song —
     // see `last_is_stale`.
     let mut engine_track_name = String::new();
+    // `lightify_core::play_requests()` as of the engine's last track event: a change
+    // means the next track is a load we asked for (see `restore_repeat_after_load`).
+    let mut seen_play_requests = lightify_core::play_requests();
     // Guards `restore_queue` to run once per launch — the engine can come back up
     // again later (the watchdog restarting it after a lost sink), and re-queuing
     // the same persisted tracks a second time would duplicate them.
     let mut queue_restored = false;
+    // What was playing when the engine died on its own (context, track, position),
+    // picked up again once the watchdog's restart registers (`Event::Ready`).
+    let mut resume_after_restart: Option<(Option<String>, String, u64)> = None;
 
     // Drill-in state (the currently-open track list + its playback context).
     let mut tracks: Vec<Track> = Vec::new();
@@ -1276,6 +1522,10 @@ async fn worker(
     let mut bp_tracks: Vec<BeatportTrack> = Vec::new();
     // Live Beatport chart autoplay, if a chart row started playback.
     let mut bp_autoplay: Option<BpAutoplay> = None;
+    // The same, when the chart plays as one growing list on our own engine.
+    let mut bp_list: Option<BpList> = None;
+    // A station being resolved to follow a song played from search: (epoch, song uri).
+    let mut search_station: Option<(u64, String)> = None;
     // Assigns each new BpAutoplay's `id` — see its doc comment.
     let mut bp_autoplay_next_id: u64 = 0;
     // The `id` of whichever BpAutoplay is currently authoritative, or 0 for none.
@@ -1323,6 +1573,22 @@ async fn worker(
     // (scope, list version) the current selection was made against — see the check
     // at the bottom of the loop.
     let mut sel_version: (i32, u64) = (SEL_NONE, 0);
+    // A live hold-to-select drag: what was selected before it began (each drag adds
+    // to that), and the row it started on.
+    let mut drag_base: Option<std::collections::BTreeSet<usize>> = None;
+    let mut drag_from: usize = 0;
+    let mut drag_last: usize = 0;
+    // "Create playlist" waits on the name prompt: the command to finish once named.
+    let mut pending_create: Option<Cmd> = None;
+    // What was selected when the prompt opened (uris, rows, scope). The list under it
+    // can change while the user types (a track change re-reads the QUEUE, which drops
+    // its selection), and the playlist must still get what they picked.
+    let mut pending_sel: Option<(Vec<String>, std::collections::BTreeSet<usize>, i32)> = None;
+    // The Local library view: its state, and Local mode as the app last closed.
+    let mut local = local_ui::LocalState::default();
+    if local_ui::load_mode() {
+        local_ui::handle(&mut local, local_ui::LocalCmd::ModeChanged(true), &weak, &self_tx);
+    }
 
     let mut last: Option<PlaybackState> = None;
     let mut last_art = String::new();
@@ -1368,6 +1634,20 @@ async fn worker(
     let mut local_pause_at: Option<tokio::time::Instant> = None;
     // A one-off playback poll due at this instant, independent of the tick cadence.
     let mut poll_soon: Option<tokio::time::Instant> = None;
+    // Re-reads left while the Web API catches up with a track the engine already
+    // named (a natural track end reaches `me/player` a second or two late, and the
+    // one read `Event::Track` triggers would otherwise leave the old cover up for a
+    // whole poll interval).
+    let mut track_catchup: u8 = 0;
+    // Set when `Event::Track` updated `last` itself (no poll): the ticker then runs
+    // its after-a-poll work (RECENT re-read, Beatport refill) once.
+    let mut track_hook_due = false;
+    // The QUEUE panel asked to re-read while a read was already out: run one more
+    // when that one lands, instead of discarding it (see `Cmd::RefreshQueueSidebar`).
+    let mut queue_refetch = false;
+    // The track RECENT last saw playing; a change means the one before it just
+    // finished and belongs at the top of the list.
+    let mut recent_seen_track = String::new();
     // Local progress clock — see `ProgressClock`.
     let mut clock = poll_interval(PROGRESS_CLOCK);
     clock.tick().await;
@@ -1383,7 +1663,9 @@ async fn worker(
     // the extra Web-API traffic is one `me/player/queue` GET every 1.5s, only while
     // the user is looking at a Spotify-owned queue, and none the rest of the time.
     const QUEUE_POLL: Duration = Duration::from_millis(1500);
+    const QUEUE_ENGINE_QUIET: Duration = Duration::from_secs(60);
     let mut queue_ticker = poll_interval(QUEUE_POLL);
+    let mut dl_ticker = poll_interval(QUEUE_POLL);
     queue_ticker.tick().await;
     // Adaptive queue polling: every fetch that comes back unchanged doubles the wait
     // (1.5 → 3 → 6 → 12 s); a track change or a local queue write snaps it back.
@@ -1423,6 +1705,16 @@ async fn worker(
                         backoff_until = Some(now + Duration::from_secs(secs));
                         set_status(&weak, format!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
                     }
+                    // Still the previous track per the Web API? Read again shortly —
+                    // the cover, duration and liked state all come from this read.
+                    if track_catchup > 0 && backoff_until.is_none() && !engine_track_name.is_empty() {
+                        if !LAST_POLL_STALE.load(std::sync::atomic::Ordering::Relaxed) {
+                            track_catchup = 0;
+                        } else {
+                            track_catchup -= 1;
+                            poll_soon = Some(now + Duration::from_millis(600));
+                        }
+                    }
                     next_playback_poll = now
                         + playback_poll_every(
                             Duration::from_millis(poll_ms),
@@ -1430,6 +1722,11 @@ async fn worker(
                             engine_owns_playback(&last, &engine_device_id),
                         );
                 }
+            }
+            // DOWNLOADS while open: the bridge is local, so it can follow progress (and
+            // a just-added download) every 1.5 s instead of once per playback poll.
+            _ = dl_ticker.tick(), if sidebar_mode == 3 => {
+                spawn_downloads_refresh(&weak);
             }
             _ = queue_ticker.tick(), if sidebar_mode == 1 => {
                 let now = tokio::time::Instant::now();
@@ -1512,7 +1809,7 @@ async fn worker(
                         set_status(&weak, format!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
                     } else {
                         backoff_until = None;
-                        set_status(&weak, connected_status(&session));
+                        set_status(&weak, String::new());
                     }
                 }
                 // Downloads come from the local bridge, not Spotify, so they refresh
@@ -1521,25 +1818,34 @@ async fn worker(
                     // Re-read the bridge's queue each tick (the original polls it every 3s).
                     spawn_downloads_refresh(&weak);
                 }
-                if backoff_until.is_none() && now >= next_playback_poll {
-                    next_playback_poll = now
-                        + playback_poll_every(
-                            Duration::from_millis(poll_ms),
-                            &last,
-                            engine_owns_playback(&last, &engine_device_id),
-                        );
-                    let polled = refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
-                    if lightify_core::net::is_offline() {
-                        // Unreachable: probe again later, backing off, and say so once.
-                        next_playback_poll = now + net_probe;
-                        set_status(&weak, format!("Offline \u{2014} reconnecting (next try in {}s)", net_probe.as_secs()));
-                        net_probe = (net_probe * 2).min(NET_PROBE_MAX);
-                        was_offline = true;
-                    } else if was_offline {
-                        was_offline = false;
-                        net_probe = NET_PROBE_MIN;
-                        set_status(&weak, connected_status(&session));
-                    }
+                let poll_due = backoff_until.is_none() && now >= next_playback_poll;
+                // An engine track change applied without a poll (`Event::Track`) still
+                // owes the work below that follows a new track (RECENT, Beatport refill).
+                if poll_due || (track_hook_due && backoff_until.is_none()) {
+                    track_hook_due = false;
+                    let polled = if poll_due {
+                        next_playback_poll = now
+                            + playback_poll_every(
+                                Duration::from_millis(poll_ms),
+                                &last,
+                                engine_owns_playback(&last, &engine_device_id),
+                            );
+                        let polled = refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                        if lightify_core::net::is_offline() {
+                            // Unreachable: probe again later, backing off, and say so once.
+                            next_playback_poll = now + net_probe;
+                            set_status(&weak, format!("Offline \u{2014} reconnecting (next try in {}s)", net_probe.as_secs()));
+                            net_probe = (net_probe * 2).min(NET_PROBE_MAX);
+                            was_offline = true;
+                        } else if was_offline {
+                            was_offline = false;
+                            net_probe = NET_PROBE_MIN;
+                            set_status(&weak, String::new());
+                        }
+                        polled
+                    } else {
+                        None
+                    };
                     match polled {
                         Some(secs) => {
                             backoff_until = Some(now + Duration::from_secs(secs));
@@ -1596,8 +1902,23 @@ async fn worker(
                                 }
                             }
                             // QUEUE (1) has its own `queue_ticker`; DOWNLOADS (3) was
-                            // refreshed above. RECENT (2) just re-marks locally.
+                            // refreshed above. RECENT (2) re-marks locally — and when the
+                            // playing track changed, the one before it just finished:
+                            // re-read the list a few seconds later (Spotify adds it to
+                            // recently-played with a short lag), so it shows up without
+                            // closing and reopening the panel.
                             if sidebar_mode == 2 {
+                                let cur = current_id(&last);
+                                if cur != recent_seen_track {
+                                    if !recent_seen_track.is_empty() {
+                                        let tx = self_tx.clone();
+                                        tokio::spawn(async move {
+                                            tokio::time::sleep(Duration::from_secs(4)).await;
+                                            let _ = tx.send(Cmd::RefreshRecentSidebar);
+                                        });
+                                    }
+                                    recent_seen_track = cur;
+                                }
                                 refresh_sidebar(&weak, &self_tx, sidebar_mode, &mut sidebar_tracks, &last, &mut queue_mirror, &mut sidebar_generation).await;
                             }
                         }
@@ -1619,7 +1940,16 @@ async fn worker(
                         pending_query = Some(q);
                         search_deadline = Some(until);
                     } else {
-                        let searched = session.search(&q).await;
+                        let searched = match cached_search(&q) {
+                            Some(hit) => Ok(hit),
+                            None => {
+                                let r = session.search(&q).await;
+                                if let Ok(res) = &r {
+                                    cache_search(&q, res);
+                                }
+                                r
+                            }
+                        };
                         set_search_loading(&weak, false);
                         match searched {
                             Ok(res) => {
@@ -1656,6 +1986,97 @@ async fn worker(
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 let cmd = unstamp(cmd);
+                let cmd = match cmd {
+                    Cmd::Local(c) => {
+                        local_ui::handle(&mut local, c, &weak, &self_tx);
+                        continue;
+                    }
+                    Cmd::PlaylistNamed(n) if local_ui::wants_name(&local) => {
+                        local_ui::handle(&mut local, local_ui::LocalCmd::Named(Some(n)), &weak, &self_tx);
+                        continue;
+                    }
+                    Cmd::PlaylistNameCancelled if local_ui::wants_name(&local) => {
+                        local_ui::handle(&mut local, local_ui::LocalCmd::Named(None), &weak, &self_tx);
+                        continue;
+                    }
+                    // Media keys / tray / palette transport drive local playback while
+                    // it is the one going (or paused in Local mode).
+                    Cmd::TogglePlay | Cmd::Next | Cmd::Prev if local_ui::owns_transport(&local) => {
+                        let c = match cmd {
+                            Cmd::TogglePlay => local_ui::LocalCmd::TogglePlay,
+                            Cmd::Next => local_ui::LocalCmd::Next,
+                            _ => local_ui::LocalCmd::Prev,
+                        };
+                        local_ui::handle(&mut local, c, &weak, &self_tx);
+                        continue;
+                    }
+                    c => c,
+                };
+                // "Create playlist" asks for the name first — an in-theme prompt over the
+                // panel it was started from — and finishes when `PlaylistNamed` comes
+                // back. With nothing to save it falls through to the usual message.
+                let mut named: Option<String> = None;
+                let mut named_uris: Option<Vec<String>> = None;
+                let cmd = match cmd {
+                    c @ (Cmd::CreatePlaylistFromSelection | Cmd::BpCreatePlaylist | Cmd::SidebarCreatePlaylist)
+                        if match &c {
+                            Cmd::SidebarCreatePlaylist => !sidebar_tracks.is_empty(),
+                            Cmd::BpCreatePlaylist => sel_scope == SEL_BEATPORT && !selected.is_empty(),
+                            _ => !selected.is_empty(),
+                        } =>
+                    {
+                        let (side, n, what) = match &c {
+                            Cmd::SidebarCreatePlaylist => (1, sidebar_tracks.len(), "from your queue"),
+                            _ => (if sel_scope == SEL_SIDEBAR { 1 } else { 0 }, selected.len(), "selected"),
+                        };
+                        let note = format!("{n} {} {what}", if n == 1 { "track" } else { "tracks" });
+                        let _ = weak.upgrade_in_event_loop(move |a| {
+                            a.set_name_prompt_side(side);
+                            a.set_name_prompt_note(note.into());
+                            a.set_name_prompt_open(true);
+                        });
+                        let uris = scoped_selection_uris(
+                            sel_scope, &selected, &trk_view, &tracks, &search_actions, &sidebar_tracks, &s_tracks, false,
+                        );
+                        pending_sel = Some((uris, selected.clone(), sel_scope));
+                        pending_create = Some(c);
+                        continue;
+                    }
+                    Cmd::PlaylistNamed(name) => {
+                        let name = name.trim().to_string();
+                        if name.is_empty() && pending_create.is_some() {
+                            // Only spaces: keep the prompt up rather than closing it on
+                            // nothing.
+                            let _ = weak.upgrade_in_event_loop(|a| {
+                                a.set_name_prompt_note("Give the playlist a name".into());
+                                a.set_name_prompt_open(true);
+                            });
+                            continue;
+                        }
+                        match pending_create.take() {
+                            Some(c) => {
+                                named = Some(name);
+                                if let Some((uris, sel, scope)) = pending_sel.take() {
+                                    if selected.is_empty() && matches!(c, Cmd::BpCreatePlaylist) {
+                                        // Beatport rows don't move with playback, so the
+                                        // picked rows are still the picked tracks.
+                                        selected = sel;
+                                        sel_scope = scope;
+                                    }
+                                    named_uris = Some(uris);
+                                }
+                                c
+                            }
+                            None => continue,
+                        }
+                    }
+                    Cmd::PlaylistNameCancelled => {
+                        pending_create = None;
+                        pending_sel = None;
+                        continue;
+                    }
+                    other => other,
+                };
                 match cmd {
                     Cmd::Stamped { .. } => unreachable!("unstamp opens every stamp"),
                     Cmd::StaleClick => {
@@ -1706,6 +2127,15 @@ async fn worker(
                             // No settle poll: the engine's `Event::Track` for the new
                             // track already runs one — doing both read `me/player` twice.
                             engine::send(&serde_json::json!({ "cmd": "next" }).to_string());
+                            // Skipping forward out of repeat-one leaves repeat-all, as in
+                            // Spotify: librespot clears repeat-one on a skip (repeat-all
+                            // stays on underneath, see the engine's `Repeat`) and doesn't
+                            // report it. Only *next* does that — "previous" keeps
+                            // repeat-one, so this can't be inferred from a track change.
+                            if last.as_ref().is_some_and(|p| p.repeat_state == "track") {
+                                show_options(&weak, &mut last, None, Some("context".to_string()));
+                                set_repeat_choice("context");
+                            }
                         } else {
                             if let Err(e) = session.next().await {
                                 if is_player_restriction(&e) {
@@ -1737,8 +2167,7 @@ async fn worker(
                         }
                     }
                     Cmd::Drill(i) => {
-                        selected.clear();
-                        sel_anchor = None;
+                        drop_track_selection(&weak, &mut selected, &mut sel_anchor, &mut sel_scope, &trk_view);
                         // `i` is the *display* row index, so map it back through the sort view.
                         let src = if i == 0 { None } else { pl_view.get(i - 1).copied() };
                         // ...then drop a filter typed over the library (mapped first: the
@@ -1786,8 +2215,7 @@ async fn worker(
                         }
                     }
                     Cmd::Back => {
-                        selected.clear();
-                        sel_anchor = None;
+                        drop_track_selection(&weak, &mut selected, &mut sel_anchor, &mut sel_scope, &trk_view);
                         clear_list_filters(&weak);
                         pager = TrackPager::default();
                         tracks.clear();
@@ -1820,41 +2248,80 @@ async fn worker(
                         .await;
                         let src = trk_view.get(i).copied();
                         if let Some(t) = src.and_then(|k| tracks.get(k)).cloned() {
-                            // No context (Liked Songs): play from here on, in *display* order.
+                            // Warm the cover while the play request is out, so the
+                            // refresh after it usually finds it ready.
+                            prefetch_art(&t.album_art, &last_art);
+                            // No context (Liked Songs): the whole list as displayed,
+                            // from this row — on our own engine, with no length cap.
+                            // Liked Songs in its own (newest-first) order is a real
+                            // context the engine resolves whole — every saved track
+                            // follows, not just the pages scrolled into view so far.
+                            // Sorted A–Z or filtered, it's the list as shown instead.
+                            let liked_ctx = (pager.source == PagerSource::Liked
+                                && trk_mode != "alpha"
+                                && filter_of(&TRK_FILTER).is_empty())
+                                .then(|| liked_context(&session))
+                                .flatten();
                             let r = if let Some(ctx) = context.clone() {
-                                session.play_context(&ctx, &t.uri).await
+                                // On our engine when it's up, like a list play: it resolves
+                                // the context itself (no Web-API call, and no repeat to
+                                // restore afterwards — the load carries it).
+                                if engine_play_context(&ctx, &t.uri, 0, &last, &engine_device_id) {
+                                    Ok(true)
+                                } else {
+                                    session.play_context(&ctx, &t.uri).await.map(|()| true)
+                                }
+                            } else if liked_ctx.as_deref().is_some_and(|c| {
+                                engine_play_context(c, &t.uri, 0, &last, &engine_device_id)
+                            }) {
+                                Ok(true)
                             } else {
-                                let uris: Vec<String> = trk_view[i..]
+                                let uris: Vec<String> = trk_view
                                     .iter()
                                     .filter_map(|&k| tracks.get(k))
-                                    .take(50)
                                     .map(|x| x.uri.clone())
                                     .collect();
-                                session.play_uris(&uris).await
+                                play_track_list(&mut session, &uris, i, 0, &last, &engine_device_id).await
                             };
                             // Up-next is everything BELOW this row as displayed. A
                             // context play continues in the playlist's own order, which
                             // is not the sorted order on screen, so the panel has to
                             // mirror what the user is looking at.
-                            if r.is_ok() {
-                                // Without a context only the 50 uris above were sent, so
+                            if let Ok(whole) = r {
+                                // A Web-API fallback only sent `WEB_API_URIS_MAX` uris, so
                                 // only those can come next — listing the rest of a long
                                 // Liked Songs list here would show tracks that never play.
                                 let upcoming: Vec<Track> = trk_view[i + 1..]
                                     .iter()
                                     .filter_map(|&k| tracks.get(k))
-                                    .take(if context.is_some() { usize::MAX } else { 49 })
+                                    .take(if whole { usize::MAX } else { WEB_API_URIS_MAX - 1 })
                                     .cloned()
                                     .collect();
-                                queue_mirror = Some(QueueMirror::new(t.uri.clone(), upcoming));
+                                let previous = current_uri(&last);
+                                // Shuffled, the display order isn't what plays next —
+                                // for a context play as much as a list play; Spotify's
+                                // own queue (fetched by the panel) is.
+                                let shuffled = last.as_ref().is_some_and(|p| p.shuffle_state);
+                                queue_mirror = (!shuffled)
+                                    .then(|| QueueMirror::new(t.uri.clone(), upcoming).replacing(&previous));
                                 // A queue fetch dispatched before this play must not land
                                 // on top of the mirror it just replaced.
                                 sidebar_generation += 1;
                                 persist_mirror(&queue_mirror);
+                                // Show it now rather than on the panel's next tick.
+                                if sidebar_mode == 1 {
+                                    if let Some(m) = queue_mirror.as_ref() {
+                                        sidebar_tracks = m.upcoming.clone();
+                                        set_sidebar(
+                                            &weak, 1, build_side_rows(&sidebar_tracks, &t.id, false),
+                                            "No queued tracks".to_string(),
+                                        );
+                                    }
+                                }
                             }
                             launched_src = drill_src.clone();
                             if let Err(e) = r { set_status(&weak, format!("Play — {e}")); }
-                            settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                            refresh_soon(&mut poll_soon);
                         }
                     }
                     Cmd::Search(q) => {
@@ -1879,8 +2346,10 @@ async fn worker(
                         } else {
                             pending_query = Some(q);
                             set_search_loading(&weak, true);
+                            // Long enough that a word typed at normal speed is one
+                            // search, not one per pause between letters.
                             search_deadline =
-                                Some(tokio::time::Instant::now() + Duration::from_millis(300));
+                                Some(tokio::time::Instant::now() + Duration::from_millis(450));
                         }
                     }
                     Cmd::SearchFilter(f) => {
@@ -1943,10 +2412,27 @@ async fn worker(
                                     .await;
                                     // A one-off track has no library source behind it.
                                     launched_src = None;
-                                    if let Err(e) = session.play_uris(&[uri]).await {
-                                        set_status(&weak, format!("Play — {e}"));
+                                    // Songs queued by hand still play next (a load spares
+                                    // the user queue); only without any does a station
+                                    // follow, so the music doesn't just stop after one song.
+                                    let hand_queued = queue_mirror.as_ref().is_some_and(|m| m.queued > 0);
+                                    match play_track_list(&mut session, std::slice::from_ref(&uri), 0, 0, &last, &engine_device_id).await {
+                                        Ok(true) if !hand_queued => {
+                                            // Resolved in the background and appended
+                                            // behind the song (`Event::StationTracks`): the
+                                            // song starts at once, nothing it plays into
+                                            // is interrupted, and no queue requests are made.
+                                            let epoch = next_station_epoch();
+                                            engine::send(
+                                                &serde_json::json!({ "cmd": "stationtracks", "context_uri": uri, "seq": epoch })
+                                                    .to_string(),
+                                            );
+                                            search_station = Some((epoch, uri.clone()));
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => set_status(&weak, format!("Play \u{2014} {e}")),
                                     }
-                                    settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                                    refresh_soon(&mut poll_soon);
                                 }
                                 // Both stay in the search tab (`#search-drill`), which
                                 // is what the original does — the library list is a
@@ -1972,7 +2458,7 @@ async fn worker(
                                         Ok(t) => {
                                             s_tracks = t;
                                             push_search_tracks(&weak, &s_tracks);
-                                            set_status(&weak, connected_status(&session));
+                                            set_status(&weak, String::new());
                                         }
                                         Err(e) => set_status(&weak, format!("Album \u{2014} {e}")),
                                     }
@@ -1984,17 +2470,15 @@ async fn worker(
                                     // plain uri list, same as Liked Songs.
                                     s_context = None;
                                     set_search_drill(&weak, true, name.clone());
-                                    // Top-tracks-or-search-fallback returns everything
-                                    // it's going to in one shot; nothing to page.
-                                    s_pager = TrackPager::default();
-                                    match session.artist_tracks(&id, &name).await {
-                                        Ok(t) => {
-                                            s_tracks = t;
-                                            push_search_tracks(&weak, &s_tracks);
-                                            set_status(&weak, connected_status(&session));
-                                        }
-                                        Err(e) => set_status(&weak, format!("Artist \u{2014} {e}")),
-                                    }
+                                    // The artist's discography, a page of releases at a
+                                    // time as the list scrolls (`artists/{id}/top-tracks`
+                                    // 403s for this client id, and an artist-name track
+                                    // search mostly returns other artists).
+                                    s_pager = TrackPager::start(PagerSource::Artist(id), &name);
+                                    load_next_search_page(
+                                        &weak, &mut session, &mut s_pager, &mut s_tracks,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -2047,14 +2531,18 @@ async fn worker(
                         let result = if engine_owns_playback(&last, &engine_device_id) {
                             // The Web-API repeat flag doesn't reliably reach the local
                             // librespot device — spirc drives track advancement — so our
-                            // own device is told directly, as the host does.
-                            engine::send(&serde_json::json!({ "cmd": "repeat", "mode": next }).to_string());
+                            // own device is told directly, as the host does. `from` lets
+                            // it touch only the flag that changes.
+                            engine::send(&serde_json::json!({ "cmd": "repeat", "mode": next, "from": cur }).to_string());
                             Ok(())
                         } else {
                             session.set_repeat(next).await
                         };
                         match result {
-                            Ok(()) => poll_soon = Some(tokio::time::Instant::now() + Duration::from_millis(2500)),
+                            Ok(()) => {
+                                set_repeat_choice(next);
+                                poll_soon = Some(tokio::time::Instant::now() + Duration::from_millis(2500));
+                            }
                             Err(e) => {
                                 release_options_hold();
                                 show_options(&weak, &mut last, None, Some(cur));
@@ -2066,7 +2554,7 @@ async fn worker(
                     Cmd::AddQueue => {
                         if let Some(t) = last.as_ref().and_then(|p| p.track.clone()) {
                             let uri = t.uri.clone();
-                            match session.add_to_queue(&uri).await {
+                            match queue_one(&mut session, &uri, engine_owns_playback(&last, &engine_device_id)).await {
                                 Ok(()) => {
                                     // While the mirror owns the panel it IS the panel,
                                     // so an addition has to land in it or it would not
@@ -2112,8 +2600,7 @@ async fn worker(
                     Cmd::ListFilter(text) => {
                         // Whichever left list is showing: the open track list, else
                         // the library. Selections refer to rows, so they drop.
-                        selected.clear();
-                        sel_anchor = None;
+                        drop_track_selection(&weak, &mut selected, &mut sel_anchor, &mut sel_scope, &trk_view);
                         let count = if drilled {
                             set_filter(&TRK_FILTER, &text);
                             trk_view = sort_track_view(&tracks, &trk_mode, &trk_dir);
@@ -2250,6 +2737,14 @@ async fn worker(
                     }
                     Cmd::ToggleSidebar(mode) => {
                         let target = next_sidebar_mode(sidebar_mode, mode);
+                        // Another panel's rows must not stand in while this one loads
+                        // (an open panel's refresh keeps its rows up until the answer).
+                        if target != sidebar_mode {
+                            sidebar_tracks.clear();
+                        }
+                        if target == 2 {
+                            recent_seen_track = current_id(&last);
+                        }
                         sidebar_mode = target;
                         if target == 0 {
                             sidebar_tracks.clear();
@@ -2584,7 +3079,28 @@ async fn worker(
                         // the adaptive backoff starts over.
                         queue_quiet = 0;
                         queue_next_at = tokio::time::Instant::now();
-                        refresh_sidebar(&weak, &self_tx, sidebar_mode, &mut sidebar_tracks, &last, &mut queue_mirror, &mut sidebar_generation).await;
+                        // The refresh exists because Spotify's queue changed, so a
+                        // mirror copied from Spotify earlier is the thing that's stale.
+                        if queue_mirror.as_ref().is_some_and(|m| m.from_spotify) {
+                            queue_mirror = None;
+                        }
+                        if sidebar_mode == 1 && sidebar_fetches_in_flight() > 0 {
+                            // Don't start a second read that makes the first one stale
+                            // (a chart lining up sends these every second or so, and
+                            // the panel then never showed ANY answer): run one more
+                            // when the current read lands (`SidebarFetched`).
+                            queue_refetch = true;
+                        } else {
+                            refresh_sidebar(&weak, &self_tx, sidebar_mode, &mut sidebar_tracks, &last, &mut queue_mirror, &mut sidebar_generation).await;
+                        }
+                    }
+                    Cmd::RefreshRecentSidebar => {
+                        // A track just finished while RECENT is open: re-read it in the
+                        // background, keeping the rows on screen until the answer lands.
+                        if sidebar_mode == 2 {
+                            sidebar_generation += 1;
+                            spawn_sidebar_fetch(&self_tx, 2, sidebar_generation);
+                        }
                     }
                     Cmd::SidebarFetched { generation, mode, result } => {
                         // Stale: the panel was closed, switched to a different mode, or
@@ -2598,13 +3114,25 @@ async fn worker(
                                 // play, a restore) built one after this fetch went out —
                                 // fetches are only dispatched while there is none. That
                                 // mirror is newer than this answer, so the answer loses.
-                                Ok(_) if mode == 1 && queue_mirror.is_some() => {}
+                                // (Except a top-up of a mirror that was itself copied
+                                // from Spotify: that answer is the newer window.)
+                                Ok(_) if mode == 1 && queue_mirror.as_ref().is_some_and(|m| !m.from_spotify) => {}
                                 Ok(t) => {
                                     if mode == 1 {
                                         let same = t.len() == sidebar_tracks.len()
                                             && t.iter().zip(&sidebar_tracks).all(|(a, b)| a.uri == b.uri);
                                         queue_quiet = if same { (queue_quiet + 1).min(3) } else { 0 };
-                                        queue_next_at = tokio::time::Instant::now() + QUEUE_POLL * (1u32 << queue_quiet);
+                                        // While our engine plays, the queue only moves on a
+                                        // track change (re-read at once: `queue_seen_track`)
+                                        // or a write of ours (which schedules its own read);
+                                        // an unchanged answer can then wait a minute, not
+                                        // 1.5–12 s. Remote edits from a phone show within it.
+                                        let settled = if same && engine_owns_playback(&last, &engine_device_id) {
+                                            QUEUE_ENGINE_QUIET
+                                        } else {
+                                            QUEUE_POLL * (1u32 << queue_quiet)
+                                        };
+                                        queue_next_at = tokio::time::Instant::now() + settled;
                                     }
                                     // Backfill a mirror from Spotify's own queue, exactly
                                     // as the old inline fetch did — not just for plays
@@ -2617,7 +3145,13 @@ async fn worker(
                                             .map(|t| t.uri.clone())
                                             .unwrap_or_default();
                                         if !t.is_empty() && !playing_uri.is_empty() {
-                                            queue_mirror = Some(QueueMirror::new(playing_uri, t.clone()));
+                                            // Keep the hand-queued count across a top-up,
+                                            // so additions still land ahead of the context.
+                                            let queued = queue_mirror.as_ref().map_or(0, |m| m.queued).min(t.len());
+                                            let mut m = QueueMirror::from_spotify(playing_uri.clone(), t.clone());
+                                            m.queued = queued;
+                                            m.refill_for = playing_uri;
+                                            queue_mirror = Some(m);
                                             persist_mirror(&queue_mirror);
                                         }
                                     }
@@ -2640,19 +3174,18 @@ async fn worker(
                                 }
                             }
                         }
+                        // A refresh asked for while this read was out: run it now.
+                        if queue_refetch && sidebar_fetches_in_flight() == 0 {
+                            queue_refetch = false;
+                            if sidebar_mode == 1 {
+                                let _ = self_tx.send(Cmd::RefreshQueueSidebar);
+                            }
+                        }
                     }
                     Cmd::RemoveQueuedTrack(i) => {
-                        // No Spotify/librespot primitive removes one specific item from
-                        // the middle of a connect-state queue (`clear_next_tracks` keeps
-                        // user-queued tracks; there is no "remove at position N"). The
-                        // only way to actually drop one is: clear everything, then re-add
-                        // every *other* track from what was showing. Real costs, both
-                        // accepted deliberately rather than silently: this is O(queue
-                        // length) network calls for removing one track, and it re-queues
-                        // through the same batch-write path that has its own confirmed
-                        // eventual-consistency window (see QUEUE_SETTLE) — so the rebuilt
-                        // queue's *order* briefly racing on the very next Next click is a
-                        // real, known possibility, not eliminated by this feature.
+                        // Neither the Web API nor upstream librespot can remove one item
+                        // from the middle of a queue; the vendored Spirc can
+                        // (`removefromqueue`), on our own device only.
                         if sidebar_mode == 1 && !engine_owns_playback(&last, &engine_device_id) {
                             // Same reasoning as the Clear button: this whole mechanism is
                             // spirc-only (no Web-API "remove from queue" exists at all), so
@@ -2669,66 +3202,40 @@ async fn worker(
                             set_status(&weak, STALE_TRACK_NOTE.to_string());
                         } else if sidebar_mode == 1 {
                             if let Some(removed) = sidebar_tracks.get(i).cloned() {
-                                // Capped: the list can be a whole playlist's remainder
-                                // (a list-play mirror), and every kept row is one POST,
-                                // awaited inline. See `QUEUE_KEEP_MAX`.
-                                let kept: Vec<Track> = sidebar_tracks
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(idx, _)| *idx != i)
-                                    .map(|(_, t)| t.clone())
-                                    .take(QUEUE_KEEP_MAX)
-                                    .collect();
-                                let keep: Vec<String> = kept.iter().map(|t| t.uri.clone()).collect();
-                                // Same rule as the Clear button: emptying the queue to
-                                // rebuild it must not stop what is playing.
-                                let cur_uri = last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone());
-                                let playing_uri = cur_uri.clone().unwrap_or_default();
-                                clear_device_queue(&mut session, &last).await;
-                                // The reset deactivates the device for a moment; adding to a
-                                // queue that isn't there yet fails, so wait for the song to be
-                                // back before re-adding the others.
-                                let _ = queue_after_clear(&mut session, &playing_uri).await;
-                                let mut requeued = 0usize;
-                                let mut failed: Option<String> = None;
-                                for uri in &keep {
-                                    match session.add_to_queue(uri).await {
-                                        Ok(()) => requeued += 1,
-                                        Err(e) => { failed = Some(e); break; }
+                                // One local command to the engine (the vendored
+                                // `Spirc::remove_from_queue`): only that row goes; the rest of
+                                // the queue and the playlist/album it came from stay as they
+                                // were. The old way cleared the device queue and re-added at
+                                // most 20 of the rest as single tracks, which dropped the
+                                // context — playback stopped ~20 songs later.
+                                let nth = sidebar_tracks[..i].iter().filter(|t| t.uri == removed.uri).count();
+                                engine::send(
+                                    &serde_json::json!({ "cmd": "removefromqueue", "uri": removed.uri, "nth": nth }).to_string(),
+                                );
+                                sidebar_tracks.remove(i);
+                                if let Some(m) = queue_mirror.as_mut() {
+                                    if i < m.upcoming.len() {
+                                        m.upcoming.remove(i);
+                                        if i < m.queued {
+                                            m.queued -= 1;
+                                        }
+                                    }
+                                    if m.upcoming.is_empty() {
+                                        queue_mirror = None;
                                     }
                                 }
-                                if !keep.is_empty() {
-                                    last_bulk_queue_write = Some(tokio::time::Instant::now());
-                                    spawn_delayed_queue_refresh(&self_tx);
+                                // A lane's bookkeeping only loses the uri once no copy of it
+                                // is left in the queue.
+                                if !sidebar_tracks.iter().any(|t| t.uri == removed.uri) {
+                                    station_queued.retain(|u| *u != removed.uri);
+                                    bp_queued.retain(|u| *u != removed.uri);
                                 }
-                                let cur_uri = last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()).unwrap_or_default();
-                                // The panel follows the mirror, so the mirror must be what
-                                // actually got re-queued — otherwise the next queue tick
-                                // redrew the removed track right back (and persisted it).
-                                let rebuilt: Vec<Track> = kept.into_iter().take(requeued).collect();
-                                // What was re-added is still whatever lane queued it; what was
-                                // removed (or failed to come back) is no longer in the queue.
-                                // Wiping the bookkeeping here instead would leave the re-added
-                                // station tracks in the real queue with nothing tracking them.
-                                let back: std::collections::HashSet<&str> = rebuilt.iter().map(|t| t.uri.as_str()).collect();
-                                station_queued.retain(|u| back.contains(u.as_str()));
-                                bp_queued.retain(|u| back.contains(u.as_str()));
-                                let mut m = QueueMirror::new(cur_uri, rebuilt);
-                                m.queued = m.upcoming.len();
-                                sidebar_tracks = m.upcoming.clone();
-                                queue_mirror = if m.upcoming.is_empty() { None } else { Some(m) };
                                 sidebar_generation += 1;
                                 persist_mirror(&queue_mirror);
                                 let pid = current_id(&last);
                                 set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
-                                match failed {
-                                    Some(e) if requeued < keep.len() => set_status(
-                                        &weak,
-                                        format!("Removed \u{201c}{}\u{201d}, but only restored {requeued}/{} \u{2014} {e}",
-                                            removed.name, keep.len()),
-                                    ),
-                                    _ => set_status(&weak, format!("Removed \u{201c}{}\u{201d} from the queue", removed.name)),
-                                }
+                                spawn_delayed_queue_refresh(&self_tx);
+                                set_status(&weak, format!("Removed \u{201c}{}\u{201d} from the queue", removed.name));
                             }
                         }
                     }
@@ -2764,24 +3271,75 @@ async fn worker(
                                 // In QUEUE, jump *into* the queue: play the clicked track and
                                 // everything after it. Playing it alone replaced the whole
                                 // context, so the rest of the list on screen never played.
-                                let rest: Vec<Track> = if sidebar_mode == 1 {
+                                let mut rest: Vec<Track> = if sidebar_mode == 1 {
                                     sidebar_tracks[i + 1..]
                                         .iter()
                                         .filter(|x| !x.uri.is_empty())
-                                        .take(49)
                                         .cloned()
                                         .collect()
                                 } else {
                                     Vec::new()
                                 };
-                                let mut uris = vec![t.uri.clone()];
-                                uris.extend(rest.iter().map(|x| x.uri.clone()));
-                                let r = session.play_uris(&uris).await;
-                                if sidebar_mode == 1 && r.is_ok() {
-                                    // The panel now lists exactly what was sent.
-                                    queue_mirror = Some(QueueMirror::new(t.uri.clone(), rest));
-                                    sidebar_generation += 1;
-                                    persist_mirror(&queue_mirror);
+                                // A playlist/album track in QUEUE is a position in that
+                                // context: jump there inside it, so the whole rest of the
+                                // playlist still follows. As a bare uri list it replaced
+                                // the context with the ~20 rows the panel happened to
+                                // show, and playback stopped once they ran out. (Hand-
+                                // queued, station and Beatport rows aren't part of the
+                                // context, so they keep the uri-list jump.)
+                                let ctx = last
+                                    .as_ref()
+                                    .and_then(|p| p.context_uri.clone())
+                                    .filter(|c| {
+                                        c.starts_with("spotify:playlist:") || c.starts_with("spotify:album:") || is_liked_context(c)
+                                    });
+                                let hand_queued = queue_mirror.as_ref().is_some_and(|m| i < m.queued)
+                                    || station_queued.contains(&t.uri)
+                                    || bp_queued.contains(&t.uri);
+                                let previous = current_uri(&last);
+                                // A window onto Spotify's queue stays one after the jump,
+                                // so it keeps topping itself up (`QueueMirror::from_spotify`).
+                                let mut keep_spotify = false;
+                                let r = match ctx {
+                                    Some(ctx) if sidebar_mode == 1 && !station_active && !hand_queued => {
+                                        keep_spotify = queue_mirror.as_ref().is_some_and(|m| m.from_spotify);
+                                        if is_liked_context(&ctx) {
+                                            // Only our engine can start Liked Songs as a context.
+                                            if engine_play_context(&ctx, &t.uri, 0, &last, &engine_device_id) {
+                                                Ok(true)
+                                            } else {
+                                                Err("Playback engine isn\u{2019}t running".to_string())
+                                            }
+                                        } else if engine_play_context(&ctx, &t.uri, 0, &last, &engine_device_id) {
+                                            Ok(true)
+                                        } else {
+                                            session.play_context(&ctx, &t.uri).await.map(|()| true)
+                                        }
+                                    }
+                                    _ => {
+                                        let mut uris = vec![t.uri.clone()];
+                                        uris.extend(rest.iter().map(|x| x.uri.clone()));
+                                        play_track_list(&mut session, &uris, 0, 0, &last, &engine_device_id).await
+                                    }
+                                };
+                                if sidebar_mode == 1 {
+                                    if let Ok(whole) = r {
+                                        if !whole {
+                                            rest.truncate(WEB_API_URIS_MAX - 1);
+                                        }
+                                        // The panel now lists exactly what was sent — unless
+                                        // shuffle is on, where Spotify picks the order and
+                                        // only its own queue (fetched by the panel) is right.
+                                        let m = if keep_spotify {
+                                            QueueMirror::from_spotify(t.uri.clone(), rest)
+                                        } else {
+                                            QueueMirror::new(t.uri.clone(), rest)
+                                        };
+                                        let shuffled = last.as_ref().is_some_and(|p| p.shuffle_state);
+                                        queue_mirror = (!shuffled).then(|| m.replacing(&previous));
+                                        sidebar_generation += 1;
+                                        persist_mirror(&queue_mirror);
+                                    }
                                 }
                                 if let Err(e) = r {
                                     set_status(&weak, format!("Play — {e}"));
@@ -2844,6 +3402,7 @@ async fn worker(
                                 refill_pending: false,
                             };
                             let mut first: Vec<String> = Vec::new();
+                            let mut first_tracks: Vec<Track> = Vec::new();
                             let mut first_name = String::new();
                             let mut first_artists = String::new();
                             // Whether the row the user actually clicked is the one that
@@ -2859,8 +3418,8 @@ async fn worker(
                                 let is_clicked_row = seq.next_index == i;
                                 let bt = seq.source[seq.next_index].clone();
                                 seq.next_index += 1;
-                                match session.beatport_match(&bt.name, &bt.artists).await {
-                                    Ok(Some(t)) => {
+                                match session.beatport_match_with(&bt.name, &bt.artists, &bt.isrc).await {
+                                    Ok((Some(t), _)) => {
                                         if !seq.seen.insert(t.uri.clone()) {
                                             continue;
                                         }
@@ -2872,9 +3431,10 @@ async fn worker(
                                         if !t.id.is_empty() {
                                             seq.loaded_ids.push(t.id.clone());
                                         }
-                                        first.push(t.uri);
+                                        first.push(t.uri.clone());
+                                        first_tracks.push(t);
                                     }
-                                    Ok(None) => continue,
+                                    Ok((None, _)) => continue,
                                     Err(e) => {
                                         set_bp_status(&weak, format!("Match \u{2014} {e}"));
                                         break;
@@ -2887,6 +3447,83 @@ async fn worker(
                                     &weak,
                                     format!("No Spotify match for \u{201c}{label}\u{201d}"),
                                 );
+                            } else if engine::running() && !engine_device_id.is_empty() {
+                                // The whole chart as ONE list on our own engine: the first
+                                // match plays now, the rest is matched in the background
+                                // and appended in chart order (`BpMatched`). The old
+                                // queue-ahead lane topped up a handful at a time from the
+                                // playback poll, and dropped the chart for good the moment
+                                // that poll didn't recognise the playing track — it
+                                // stopped after the first 4–5.
+                                launched_src = None;
+                                // The QUEUE panel is built here, not read back from
+                                // Spotify: we know exactly what goes on the list and in
+                                // what order, and Spotify's queue read only ever returns
+                                // ~20 of it. The rest of the chart shows as placeholders
+                                // until it is found (`BpPanel`).
+                                let previous = current_uri(&last);
+                                queue_mirror = Some(
+                                    QueueMirror::new(first[0].clone(), first_tracks[1..].to_vec()).replacing(&previous),
+                                );
+                                sidebar_generation += 1;
+                                persist_mirror(&queue_mirror);
+                                match play_track_list(&mut session, &first, 0, 0, &last, &engine_device_id).await {
+                                    Err(e) => set_bp_status(&weak, format!("Play \u{2014} {e}")),
+                                    Ok(_) => {
+                                        let left = seq.source.len().saturating_sub(seq.next_index);
+                                        let prefix = if clicked_matched {
+                                            String::new()
+                                        } else {
+                                            format!(
+                                                "\u{201c}{label}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{first_name}\u{201d} instead. "
+                                            )
+                                        };
+                                        set_bp_status(
+                                            &weak,
+                                            if left > 0 {
+                                                format!("{prefix}Playing \u{2014} lining up the rest of the chart ({left} to go)")
+                                            } else {
+                                                format!("{prefix}Playing {first_name} \u{2014} {first_artists}")
+                                            },
+                                        );
+                                        bp_active_seq.store(seq.id, std::sync::atomic::Ordering::SeqCst);
+                                        let total = seq.source.len().saturating_sub(i);
+                                        bp_list = Some(BpList {
+                                            id: seq.id,
+                                            anchor: first[0].clone(),
+                                            lined_up: first.len(),
+                                            total,
+                                            next_index: seq.next_index,
+                                        });
+                                        set_bp_panel(Some(BpPanel {
+                                            seq_id: seq.id,
+                                            active: bp_active_seq.clone(),
+                                            title: bp_chart_title(&bp_genres, bp_idx, &bp_kind),
+                                            found: first.len(),
+                                            total,
+                                            waiting: bp_waiting(&seq.source, seq.next_index),
+                                            next_index: seq.next_index,
+                                            start: i,
+                                            done: left == 0,
+                                            missed: (seq.next_index - i).saturating_sub(first.len()),
+                                        }));
+                                        if sidebar_mode == 1 {
+                                            if let Some(m) = queue_mirror.as_ref() {
+                                                sidebar_tracks = m.upcoming.clone();
+                                                let pid = first_tracks[0].id.clone();
+                                                set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
+                                            }
+                                        }
+                                        if left > 0 {
+                                            let tx2 = self_tx.clone();
+                                            let active_seq = bp_active_seq.clone();
+                                            let (source, next_index, seen, seq_id) =
+                                                (seq.source.clone(), seq.next_index, seq.seen.clone(), seq.id);
+                                            tokio::spawn(bp_match_background(source, next_index, seen, seq_id, active_seq, tx2));
+                                        }
+                                    }
+                                }
+                                refresh_soon(&mut poll_soon);
                             } else {
                                 launched_src = None;
                                 if let Err(e) = session.play_uris(&first).await {
@@ -2948,6 +3585,45 @@ async fn worker(
                                 }
                             }
                             Err(e) => set_bp_status(&weak, e),
+                        }
+                    }
+                    Cmd::BpMatched { seq_id, tracks: found, next_index, done, error } => {
+                        let current = bp_list.as_ref().is_some_and(|l| l.id == seq_id)
+                            && bp_active_seq.load(std::sync::atomic::Ordering::SeqCst) == seq_id;
+                        if let (true, Some(list)) = (current, bp_list.as_mut()) {
+                            list.next_index = list.next_index.max(next_index);
+                            if !found.is_empty() {
+                                list.lined_up += found.len();
+                                let uris: Vec<String> = found.iter().map(|t| t.uri.clone()).collect();
+                                engine::send(
+                                    &serde_json::json!({ "cmd": "appendtracks", "anchor": list.anchor, "uris": uris })
+                                        .to_string(),
+                                );
+                                // The panel follows the list we built, not Spotify's
+                                // ~20-item read of it: the new tracks go on the end of
+                                // the mirror (appends land after everything else).
+                                if let Some(m) = queue_mirror.as_mut().filter(|m| !m.from_spotify) {
+                                    m.upcoming.extend(found.iter().cloned());
+                                }
+                            }
+                            let (n, total) = (list.lined_up, list.total);
+                            bp_panel_progress(seq_id, n, list.next_index, done);
+                            if sidebar_mode == 1 {
+                                if let Some(m) = queue_mirror.as_ref().filter(|m| !m.from_spotify) {
+                                    sidebar_tracks = m.upcoming.clone();
+                                    persist_mirror(&queue_mirror);
+                                    let pid = current_id(&last);
+                                    set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
+                                }
+                            }
+                            match (&error, done) {
+                                (_, true) => {
+                                    set_bp_status(&weak, format!("Playing the chart \u{2014} {n} of {total} tracks found on Spotify"));
+                                    bp_list = None;
+                                }
+                                (Some(e), false) => set_bp_status(&weak, format!("Lining up the chart \u{2014} {n} so far; retrying ({e})")),
+                                (None, false) => set_bp_status(&weak, format!("Playing the chart \u{2014} {n} lined up\u{2026}")),
+                            }
                         }
                     }
                     Cmd::BpRefillDone { seq_id, queued, seen, next_index, completed, error } => {
@@ -3133,6 +3809,10 @@ async fn worker(
                                 .get(index)
                                 .map(download_row_menu)
                                 .unwrap_or_default(),
+                            8 => local_ui::row_menu(&local, index),
+                            9 => local_ui::node_menu(&local, index),
+                            10 => local_ui::queue_menu(&local, index),
+                            11 => vec![CtxItem::new("ASCII lava screensaver", Cmd::LavaSaver)],
                             _ => Vec::new(),
                         };
                         // Menu actions run later (after `RunContext` re-queues them), so
@@ -3159,7 +3839,7 @@ async fn worker(
                     // ── Search result menus ────────────────────────────────────
                     Cmd::QueueSearchTrack(i) => {
                         if let Some(SearchAction::Track { uri, .. }) = search_actions.get(i).cloned() {
-                            match session.add_to_queue(&uri).await {
+                            match queue_one(&mut session, &uri, engine_owns_playback(&last, &engine_device_id)).await {
                                 Ok(()) => {
                                     mirror_queued(&mut queue_mirror, &mut sidebar_generation, &[uri], &[&search_results.tracks]);
                                     if sidebar_mode == 1 {
@@ -3203,7 +3883,57 @@ async fn worker(
                             if let Err(e) = session.play_context_start(&uri).await {
                                 set_status(&weak, format!("Play \u{2014} {e}"));
                             }
-                            settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                            refresh_soon(&mut poll_soon);
+                        }
+                    }
+                    Cmd::QueueSearchHit(i) => 'queue_hit: {
+                        let Some(action) = search_actions.get(i).cloned() else { break 'queue_hit };
+                        set_status(&weak, "Getting tracks\u{2026}".to_string());
+                        let (name, picked, total) = match search_hit_tracks(&mut session, &action).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                set_status(&weak, format!("Add to queue \u{2014} {e}"));
+                                break 'queue_hit;
+                            }
+                        };
+                        if picked.is_empty() {
+                            set_status(&weak, format!("Nothing playable in \u{201c}{name}\u{201d}"));
+                            break 'queue_hit;
+                        }
+                        // Appended after anything already queued, in the hit's own order:
+                        // one request per track, stopping at the first failure so a
+                        // mid-run rate limit reports what actually landed.
+                        let uris: Vec<String> = picked.iter().map(|t| t.uri.clone()).collect();
+                        let mut queued = 0usize;
+                        let mut failed: Option<String> = None;
+                        for uri in &uris {
+                            match queue_one(&mut session, uri, engine_owns_playback(&last, &engine_device_id)).await {
+                                Ok(()) => {
+                                    queued += 1;
+                                    if queued % 5 == 0 && queued < uris.len() {
+                                        set_status(&weak, format!("Adding to queue\u{2026} {queued}/{}", uris.len()));
+                                    }
+                                }
+                                Err(e) => {
+                                    failed = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        if queued > 0 {
+                            mirror_queued(&mut queue_mirror, &mut sidebar_generation, &uris[..queued], &[&picked]);
+                            last_bulk_queue_write = Some(tokio::time::Instant::now());
+                            spawn_delayed_queue_refresh(&self_tx);
+                        }
+                        let what = if queued == 1 { "1 track".to_string() } else { format!("{queued} tracks") };
+                        match failed {
+                            Some(e) if queued == 0 => set_status(&weak, format!("Add to queue \u{2014} {e}")),
+                            Some(e) => set_status(&weak, format!("Added {what} to queue, then stopped \u{2014} {e}")),
+                            None if total > queued && queued == QUEUE_HIT_MAX => set_status(
+                                &weak,
+                                format!("Added the first {queued} of {total} tracks from \u{201c}{name}\u{201d} to queue"),
+                            ),
+                            None => set_status(&weak, format!("Added {what} from \u{201c}{name}\u{201d} to queue")),
                         }
                     }
                     Cmd::SaveSearchItem(i) => {
@@ -3227,7 +3957,7 @@ async fn worker(
                     Cmd::BpQueue(i) => {
                         if let Some(bt) = bp_tracks.get(i).cloned() {
                             match session.beatport_match(&bt.name, &bt.artists).await {
-                                Ok(Some(t)) => match session.add_to_queue(&t.uri).await {
+                                Ok(Some(t)) => match queue_one(&mut session, &t.uri, engine_owns_playback(&last, &engine_device_id)).await {
                                     Ok(()) => {
                                         set_status(&weak, format!("Added to queue: {}", t.name));
                                         let uri = t.uri.clone();
@@ -3327,7 +4057,7 @@ async fn worker(
                                         let mut queued = 0usize;
                                         let mut failed: Option<String> = None;
                                         for uri in &uris {
-                                            match session.add_to_queue(uri).await {
+                                            match queue_one(&mut session, uri, engine_owns_playback(&last, &engine_device_id)).await {
                                                 Ok(()) => queued += 1,
                                                 Err(e) => { failed = Some(e); break; }
                                             }
@@ -3344,7 +4074,7 @@ async fn worker(
                                         }
                                     }
                                     _ => {
-                                        let name = timestamped_playlist_name("BP Selection");
+                                        let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("BP Selection"));
                                         match session.create_playlist(&name, &uris).await {
                                             Ok(pl) => {
                                                 set_status(&weak, format!("Created: {}{tail}", pl.name));
@@ -3366,7 +4096,7 @@ async fn worker(
                     // ── Sidebar menus ──────────────────────────────────────────
                     Cmd::SidebarQueueRow(i) => {
                         if let Some(uri) = sidebar_tracks.get(i).map(|t| t.uri.clone()) {
-                            match session.add_to_queue(&uri).await {
+                            match queue_one(&mut session, &uri, engine_owns_playback(&last, &engine_device_id)).await {
                                 Ok(()) => {
                                     let pool = sidebar_tracks.clone();
                                     mirror_queued(&mut queue_mirror, &mut sidebar_generation, &[uri], &[&pool]);
@@ -3396,7 +4126,7 @@ async fn worker(
                         if uris.is_empty() {
                             set_status(&weak, "Queue is empty".to_string());
                         } else {
-                            let name = timestamped_playlist_name("Queue");
+                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("Queue"));
                             match session.create_playlist(&name, &uris).await {
                                 Ok(pl) => {
                                     set_status(&weak, format!("Created: {}", pl.name));
@@ -3440,7 +4170,7 @@ async fn worker(
                             &weak, &mut selected, &mut sel_anchor, &mut sel_scope,
                             &mut s_tracks, &mut s_context, &mut s_pager,
                         );
-                        set_status(&weak, connected_status(&session));
+                        set_status(&weak, String::new());
                     }
                     Cmd::LoadMoreSearchResults => {
                         // Every single-type filter pages (the original paged PLAYLISTS
@@ -3491,24 +4221,28 @@ async fn worker(
                         )
                         .await;
                         if let Some(t) = s_tracks.get(i).cloned() {
+                            prefetch_art(&t.album_art, &last_art);
                             let r = if let Some(ctx) = s_context.clone() {
-                                session.play_context(&ctx, &t.uri).await
+                                if engine_play_context(&ctx, &t.uri, 0, &last, &engine_device_id) {
+                                    Ok(())
+                                } else {
+                                    session.play_context(&ctx, &t.uri).await
+                                }
                             } else {
-                                let uris: Vec<String> =
-                                    s_tracks[i..].iter().take(50).map(|x| x.uri.clone()).collect();
-                                session.play_uris(&uris).await
+                                let uris: Vec<String> = s_tracks.iter().map(|x| x.uri.clone()).collect();
+                                play_track_list(&mut session, &uris, i, 0, &last, &engine_device_id).await.map(|_| ())
                             };
                             // A search hit isn't a library row, so nothing to highlight.
                             launched_src = None;
                             if let Err(e) = r {
                                 set_status(&weak, format!("Play \u{2014} {e}"));
                             }
-                            settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                            refresh_soon(&mut poll_soon);
                         }
                     }
                     Cmd::QueueSearchDrillTrack(i) => {
                         if let Some(uri) = s_tracks.get(i).map(|t| t.uri.clone()) {
-                            match session.add_to_queue(&uri).await {
+                            match queue_one(&mut session, &uri, engine_owns_playback(&last, &engine_device_id)).await {
                                 Ok(()) => {
                                     mirror_queued(&mut queue_mirror, &mut sidebar_generation, &[uri], &[&s_tracks]);
                                     if sidebar_mode == 1 {
@@ -3592,6 +4326,9 @@ async fn worker(
                         settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                     }
                     Cmd::Note(msg) => set_status(&weak, msg),
+                    Cmd::LavaSaver => {
+                        let _ = weak.upgrade_in_event_loop(|a| local_backdrop::start_saver(&a));
+                    }
                     // ── Multi-select ───────────────────────────────────────────
                     Cmd::SelectClick { scope, row, ctrl, shift } => {
                         // A click in a different list drops the previous selection and
@@ -3625,14 +4362,71 @@ async fn worker(
                             push_selection(&weak, scope, &selected, &trk_view);
                         }
                     }
-                    Cmd::ClearSelection => {
-                        sel_anchor = None;
-                        if !selected.is_empty() {
-                            let scope = sel_scope;
+                    Cmd::SelectDragBegin { scope, row } => {
+                        // A drag in another list starts that list's selection afresh;
+                        // in the same list it ADDS to what is already selected.
+                        if scope != sel_scope {
+                            let old = sel_scope;
                             selected.clear();
-                            sel_scope = SEL_NONE;
+                            sel_anchor = None;
+                            if old != SEL_NONE {
+                                push_selection(&weak, old, &selected, &trk_view);
+                            }
+                            sel_scope = scope;
+                        }
+                        let base = selected.clone();
+                        let pickable = |r: usize| match scope {
+                            SEL_SEARCH => matches!(search_actions.get(r), Some(SearchAction::Track { .. })),
+                            SEL_BEATPORT => r < bp_tracks.len(),
+                            SEL_SIDEBAR => r < sidebar_tracks.len(),
+                            SEL_SEARCH_DRILL => r < s_tracks.len(),
+                            _ => r < trk_view.len(),
+                        };
+                        selected = drag_selection(scope, &base, row, row, &trk_view, pickable);
+                        drag_base = Some(base);
+                        drag_from = row;
+                        drag_last = row;
+                        push_selection(&weak, scope, &selected, &trk_view);
+                    }
+                    Cmd::SelectDragTo { scope, y } if scope == sel_scope && drag_base.is_some() => {
+                        let len = match scope {
+                            SEL_SEARCH => search_actions.len(),
+                            SEL_BEATPORT => bp_tracks.len(),
+                            SEL_SIDEBAR => sidebar_tracks.len(),
+                            SEL_SEARCH_DRILL => s_tracks.len(),
+                            _ => trk_view.len(),
+                        };
+                        let row = drag_row(scope, y, len);
+                        if row != drag_last {
+                            drag_last = row;
+                            let pickable = |r: usize| match scope {
+                                SEL_SEARCH => matches!(search_actions.get(r), Some(SearchAction::Track { .. })),
+                                _ => r < len,
+                            };
+                            let base = drag_base.clone().unwrap_or_default();
+                            selected = drag_selection(scope, &base, drag_from, row, &trk_view, pickable);
                             push_selection(&weak, scope, &selected, &trk_view);
                         }
+                    }
+                    Cmd::SelectDragTo { .. } => {}
+                    Cmd::SelectDragEnd => {
+                        if drag_base.take().is_some() {
+                            // Shift+click then extends from where the drag ended.
+                            sel_anchor = Some(drag_last);
+                        }
+                    }
+                    // Handled before this match (they never reach it).
+                    Cmd::PlaylistNamed(_) | Cmd::PlaylistNameCancelled | Cmd::Local(_) => {}
+                    Cmd::ClearSelection => {
+                        drag_base = None;
+                        sel_anchor = None;
+                        // Even with nothing selected here: the UI only sends this when
+                        // it believes something is, so its count must be reset or every
+                        // later plain click would land here again instead of playing.
+                        let scope = sel_scope;
+                        selected.clear();
+                        sel_scope = SEL_NONE;
+                        push_selection(&weak, scope, &selected, &trk_view);
                     }
                     Cmd::PlaySelection => {
                         bp_autoplay = None;
@@ -3651,13 +4445,16 @@ async fn worker(
                             set_status(&weak, "Selection has no playable tracks".to_string());
                         } else {
                             let n = uris.len();
-                            if let Err(e) = session.play_uris(&uris).await {
-                                set_status(&weak, format!("Play \u{2014} {e}"));
-                            } else {
-                                set_status(&weak, format!("Playing {n} selected"));
+                            match play_track_list(&mut session, &uris, 0, 0, &last, &engine_device_id).await {
+                                Err(e) => set_status(&weak, format!("Play \u{2014} {e}")),
+                                Ok(false) if n > WEB_API_URIS_MAX => set_status(
+                                    &weak,
+                                    format!("Playing the first {WEB_API_URIS_MAX} of {n} selected"),
+                                ),
+                                Ok(_) => set_status(&weak, format!("Playing {n} selected")),
                             }
                             launched_src = None;
-                            settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                            refresh_soon(&mut poll_soon);
                         }
                     }
                     Cmd::QueueSelection => {
@@ -3670,7 +4467,7 @@ async fn worker(
                             let mut queued = 0usize;
                             let mut failed: Option<String> = None;
                             for uri in &uris {
-                                match session.add_to_queue(uri).await {
+                                match queue_one(&mut session, uri, engine_owns_playback(&last, &engine_device_id)).await {
                                     Ok(()) => queued += 1,
                                     Err(e) => {
                                         failed = Some(e);
@@ -3698,14 +4495,17 @@ async fn worker(
                     }
                     Cmd::CreatePlaylistFromSelection => {
                         // Unlike Play/Queue this keeps unplayable rows: the host only
-                        // drops them for playback, not for a saved playlist.
-                        let uris = scoped_selection_uris(
-                            sel_scope, &selected, &trk_view, &tracks, &search_actions, &sidebar_tracks, &s_tracks, false,
-                        );
+                        // drops them for playback, not for a saved playlist. Named from
+                        // the prompt: what was selected when it opened.
+                        let uris = named_uris.take().unwrap_or_else(|| {
+                            scoped_selection_uris(
+                                sel_scope, &selected, &trk_view, &tracks, &search_actions, &sidebar_tracks, &s_tracks, false,
+                            )
+                        });
                         if uris.is_empty() {
                             set_status(&weak, "Selection has no playlist tracks".to_string());
                         } else {
-                            let name = timestamped_playlist_name("Selection");
+                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("Selection"));
                             match session.create_playlist(&name, &uris).await {
                                 Ok(pl) => {
                                     set_status(&weak, format!("Created: {}", pl.name));
@@ -3750,7 +4550,7 @@ async fn worker(
                                 if let Err(e) = session.play_context_start(&uri).await {
                                     set_status(&weak, format!("Play \u{2014} {e}"));
                                 }
-                                settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                                refresh_soon(&mut poll_soon);
                             }
                         }
                     }
@@ -3819,7 +4619,7 @@ async fn worker(
                     Cmd::QueueTrack { row, uri } => {
                         let i = resolve_track_row(&trk_view, &tracks, row, &uri);
                         if let Some(t) = i.and_then(|i| trk_view.get(i)).and_then(|&k| tracks.get(k)).cloned() {
-                            match session.add_to_queue(&t.uri).await {
+                            match queue_one(&mut session, &t.uri, engine_owns_playback(&last, &engine_device_id)).await {
                                 Ok(()) => {
                                     if let Some(m) = queue_mirror.as_mut() {
                                         m.enqueue(t);
@@ -3898,6 +4698,9 @@ async fn worker(
                             // and `engine_owns_playback` needs it to recognise OUR
                             // device even if the Web-API transfer had trouble.
                             engine_device_id = device_id.clone();
+                            if let Ok(mut d) = ENGINE_DEVICE_ID.lock() {
+                                *d = device_id.clone();
+                            }
                             // Adopt our own device so every Web-API transport call
                             // lands here rather than 404-ing for want of a device.
                             match adopt_engine_device(&mut session, &device_id).await {
@@ -3907,6 +4710,33 @@ async fn worker(
                                         refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await
                                     {
                                         backoff_until = Some(tokio::time::Instant::now() + Duration::from_secs(secs));
+                                    } else if let Some((ctx, track_uri, position_ms)) = resume_after_restart.take() {
+                                        // Back after an engine restart: the context when there
+                                        // is one, else the track plus the list it was in.
+                                        let r = match ctx.as_deref() {
+                                            Some(c) if c.starts_with("spotify:playlist:") || c.starts_with("spotify:album:") => {
+                                                session.play_at(Some(c), &track_uri, position_ms).await
+                                            }
+                                            Some(c) if is_liked_context(c)
+                                                && engine_play_context(c, &track_uri, position_ms, &last, &device_id) =>
+                                            {
+                                                Ok(())
+                                            }
+                                            _ => {
+                                                let mut uris = vec![track_uri.clone()];
+                                                if let Some(m) = queue_mirror.as_ref().filter(|m| m.current_uri == track_uri) {
+                                                    uris.extend(m.upcoming.iter().map(|t| t.uri.clone()));
+                                                }
+                                                play_track_list(&mut session, &uris, 0, position_ms, &last, &device_id)
+                                                    .await
+                                                    .map(|_| ())
+                                            }
+                                        };
+                                        match r {
+                                            Ok(()) => set_status(&weak, "Playback engine restarted \u{2014} resumed".to_string()),
+                                            Err(e) => set_status(&weak, format!("Resume \u{2014} {e}")),
+                                        }
+                                        refresh_soon(&mut poll_soon);
                                     } else if !queue_restored {
                                         queue_restored = true;
                                         restore_queue(&weak, &mut session, &last, &mut queue_mirror).await;
@@ -3924,6 +4754,9 @@ async fn worker(
                         // The engine knows about play/pause and seeks the instant they
                         // happen; trusting it beats waiting up to a poll interval.
                         engine::Event::Playing { playing } => {
+                            if playing {
+                                local_ui::spotify_started(&mut local, &weak);
+                            }
                             let was_playing = last.as_ref().is_some_and(|p| p.is_playing);
                             let ours = local_pause_at.take().is_some_and(|t| t.elapsed() < Duration::from_secs(3));
                             if was_playing && !playing && !ours {
@@ -3952,9 +4785,14 @@ async fn worker(
                                 }
                             }
                         }
-                        // Authoritative for our own device: take it as is.
+                        // Authoritative for our own device — except for the in-between
+                        // steps of a change the user just made (see
+                        // `accept_device_options`).
                         engine::Event::Options { shuffle, repeat } => {
-                            release_options_hold();
+                            let (shuffle, repeat) = accept_device_options(shuffle, repeat);
+                            if let Some(r) = repeat.as_deref() {
+                                set_repeat_choice(r);
+                            }
                             if let Some(pb) = last.as_mut() {
                                 if let Some(s) = shuffle {
                                     pb.shuffle_state = s;
@@ -3982,21 +4820,17 @@ async fn worker(
                         // straight away, then pull the full state (cover art, duration,
                         // liked) from the Web API — a poll interval later is too slow to
                         // feel connected to the music.
-                        engine::Event::Track { name, artists } => {
-                            // librespot drops repeat-one when a *different* track starts
-                            // (a skip), without reporting it; with repeat-one riding on
-                            // repeat-all that leaves repeat-all (see the engine's Repeat).
-                            // Mirror it now rather than after the next poll. The same
-                            // track starting again is repeat-one doing its job.
-                            let skipped_off_repeat_one = !engine_track_name.is_empty()
-                                && !name.is_empty()
-                                && name != engine_track_name
-                                && last.as_ref().is_some_and(|p| p.repeat_state == "track");
-                            if skipped_off_repeat_one {
-                                release_options_hold();
-                                show_options(&weak, &mut last, None, Some("context".to_string()));
-                                release_options_hold();
-                            }
+                        engine::Event::Track { name, artists, id, uri, artist_ids, album, duration_ms, cover } => {
+                            // (Skipping out of repeat-one is mirrored by `Cmd::Next`, not
+                            // here: a track change can also be "previous", which keeps
+                            // repeat-one, or a new load, which resets repeat entirely.)
+                            //
+                            // Did this track arrive because we asked Spotify to play
+                            // something? Then it's a load, and the load reset repeat.
+                            let requests = lightify_core::play_requests();
+                            let loaded = requests != seen_play_requests
+                                && lightify_core::last_play_request_age().is_some_and(|a| a < PLAY_LOAD_WINDOW);
+                            seen_play_requests = requests;
                             engine_track_name = name.clone();
                             if !name.is_empty() {
                                 let (n, a) = (name.clone(), artists.clone());
@@ -4005,9 +4839,56 @@ async fn worker(
                                     app.set_track_artist(a.into());
                                 });
                             }
-                            if backoff_until.is_none() {
-                                settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
+                            let engine_track = (!id.is_empty()).then(|| Track {
+                                id: id.clone(),
+                                name: name.clone(),
+                                artists: artists.clone(),
+                                artist_ids,
+                                album,
+                                album_id: String::new(),
+                                duration_ms,
+                                uri,
+                                album_art: cover,
+                                added_at: None,
+                                is_playable: true,
+                            });
+                            set_engine_now(&engine_device_id, engine_track.clone());
+                            let engine_loaded = take_engine_load();
+                            let owned = engine_owns_playback(&last, &engine_device_id);
+                            if let (true, false, Some(t), Some(mut pb)) = (owned, loaded, engine_track, last.clone()) {
+                                // The next song of what we are already playing: everything
+                                // the screen needs came with the event, so no Web-API read
+                                // (this used to cost 2–6 `me/player` reads per song). The
+                                // context, shuffle and repeat are unchanged by a track end.
+                                pb.track = Some(t);
+                                pb.duration_ms = duration_ms;
+                                pb.progress_ms = 0;
+                                save_resume(&pb);
+                                show_track_extras(&weak, &mut session, &pb, &mut last_art, &mut liked).await;
+                                last = Some(pb);
+                                track_hook_due = true;
+                                if engine_loaded && backoff_until.is_none() {
+                                    // Something new was loaded: one read for its context.
+                                    poll_soon = Some(tokio::time::Instant::now() + Duration::from_millis(2500));
+                                }
+                            } else if backoff_until.is_none() {
+                                if loaded {
+                                    restore_repeat_after_load(&weak, &mut session, &mut last, &engine_device_id, &name).await;
+                                }
+                                // On the loop's timer, not inline: the play that caused
+                                // this already scheduled one, and the two now coalesce
+                                // into a single read instead of two blocking ones.
+                                refresh_soon(&mut poll_soon);
+                                // ...and keep re-reading briefly until the Web API
+                                // reports this track (5 × 600 ms, then the normal poll).
+                                track_catchup = 5;
                             }
+                        }
+                        engine::Event::Inactive => {
+                            // Another device took over: the engine's track is no longer
+                            // the truth, and the screen should follow the new device.
+                            set_engine_now("", None);
+                            poll_soon = Some(tokio::time::Instant::now() + Duration::from_millis(1500));
                         }
                         engine::Event::NeedAuth { msg } => {
                             let msg = if msg.trim().is_empty() {
@@ -4026,6 +4907,27 @@ async fn worker(
                         // tracks in front of whatever they moved on to.
                         engine::Event::StationTracks { seq, .. } if !station_epoch_is_current(seq) => {
                             set_status(&weak, "Ignored a station that was no longer wanted".to_string());
+                        }
+                        engine::Event::StationTracks { uris, seq }
+                            if search_station.as_ref().is_some_and(|(s, _)| *s == seq) =>
+                        {
+                            let (_, anchor) = search_station.take().unwrap_or_default();
+                            let mut seen = std::collections::HashSet::from([anchor.clone()]);
+                            let picked: Vec<String> = uris.into_iter().filter(|u| seen.insert(u.clone())).collect();
+                            if !picked.is_empty() {
+                                let n = picked.len();
+                                // Appended to the song's own list, so it is just "what
+                                // comes next": Clear, Next and a new play all treat it
+                                // like any list, and there is no radio lane to end.
+                                engine::send(
+                                    &serde_json::json!({ "cmd": "appendtracks", "anchor": anchor, "uris": picked }).to_string(),
+                                );
+                                set_status(&weak, format!("Station \u{2014} {n} similar tracks after this one"));
+                                if sidebar_mode == 1 {
+                                    queue_mirror = None;
+                                    spawn_delayed_queue_refresh(&self_tx);
+                                }
+                            }
                         }
                         engine::Event::StationTracks { uris, .. } => {
                             // Drop the seed itself and anything already queued-worthy
@@ -4056,7 +4958,7 @@ async fn worker(
                                 let mut queued = 0usize;
                                 let mut failed: Option<String> = None;
                                 for uri in &picked {
-                                    match session.add_to_queue(uri).await {
+                                    match queue_one(&mut session, uri, engine_owns_playback(&last, &engine_device_id)).await {
                                         Ok(()) => queued += 1,
                                         Err(e) => { failed = Some(e); break; }
                                     }
@@ -4125,6 +5027,18 @@ async fn worker(
                         }
                         engine::Event::Exited => {
                             push_engine_status(&weak, "Not running".to_string(), false);
+                            set_engine_now("", None);
+                            // What our device was playing, before marking it stopped.
+                            let playing_here = last
+                                .as_ref()
+                                .filter(|p| p.is_playing && !engine_device_id.is_empty() && p.device_id == engine_device_id)
+                                .and_then(|p| {
+                                    p.track.as_ref().map(|t| (p.context_uri.clone(), t.uri.clone(), p.progress_ms))
+                                });
+                            if let Some(pb) = last.as_mut() {
+                                pb.is_playing = false;
+                            }
+                            let _ = weak.upgrade_in_event_loop(|app| app.set_playing(false));
                             // Ask who owns playback now — that is what separates "the
                             // user moved to another device" from "our audio sink died".
                             let moved = match session.devices().await {
@@ -4140,6 +5054,9 @@ async fn worker(
                                         .to_string(),
                                 );
                             } else if engine_watchdog.should_restart(std::time::Instant::now()) {
+                                // Our device was playing: carry on where it was once the
+                                // new engine is up, rather than leaving it silent.
+                                resume_after_restart = playing_here.or(resume_after_restart.take());
                                 set_status(
                                     &weak,
                                     "Playback engine stopped (audio device lost?) \u{2014} restarting\u{2026}"
@@ -4162,10 +5079,17 @@ async fn worker(
                     Cmd::SelectOutput(i) => {
                         // Row 0 is "System default" (stored as an empty string, the same
                         // convention the shipped host's config uses).
+                        let shown = SHOWN_OUTPUTS.lock().ok().and_then(|g| g.get(i.wrapping_sub(1)).cloned());
                         let chosen = if i == 0 {
                             String::new()
+                        } else if let Some(name) = shown {
+                            name
                         } else {
-                            engine::audio_outputs().get(i - 1).cloned().unwrap_or_default()
+                            // Not a row of the list on screen: say so and redraw it,
+                            // rather than silently saving "System default".
+                            set_status(&weak, "That output list changed \u{2014} pick again".to_string());
+                            push_outputs(&weak);
+                            continue;
                         };
                         let dir = lightify_core::config::data_dir();
                         match lightify_core::config::update_config(&dir, |cfg| cfg.audio_output = chosen.clone()) {
@@ -4180,6 +5104,9 @@ async fn worker(
                                         &serde_json::json!({ "cmd": "output", "device": chosen }).to_string(),
                                     );
                                 } else {
+                                    // Local playback may hold an output of its own
+                                    // meanwhile: move it too.
+                                    audio_output::set_target(Some(chosen.clone()));
                                     start_engine(&weak, &session, &self_tx);
                                 }
                                 push_outputs(&weak);
@@ -4598,6 +5525,246 @@ async fn selftest_queue_order() {
     }
 }
 
+/// Long lists play whole: a uri list goes to the engine uncapped (it was cut to 50, so
+/// Liked Songs stopped after 50), Liked Songs starts as its real context in the order
+/// the list shows, and repeat survives the load. Against the real account; same
+/// conditions as `--selftest-queue-order` (Lightify closed, a few quiet seconds).
+async fn selftest_long_lists() {
+    println!("long lists: uncapped track lists + Liked Songs as a context");
+    println!("{:-<72}", "");
+    let mut session = match Session::load() {
+        Ok(s) => s,
+        Err(e) => return println!("  session: {e}\nFAIL"),
+    };
+    if let Err(e) = session.ensure_fresh().await {
+        return println!("  session: {e}\nFAIL");
+    }
+    let Some(bin) = engine::find_binary() else { return println!("  engine missing\nFAIL") };
+    let (tx, rx) = std::sync::mpsc::channel::<engine::Event>();
+    let configured = lightify_core::config::load_config(&lightify_core::config::data_dir()).audio_output;
+    let output = engine::resolve_output(&configured).ok().flatten();
+    if engine::start(&bin, session.access_token(), output.as_deref(), move |ev| { let _ = tx.send(ev); }).is_err() {
+        return println!("  engine spawn failed\nFAIL");
+    }
+    let mut device = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while std::time::Instant::now() < deadline && device.is_empty() {
+        if let Ok(engine::Event::Ready { device_id }) = rx.recv_timeout(Duration::from_millis(500)) {
+            device = device_id;
+        }
+    }
+    if device.is_empty() || adopt_engine_device(&mut session, &device).await.is_err() {
+        return println!("  no device\nFAIL");
+    }
+    let volume_before = session.playback().await.ok().flatten().map(|p| p.volume_percent);
+    let _ = session.set_volume(6).await;
+    let mut liked: Vec<String> = Vec::new();
+    for offset in [0, 50, 100] {
+        if let Ok(p) = session.saved_tracks_page(offset).await {
+            liked.extend(p.tracks.into_iter().map(|t| t.uri).filter(|u| !u.is_empty()));
+        }
+    }
+    if liked.len() < 150 {
+        return println!("  need 150 liked songs (have {})\nFAIL", liked.len());
+    }
+    let mut fails: Vec<String> = Vec::new();
+    let mut check = |cond: bool, what: &str| {
+        println!("  {} {what}", if cond { "ok  " } else { "FAIL" });
+        if !cond {
+            fails.push(what.to_string());
+        }
+    };
+    let none: Option<PlaybackState> = None;
+    // Wait for the device to report `want` as the playing track.
+    async fn playing(session: &mut Session, want: &str) -> Option<PlaybackState> {
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            if let Ok(Some(pb)) = session.playback().await {
+                if pb.track.as_ref().is_some_and(|t| t.uri == want) {
+                    return Some(pb);
+                }
+            }
+        }
+        None
+    }
+
+    // 1. 150 uris, started at #70: plays #70, #71.. follow.
+    let ok = play_track_list(&mut session, &liked, 70, 0, &none, &device).await;
+    check(ok == Ok(true), "a uri list goes to the engine, not the capped Web API");
+    check(playing(&mut session, &liked[70]).await.is_some(), "starts at the clicked row (#70 of 150)");
+    let q = queue_uris(&mut session).await;
+    check(q.first() == Some(&liked[71]), "the next row follows it");
+
+    // 2. Near the end: everything to the end of the list is still there, past
+    // where the old cap of 50 would have cut it off.
+    let _ = play_track_list(&mut session, &liked, 140, 0, &none, &device).await;
+    check(playing(&mut session, &liked[140]).await.is_some(), "starts at #140 of 150");
+    let q = queue_uris(&mut session).await;
+    check(q == liked[141..150].to_vec(), "up-next is exactly #141..#149");
+
+    // 3. Liked Songs as its context, from row #60, with repeat carried by the load.
+    let ctx = format!("spotify:user:{}:collection", session.user_id());
+    let with_repeat = Some(PlaybackState { repeat_state: "context".into(), ..resume_as_playback(&ResumePoint {
+        track_uri: String::new(), context_uri: None, position_ms: 0, duration_ms: 0,
+        name: String::new(), artists: String::new(), album_art: String::new(),
+    }) });
+    check(engine_play_context(&ctx, &liked[60], 0, &with_repeat, &device), "Liked Songs context goes to the engine");
+    let pb = playing(&mut session, &liked[60]).await;
+    check(pb.is_some(), "Liked Songs context starts at the clicked row (#60)");
+    check(
+        pb.as_ref().and_then(|p| p.context_uri.as_deref()).is_some_and(is_liked_context),
+        "playback reports the Liked Songs context",
+    );
+    check(pb.as_ref().is_some_and(|p| p.repeat_state == "context"), "repeat survives the load");
+    let q = queue_uris(&mut session).await;
+    check(
+        q.len() >= 10 && q[..10] == liked[61..71],
+        "the context continues in the list's own (newest-first) order",
+    );
+
+    engine::send(&serde_json::json!({ "cmd": "repeat", "mode": "off", "from": "context" }).to_string());
+    let _ = session.pause().await;
+    if let Some(v) = volume_before {
+        let _ = session.set_volume(v).await;
+    }
+    if fails.is_empty() {
+        println!("PASS: long lists play whole");
+    } else {
+        println!("FAIL ({}): {}", fails.len(), fails.join(" | "));
+    }
+}
+
+/// A Beatport chart plays as one list that keeps growing in chart order (it used to
+/// stop after the first 4–5), and a song played from search gets its station appended
+/// behind it. Real chart (Overall top 100, first 15 rows), real account; same
+/// conditions as `--selftest-long-lists`.
+async fn selftest_bp_chart() {
+    println!("beatport chart + search station: lists that grow while they play");
+    println!("{:-<72}", "");
+    let mut session = match Session::load() {
+        Ok(s) => s,
+        Err(e) => return println!("  session: {e}\nFAIL"),
+    };
+    if let Err(e) = session.ensure_fresh().await {
+        return println!("  session: {e}\nFAIL");
+    }
+    let chart = match session.beatport_chart("", "tracks").await {
+        Ok(t) if t.len() >= 15 => t.into_iter().take(15).collect::<Vec<_>>(),
+        Ok(t) => return println!("  chart: only {} rows\nFAIL", t.len()),
+        Err(e) => return println!("  chart: {e}\nFAIL"),
+    };
+    let Some(bin) = engine::find_binary() else { return println!("  engine missing\nFAIL") };
+    let (tx, rx) = std::sync::mpsc::channel::<engine::Event>();
+    let configured = lightify_core::config::load_config(&lightify_core::config::data_dir()).audio_output;
+    let output = engine::resolve_output(&configured).ok().flatten();
+    if engine::start(&bin, session.access_token(), output.as_deref(), move |ev| { let _ = tx.send(ev); }).is_err() {
+        return println!("  engine spawn failed\nFAIL");
+    }
+    let mut device = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while std::time::Instant::now() < deadline && device.is_empty() {
+        if let Ok(engine::Event::Ready { device_id }) = rx.recv_timeout(Duration::from_millis(500)) {
+            device = device_id;
+        }
+    }
+    if device.is_empty() || adopt_engine_device(&mut session, &device).await.is_err() {
+        return println!("  no device\nFAIL");
+    }
+    let volume_before = session.playback().await.ok().flatten().map(|p| p.volume_percent);
+    let _ = session.set_volume(6).await;
+    let mut fails: Vec<String> = Vec::new();
+    let mut check = |cond: bool, what: &str| {
+        println!("  {} {what}", if cond { "ok  " } else { "FAIL" });
+        if !cond {
+            fails.push(what.to_string());
+        }
+    };
+    let none: Option<PlaybackState> = None;
+
+    // 1. Chart: the first match plays, the rest is matched and appended in order.
+    let mut first_at = 0;
+    let mut first = None;
+    while first.is_none() && first_at < chart.len() {
+        first = session.beatport_match(&chart[first_at].name, &chart[first_at].artists).await.ok().flatten();
+        first_at += 1;
+    }
+    let Some(first) = first else { return println!("  no chart row matched\nFAIL") };
+    let ok = play_track_list(&mut session, std::slice::from_ref(&first.uri), 0, 0, &none, &device).await;
+    check(ok == Ok(true), "the chart's first match plays on our engine");
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7));
+    let (ctx, mut crx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
+    let seen = std::collections::HashSet::from([first.uri.clone()]);
+    tokio::spawn(bp_match_background(chart.clone(), first_at, seen, 7, active.clone(), ctx));
+    let mut appended: Vec<String> = Vec::new();
+    let until = tokio::time::Instant::now() + Duration::from_secs(90);
+    while tokio::time::Instant::now() < until {
+        match tokio::time::timeout(Duration::from_secs(5), crx.recv()).await {
+            Ok(Some(Cmd::BpMatched { tracks, done, error, .. })) => {
+                if let Some(e) = error {
+                    println!("  (matcher retrying: {e})");
+                }
+                let uris: Vec<String> = tracks.into_iter().map(|t| t.uri).collect();
+                if !uris.is_empty() {
+                    engine::send(
+                        &serde_json::json!({ "cmd": "appendtracks", "anchor": first.uri, "uris": uris }).to_string(),
+                    );
+                    appended.extend(uris);
+                }
+                if done {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("  matched {} more of the {} chart rows after the first", appended.len(), chart.len() - first_at);
+    check(appended.len() >= 6, "well past the old 4–5 tracks");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let q = queue_uris(&mut session).await;
+    let want: Vec<String> = appended.iter().take(q.len()).cloned().collect();
+    check(!q.is_empty() && q == want, "up-next is the rest of the chart, in chart order");
+    // Abandoning the chart stops the matcher.
+    active.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // 2. An append meant for a list that's gone is dropped.
+    let other = appended.first().cloned().unwrap_or_default();
+    let _ = play_track_list(&mut session, std::slice::from_ref(&other), 0, 0, &none, &device).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    engine::send(&serde_json::json!({ "cmd": "appendtracks", "anchor": first.uri, "uris": [first.uri] }).to_string());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    check(queue_uris(&mut session).await.is_empty(), "a stale append doesn't land in the new list");
+
+    // 3. Search song: station appended behind it.
+    let seed = other;
+    let _ = play_track_list(&mut session, std::slice::from_ref(&seed), 0, 0, &none, &device).await;
+    let station = resolve_station(&rx, &seed);
+    let picked: Vec<String> = station.into_iter().filter(|u| *u != seed).collect();
+    println!("  station resolved {} tracks", picked.len());
+    engine::send(&serde_json::json!({ "cmd": "appendtracks", "anchor": seed, "uris": picked }).to_string());
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    let pb = session.playback().await.ok().flatten();
+    check(
+        pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.uri == seed),
+        "the song keeps playing while its station is added",
+    );
+    let q = queue_uris(&mut session).await;
+    check(
+        q.len() >= 10 && q[..10] == picked[..10.min(picked.len())],
+        "the station follows the song, in order",
+    );
+
+    let _ = session.pause().await;
+    if let Some(v) = volume_before {
+        let _ = session.set_volume(v).await;
+    }
+    if fails.is_empty() {
+        println!("PASS: charts and search songs keep playing");
+    } else {
+        println!("FAIL ({}): {}", fails.len(), fails.join(" | "));
+    }
+}
+
 /// Every uri in the device's up-next, in order.
 async fn queue_uris(session: &mut Session) -> Vec<String> {
     session.queue().await.unwrap_or_default().into_iter().map(|t| t.uri).collect()
@@ -4971,7 +6138,10 @@ async fn probe_clear_sync(strategy: &str, paused: bool) {
 async fn probe_station(seed: &str) {
     println!("station resolve probe");
     println!("{:-<72}", "");
-    let seed = if seed.starts_with("spotify:track:") {
+    // Any other full context uri (a playlist, `spotify:user:<id>:collection`, ...)
+    // is resolved as-is instead of as a station seed.
+    let raw = seed.starts_with("spotify:") && !seed.starts_with("spotify:track:");
+    let seed = if seed.starts_with("spotify:") {
         seed.to_string()
     } else {
         format!("spotify:track:{seed}")
@@ -4993,6 +6163,13 @@ async fn probe_station(seed: &str) {
         println!("  session: AUTH ERROR {e}\nFAIL");
         return;
     }
+    // `liked` = this account's Liked Songs context.
+    let (raw, seed) = if seed == "spotify:track:liked" {
+        (true, format!("spotify:user:{}:collection", session.user_id()))
+    } else {
+        (raw, seed)
+    };
+    println!("  resolving: {seed}");
     let configured = lightify_core::config::load_config(&lightify_core::config::data_dir()).audio_output;
     let output = engine::resolve_output(&configured).ok().flatten();
 
@@ -5013,7 +6190,7 @@ async fn probe_station(seed: &str) {
                 ready = true;
                 println!("  engine ready; resolving the station\u{2026}");
                 engine::send(
-                    &serde_json::json!({ "cmd": "stationtracks", "context_uri": seed }).to_string(),
+                    &serde_json::json!({ "cmd": "stationtracks", "context_uri": seed, "raw": raw }).to_string(),
                 );
                 asked = true;
             }
@@ -6049,9 +7226,10 @@ fn selftest_dismiss() {
     // Empty pane background: left of the centred artwork, above the controls.
     const BG: (f32, f32) = (350.0, 120.0);
     // Centre of the artwork (it has its own TouchArea, which must forward).
-    const ART: (f32, f32) = (622.0, 227.0);
-    // Centre of the play/pause button (measured from a render at this size).
-    const PLAY: (f32, f32) = (622.0, 462.0);
+    const ART: (f32, f32) = (634.0, 207.0);
+    // Centre of the play/pause button with the drawer open, which narrows the pane
+    // (288..680); measured from a render at this size.
+    const PLAY_DRAWER: (f32, f32) = (484.0, 457.0);
 
     struct ShotPlatform {
         window: Rc<MinimalSoftwareWindow>,
@@ -6075,6 +7253,8 @@ fn selftest_dismiss() {
         }
     };
     window.set_size(slint::PhysicalSize::new(W, H));
+    // Panels jump straight to their end state (no frames advance between clicks here).
+    app.global::<Motion>().set_slide(0);
 
     let closes = Rc::new(RefCell::new(0usize));
     let plays = Rc::new(RefCell::new(0usize));
@@ -6153,7 +7333,7 @@ fn selftest_dismiss() {
 
     // 5. The guard that matters: controls must still win over the background.
     app.set_sidebar_mode(1);
-    click(PLAY);
+    click(PLAY_DRAWER);
     check(*plays.borrow() == 1, "the play button still toggles playback", &mut fails);
     check(
         *closes.borrow() == 2,
@@ -6161,11 +7341,799 @@ fn selftest_dismiss() {
         &mut fails,
     );
 
+    // 6. Double-click with nothing left to dismiss toggles the expanded cover.
+    // (`pane-double-click` ignores a double-click within 700ms of a dismiss, timed by
+    // `animation-tick()`, which only moves when timers update.)
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    slint::platform::update_timers_and_animations();
+    app.set_sidebar_mode(0);
+    app.set_left_collapsed(true);
+    app.set_art_full(false);
+    click(BG);
+    click(BG);
+    check(app.get_art_full(), "a double-click on the bare pane expands the cover", &mut fails);
+    click(BG);
+    click(BG);
+    check(!app.get_art_full(), "...and another one shrinks it again", &mut fails);
+
+    // 7. Sidebars first: a double-click whose clicks closed a panel leaves the cover.
+    app.set_art_full(true);
+    app.set_left_collapsed(false);
+    click(BG);
+    click(BG);
+    check(app.get_left_collapsed(), "a double-click with the left panel open closes it", &mut fails);
+    check(app.get_art_full(), "...and does NOT shrink the expanded cover", &mut fails);
+
     println!("{:-<72}", "");
     if fails.is_empty() {
-        println!("PASS \u{2014} right-before-left dismiss, and controls keep their clicks");
+        println!("PASS \u{2014} right-before-left dismiss, sidebars-first double-click, and controls keep their clicks");
     } else {
         println!("FAIL \u{2014} {} check(s): {}", fails.len(), fails.join("; "));
+    }
+}
+
+/// Hold-to-select on a real track list, driven with real pointer events and the real
+/// hold timer (`RowTouch`): a quick click plays; a press held past the hold time
+/// starts a drag on that row, the drag reports the row under the pointer, release
+/// ends it without playing; with a selection a quick click clears it instead of
+/// playing; a second hold starts a second drag (the host adds it — `drag_selection`'s
+/// unit tests cover the arithmetic).
+fn selftest_hold() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
+    use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
+    use slint::LogicalPosition;
+    use std::cell::RefCell;
+
+    const W: u32 = 980;
+    const H: u32 = 660;
+    // First drilled track row's centre and its pitch (TrackRow is 46px), as in
+    // `selftest_menus`. Rows 0..8 are on screen at this size (the footer starts at 618).
+    const TRACK0_Y: f32 = 196.0;
+    const X: f32 = 120.0;
+
+    struct ShotPlatform {
+        window: Rc<MinimalSoftwareWindow>,
+    }
+    impl Platform for ShotPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+    }
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    if slint::platform::set_platform(Box::new(ShotPlatform { window: window.clone() })).is_err() {
+        println!("FAIL: could not install the headless platform");
+        return;
+    }
+    let app = match MainWindow::new() {
+        Ok(a) => a,
+        Err(e) => {
+            println!("WINDOW ERROR: {e}");
+            return;
+        }
+    };
+    app.global::<Motion>().set_slide(0);
+    let rows: Vec<Trk> = (0..30)
+        .map(|i| Trk {
+            uri: format!("spotify:track:t{i}").into(),
+            name: format!("Track {i}").into(),
+            artist: "Someone".into(),
+            playable: true,
+            active: false,
+            playing: false,
+            selected: false,
+        })
+        .collect();
+    app.set_tracks(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    app.set_drilled(true);
+    app.set_drill_title("Test".into());
+
+    let plays = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let begins = Rc::new(RefCell::new(Vec::<(i32, i32)>::new()));
+    let moves = Rc::new(RefCell::new(Vec::<(i32, f32)>::new()));
+    let ends = Rc::new(RefCell::new(0usize));
+    let clears = Rc::new(RefCell::new(0usize));
+    {
+        let p = plays.clone();
+        app.on_play_track(move |i| p.borrow_mut().push(i));
+    }
+    {
+        let b = begins.clone();
+        app.on_sel_drag_begin(move |s, r| b.borrow_mut().push((s, r)));
+    }
+    {
+        let m = moves.clone();
+        app.on_sel_drag_move(move |s, y| m.borrow_mut().push((s, y)));
+    }
+    {
+        let e = ends.clone();
+        app.on_sel_drag_end(move || *e.borrow_mut() += 1);
+    }
+    {
+        let c = clears.clone();
+        app.on_clear_selection(move || *c.borrow_mut() += 1);
+    }
+
+    window.set_size(slint::PhysicalSize::new(W, H));
+    // Timers (the hold) only tick on a shown window; no OS window exists here.
+    if let Err(e) = app.show() {
+        println!("WINDOW ERROR: {e}");
+        return;
+    }
+    let mut buffer = vec![Rgb565Pixel(0); (W * H) as usize];
+    let win = window.window();
+    let mut frame = || {
+        slint::platform::update_timers_and_animations();
+        window.request_redraw();
+        window.draw_if_needed(|r| {
+            r.render(&mut buffer, W as usize);
+        });
+    };
+    let at = |row: f32| LogicalPosition::new(X, TRACK0_Y + 46.0 * row);
+    let press = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerMoved { position: p });
+        win.dispatch_event(WindowEvent::PointerPressed { position: p, button: PointerEventButton::Left });
+    };
+    let release = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerReleased { position: p, button: PointerEventButton::Left });
+    };
+    // Hold long enough for the 300ms timer, letting it tick.
+    let hold = |frame: &mut dyn FnMut()| {
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            frame();
+        }
+    };
+
+    let mut fails: Vec<String> = Vec::new();
+    let check = |cond: bool, what: &str, fails: &mut Vec<String>| {
+        println!("  {} {what}", if cond { "ok  " } else { "FAIL" });
+        if !cond {
+            fails.push(what.to_string());
+        }
+    };
+
+    frame();
+    // 1. A quick click plays the row.
+    press(at(2.0));
+    frame();
+    release(at(2.0));
+    frame();
+    check(*plays.borrow() == vec![2], "a quick click plays the row", &mut fails);
+    check(begins.borrow().is_empty(), "...and starts no drag", &mut fails);
+    // Let the double-click window pass so the next press is a fresh click.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    frame();
+
+    // 2. Hold on row 3, drag to row 6, release.
+    press(at(3.0));
+    frame();
+    hold(&mut frame);
+    check(*begins.borrow() == vec![(SEL_TRACKS, 3)], "holding starts a drag on that row", &mut fails);
+    // The edge auto-scroll ticks from the hold on; before the pointer moves it must
+    // not see a stale position (it used to read the list's top: rows 0..=3 selected).
+    check(
+        moves.borrow().iter().all(|&(s, y)| drag_row(s, y, 30) == 3),
+        "...and selects nothing else before the pointer moves",
+        &mut fails,
+    );
+    win.dispatch_event(WindowEvent::PointerMoved { position: at(4.5) });
+    frame();
+    win.dispatch_event(WindowEvent::PointerMoved { position: at(6.0) });
+    frame();
+    let last = moves.borrow().last().copied();
+    let landed = last.map(|(s, y)| (s, drag_row(s, y, 30)));
+    check(landed == Some((SEL_TRACKS, 6)), "dragging reports the row under the pointer", &mut fails);
+    release(at(6.0));
+    frame();
+    check(*ends.borrow() == 1, "releasing ends the drag", &mut fails);
+    check(*plays.borrow() == vec![2], "...and does not play anything", &mut fails);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    frame();
+
+    // 3. With a selection, a quick click clears it instead of playing.
+    app.set_sel_count(4);
+    press(at(8.0));
+    frame();
+    release(at(8.0));
+    frame();
+    check(*clears.borrow() == 1, "with a selection, a quick click clears it", &mut fails);
+    check(*plays.borrow() == vec![2], "...instead of playing", &mut fails);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    frame();
+
+    // 4. A second hold (selection still there) starts another drag — added on top.
+    press(at(7.0));
+    frame();
+    hold(&mut frame);
+    release(at(7.0));
+    frame();
+    check(begins.borrow().last() == Some(&(SEL_TRACKS, 7)), "a second hold starts a second group", &mut fails);
+    check(*clears.borrow() == 1, "...without clearing the first", &mut fails);
+
+    println!("{:-<72}", "");
+    if fails.is_empty() {
+        println!("PASS \u{2014} quick click plays/clears, hold starts an additive drag-select");
+    } else {
+        println!("FAIL \u{2014} {} check(s): {}", fails.len(), fails.join("; "));
+    }
+}
+
+/// `--selftest-local-hold`: the Local track list's touch handling, headless — a quick
+/// click plays; holding 300 ms (not sooner) starts a drag-select that reports each row
+/// crossed and ends on release; with a selection a quick click clears it. Then the
+/// tree's collapse: the list takes its room, a carry reopens it for the drop and
+/// closes it after, and reopening gives the tree its room back. Last, a typed length
+/// in the filter panel commits on Enter.
+/// `--selftest-lava`: the lava's inputs, headless. A right-click on the blank Spotify
+/// pane and on Local's now-playing view opens the backdrop menu (kind 11); over the
+/// screensaver a mouse move does nothing, while a key or any mouse button ends it.
+fn selftest_lava() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
+    use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
+    use slint::LogicalPosition;
+    use std::cell::RefCell;
+
+    const W: u32 = 980;
+    const H: u32 = 660;
+    struct ShotPlatform {
+        window: Rc<MinimalSoftwareWindow>,
+    }
+    impl Platform for ShotPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+    }
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    if slint::platform::set_platform(Box::new(ShotPlatform { window: window.clone() })).is_err() {
+        println!("FAIL: could not install the headless platform");
+        return;
+    }
+    let app = match MainWindow::new() {
+        Ok(a) => a,
+        Err(e) => {
+            println!("WINDOW ERROR: {e}");
+            return;
+        }
+    };
+    let opened = Rc::new(RefCell::new(Vec::<(i32, i32)>::new()));
+    {
+        let o = opened.clone();
+        app.on_open_context(move |k, i| o.borrow_mut().push((k, i)));
+    }
+    let ends = Rc::new(RefCell::new(0usize));
+    {
+        let e = ends.clone();
+        app.on_lava_saver_end(move || *e.borrow_mut() += 1);
+    }
+    install_filter_helpers(&app);
+    window.set_size(slint::PhysicalSize::new(W, H));
+    if let Err(e) = app.show() {
+        println!("WINDOW ERROR: {e}");
+        return;
+    }
+    let mut buffer = vec![Rgb565Pixel(0); (W * H) as usize];
+    let win = window.window();
+    let mut frame = || {
+        slint::platform::update_timers_and_animations();
+        window.request_redraw();
+        window.draw_if_needed(|r| {
+            r.render(&mut buffer, W as usize);
+        });
+    };
+    frame();
+    let mut ok = true;
+    let mut check = |what: &str, pass: bool, detail: String| {
+        println!("{} {what}: {detail}", if pass { "ok  " } else { "FAIL" });
+        ok &= pass;
+    };
+    let right = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerMoved { position: p });
+        win.dispatch_event(WindowEvent::PointerPressed { position: p, button: PointerEventButton::Right });
+        win.dispatch_event(WindowEvent::PointerReleased { position: p, button: PointerEventButton::Right });
+    };
+    // Control: typing reaches the window's keys before anything happens (or the check
+    // after the screensaver proves nothing). A real window is active; this one says so.
+    win.dispatch_event(WindowEvent::WindowActiveChanged(true));
+    frame();
+    win.dispatch_event(WindowEvent::KeyPressed { text: "z".into() });
+    win.dispatch_event(WindowEvent::KeyReleased { text: "z".into() });
+    frame();
+    check("keys work before", app.get_list_filter() == "z", format!("filter {:?}", app.get_list_filter()));
+    app.set_list_filter("".into());
+    // Spotify: blank pane to the right of the cover.
+    let blank = LogicalPosition::new(930.0, 120.0);
+    right(blank);
+    frame();
+    check("Spotify pane right-click", *opened.borrow() == vec![(11, 0)], format!("{:?}", opened.borrow()));
+    check(
+        "menu at the pointer",
+        (app.get_ctx_x() - 930.0).abs() < 1.0 && (app.get_ctx_y() - 120.0).abs() < 1.0,
+        format!("({}, {})", app.get_ctx_x(), app.get_ctx_y()),
+    );
+    opened.borrow_mut().clear();
+    // Local's now-playing view.
+    app.set_local_mode(true);
+    app.set_local_now_open(true);
+    frame();
+    std::thread::sleep(Duration::from_millis(350));
+    frame();
+    right(blank);
+    frame();
+    check("Local now-playing right-click", *opened.borrow() == vec![(11, 0)], format!("{:?}", opened.borrow()));
+
+    // The screensaver's way out.
+    app.set_lava_saver(true);
+    frame();
+    let mid = LogicalPosition::new(400.0, 300.0);
+    win.dispatch_event(WindowEvent::PointerMoved { position: mid });
+    win.dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(420.0, 310.0) });
+    frame();
+    check("mouse move keeps it", *ends.borrow() == 0, format!("{} ends", ends.borrow()));
+    win.dispatch_event(WindowEvent::KeyPressed { text: "a".into() });
+    win.dispatch_event(WindowEvent::KeyReleased { text: "a".into() });
+    frame();
+    check("a key ends it", *ends.borrow() == 1, format!("{} ends", ends.borrow()));
+    for (n, b) in [(2, PointerEventButton::Left), (3, PointerEventButton::Right), (4, PointerEventButton::Middle)] {
+        win.dispatch_event(WindowEvent::PointerPressed { position: mid, button: b });
+        win.dispatch_event(WindowEvent::PointerReleased { position: mid, button: b });
+        frame();
+        check(&format!("{b:?} button ends it"), *ends.borrow() == n, format!("{} ends", ends.borrow()));
+    }
+    check("no menu opened under it", opened.borrow().len() == 1, format!("{:?}", opened.borrow()));
+    // Gone again: typing reaches the window's own keys (type-to-filter on the Library).
+    app.set_lava_saver(false);
+    app.set_local_mode(false);
+    frame();
+    win.dispatch_event(WindowEvent::KeyPressed { text: "q".into() });
+    win.dispatch_event(WindowEvent::KeyReleased { text: "q".into() });
+    frame();
+    check("keys work after it", app.get_list_filter() == "q", format!("filter {:?}", app.get_list_filter()));
+    println!("{}", if ok { "ALL OK" } else { "FAILED" });
+}
+
+/// `--selftest-lava-fullscreen`: the real window. Starting the screensaver takes it
+/// full screen with a frame up; ending it brings back the size it had. (It shows ~3 s.)
+fn selftest_lava_fullscreen() {
+    use std::cell::RefCell;
+    type Log = Rc<RefCell<Vec<(String, (u32, u32), bool)>>>;
+    let app = match MainWindow::new() {
+        Ok(a) => a,
+        Err(e) => {
+            println!("WINDOW ERROR: {e}");
+            return;
+        }
+    };
+    local_backdrop::install(&app);
+    if let Err(e) = app.show() {
+        println!("WINDOW ERROR: {e}");
+        return;
+    }
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    fn snap(app: &MainWindow, what: &str, log: &Log) {
+        let s = app.window().size();
+        log.borrow_mut().push((what.to_string(), (s.width, s.height), app.window().is_fullscreen()));
+    }
+    // What the window-geometry store would record, captured as the live window does.
+    let geom = Rc::new(RefCell::new(Vec::<String>::new()));
+    fn capture(app: &MainWindow) -> String {
+        use slint::winit_030::WinitWindowAccessor;
+        app.window().with_winit_window(|w| window_geom::capture(w, false));
+        let g = window_geom::get();
+        format!("normal {:?} maximized {}", g.normal.map(|r| (r.w, r.h)), g.maximized)
+    }
+    // One round: start, look, end, look. `max` maximizes the window first.
+    fn round(weak: slint::Weak<MainWindow>, l: Log, geom: Rc<RefCell<Vec<String>>>, max: bool, then: Box<dyn FnOnce()>) {
+        let tag = if max { "max " } else { "" };
+        if let Some(a) = weak.upgrade() {
+            if max {
+                a.window().set_maximized(true);
+            }
+        }
+        slint::Timer::single_shot(Duration::from_millis(700), move || {
+            let Some(a) = weak.upgrade() else { return };
+            snap(&a, &format!("{tag}before"), &l);
+            geom.borrow_mut().push(format!("{tag}before: {}", capture(&a)));
+            local_backdrop::start_saver(&a);
+            slint::Timer::single_shot(Duration::from_millis(1200), move || {
+                let Some(a) = weak.upgrade() else { return };
+                snap(&a, &format!("{tag}saver"), &l);
+                geom.borrow_mut().push(format!("{tag}saver: {}", capture(&a)));
+                let up = a.get_saver_bg().size().width > 0;
+                l.borrow_mut().push((format!("{tag}saver frame up: {up}"), (0, 0), a.get_lava_saver()));
+                a.invoke_lava_saver_end();
+                slint::Timer::single_shot(Duration::from_millis(900), move || {
+                    if let Some(a) = weak.upgrade() {
+                        snap(&a, &format!("{tag}after"), &l);
+                        l.borrow_mut().push((format!("{tag}after maximized: {}", a.window().is_maximized()), (0, 0), max));
+                        geom.borrow_mut().push(format!("{tag}after: {}", capture(&a)));
+                    }
+                    then();
+                });
+            });
+        });
+    }
+    {
+        let (w1, l1, g1) = (app.as_weak(), log.clone(), geom.clone());
+        let (w2, l2, g2) = (app.as_weak(), log.clone(), geom.clone());
+        round(w1, l1, g1, false, Box::new(move || {
+            round(w2, l2, g2, true, Box::new(|| {
+                let _ = slint::quit_event_loop();
+            }));
+        }));
+    }
+    let _ = slint::run_event_loop();
+    let (sw, sh) = {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+        // SAFETY: plain metric queries.
+        unsafe { (GetSystemMetrics(SM_CXSCREEN) as u32, GetSystemMetrics(SM_CYSCREEN) as u32) }
+    };
+    let log = log.borrow();
+    for (what, size, flag) in log.iter() {
+        println!("{what}: {}x{} (fullscreen/saver flag {flag})", size.0, size.1);
+    }
+    println!("primary screen: {sw}x{sh}");
+    for g in geom.borrow().iter() {
+        println!("geometry {g}");
+    }
+    let get = |w: &str| log.iter().find(|e| e.0 == w).map(|e| (e.1, e.2));
+    let sized = matches!(
+        (get("before"), get("saver"), get("after")),
+        (Some((b, false)), Some((s, true)), Some((a, false))) if s == (sw, sh) && a == b
+    );
+    let max_sized = matches!(
+        (get("max before"), get("max saver"), get("max after")),
+        (Some((b, false)), Some((s, true)), Some((a, false))) if s == (sw, sh) && a == b
+    );
+    let framed = log.iter().filter(|e| e.0.ends_with("saver frame up: true") && e.2).count() == 2;
+    let remax = log.iter().any(|e| e.0 == "max after maximized: true");
+    // The stored geometry is the same before, during and after each round.
+    let gs = geom.borrow();
+    let same = |tag: &str| {
+        let v: Vec<&str> = gs.iter().filter(|g| g.starts_with(tag) && (tag != "" || !g.starts_with("max"))).map(|g| g.split_once(": ").map(|x| x.1).unwrap_or("")).collect();
+        v.len() == 3 && v.iter().all(|x| *x == v[0])
+    };
+    let kept = same("") && same("max ");
+    println!("normal round {sized}, maximized round {max_sized} (re-maximized {remax}), frames {framed}, geometry kept {kept}");
+    println!("{}", if sized && max_sized && framed && remax && kept { "ALL OK" } else { "FAILED" });
+}
+
+fn selftest_local_hold() {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
+    use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
+    use slint::LogicalPosition;
+    use std::cell::RefCell;
+
+    const W: u32 = 980;
+    const H: u32 = 660;
+    // The first Local row's centre (titlebar 36 + header 52 + column heads 30, rows 36px).
+    const ROW0_Y: f32 = 136.0;
+    const X: f32 = 500.0;
+
+    struct ShotPlatform {
+        window: Rc<MinimalSoftwareWindow>,
+    }
+    impl Platform for ShotPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+    }
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    if slint::platform::set_platform(Box::new(ShotPlatform { window: window.clone() })).is_err() {
+        println!("FAIL: could not install the headless platform");
+        return;
+    }
+    let app = match MainWindow::new() {
+        Ok(a) => a,
+        Err(e) => {
+            println!("WINDOW ERROR: {e}");
+            return;
+        }
+    };
+    let rows: Vec<LocalRow> = (0..30)
+        .map(|i| LocalRow {
+            num: format!("{:02}", i + 1).into(),
+            title: format!("Track {i}").into(),
+            artist: "Someone".into(),
+            album: "Something".into(),
+            time: "3:00".into(),
+            playing: false,
+            selected: false,
+        })
+        .collect();
+    app.set_local_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    app.set_local_title("All music".into());
+    app.set_local_mode(true);
+
+    let plays = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let begins = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let tos = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let ends = Rc::new(RefCell::new(0usize));
+    let clears = Rc::new(RefCell::new(0usize));
+    {
+        let p = plays.clone();
+        app.on_local_row_activate(move |i| p.borrow_mut().push(i));
+    }
+    {
+        let b = begins.clone();
+        app.on_local_drag_begin(move |r| b.borrow_mut().push(r));
+    }
+    {
+        let t = tos.clone();
+        app.on_local_drag_to(move |r| t.borrow_mut().push(r));
+    }
+    {
+        let e = ends.clone();
+        app.on_local_drag_end(move || *e.borrow_mut() += 1);
+    }
+    {
+        let c = clears.clone();
+        app.on_local_row_clear_sel(move || *c.borrow_mut() += 1);
+    }
+
+    window.set_size(slint::PhysicalSize::new(W, H));
+    if let Err(e) = app.show() {
+        println!("WINDOW ERROR: {e}");
+        return;
+    }
+    let mut buffer = vec![Rgb565Pixel(0); (W * H) as usize];
+    let win = window.window();
+    let mut frame = || {
+        slint::platform::update_timers_and_animations();
+        window.request_redraw();
+        window.draw_if_needed(|r| {
+            r.render(&mut buffer, W as usize);
+        });
+    };
+    // Let the Spotify → Local cross-fade finish.
+    frame();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    frame();
+    let at = |row: f32| LogicalPosition::new(X, ROW0_Y + 36.0 * row);
+    let press = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerMoved { position: p });
+        win.dispatch_event(WindowEvent::PointerPressed { position: p, button: PointerEventButton::Left });
+    };
+    let release = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerReleased { position: p, button: PointerEventButton::Left });
+    };
+    let wait = |ms: u64, frame: &mut dyn FnMut()| {
+        for _ in 0..ms / 25 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            frame();
+        }
+    };
+
+    let mut fails: Vec<String> = Vec::new();
+    let check = |cond: bool, what: &str, fails: &mut Vec<String>| {
+        println!("  {} {what}", if cond { "ok  " } else { "FAIL" });
+        if !cond {
+            fails.push(what.to_string());
+        }
+    };
+
+    // 1. A quick click plays the row.
+    press(at(2.0));
+    frame();
+    release(at(2.0));
+    frame();
+    check(*plays.borrow() == vec![2], "a quick click plays the row", &mut fails);
+    check(begins.borrow().is_empty(), "...and starts no drag", &mut fails);
+    wait(600, &mut frame);
+
+    // 2. Hold on row 3: nothing at 200 ms, a drag by 400 ms; drag to row 6; release.
+    press(at(3.0));
+    frame();
+    wait(200, &mut frame);
+    check(begins.borrow().is_empty(), "no drag before the 300 ms hold", &mut fails);
+    wait(200, &mut frame);
+    check(*begins.borrow() == vec![3], "holding 300 ms starts a drag on that row", &mut fails);
+    wait(150, &mut frame);
+    check(
+        tos.borrow().iter().all(|&r| r == 3),
+        "...and selects nothing else before the pointer moves",
+        &mut fails,
+    );
+    win.dispatch_event(WindowEvent::PointerMoved { position: at(4.0) });
+    frame();
+    win.dispatch_event(WindowEvent::PointerMoved { position: at(6.0) });
+    frame();
+    check(tos.borrow().last() == Some(&6), "dragging reports the row under the pointer", &mut fails);
+    check(tos.borrow().contains(&4), "...and the rows crossed on the way", &mut fails);
+    check(tos.borrow().iter().all(|r| (3..=6).contains(r)), "...and no row it did not cross", &mut fails);
+    release(at(6.0));
+    frame();
+    check(*ends.borrow() == 1, "releasing ends the drag", &mut fails);
+    check(*plays.borrow() == vec![2], "...and does not play anything", &mut fails);
+    wait(600, &mut frame);
+
+    // 3. With a selection, a quick click clears it instead of playing.
+    app.set_local_sel_count(4);
+    press(at(8.0));
+    frame();
+    release(at(8.0));
+    frame();
+    check(*clears.borrow() == 1, "with a selection, a quick click clears it", &mut fails);
+    check(*plays.borrow() == vec![2], "...instead of playing", &mut fails);
+    app.set_local_sel_count(0);
+    wait(600, &mut frame);
+
+    // 4. Collapse the tree (titlebar wordmark): a click where the tree was now hits the list.
+    let at_x = |x: f32, row: f32| LogicalPosition::new(x, ROW0_Y + 36.0 * row);
+    app.set_left_collapsed(true);
+    wait(400, &mut frame);
+    press(at_x(150.0, 1.0));
+    frame();
+    release(at_x(150.0, 1.0));
+    frame();
+    check(*plays.borrow() == vec![2, 1], "collapsed: the list fills the tree's room", &mut fails);
+    wait(600, &mut frame);
+    // A carry reopens the tree for the drop, and closes it again when it ends.
+    app.set_local_carry_active(true);
+    frame();
+    check(!app.get_left_collapsed(), "a carry opens the collapsed tree", &mut fails);
+    app.set_local_carry_active(false);
+    frame();
+    check(app.get_left_collapsed(), "...and closes it again after", &mut fails);
+    // Reopened, the same spot is the tree again.
+    app.set_left_collapsed(false);
+    wait(400, &mut frame);
+    press(at_x(150.0, 1.0));
+    frame();
+    release(at_x(150.0, 1.0));
+    frame();
+    check(*plays.borrow() == vec![2, 1], "reopened: that spot is the tree again", &mut fails);
+
+    // 5. A right-click on a row (with a selection, and with the list scrolled) opens
+    //    the menu at the pointer, not somewhere else in the window.
+    let menus = Rc::new(RefCell::new(Vec::<(i32, i32, f32)>::new()));
+    {
+        let m = menus.clone();
+        let w = app.as_weak();
+        app.on_open_context(move |kind, index| {
+            let y = w.upgrade().map(|a| a.get_ctx_y()).unwrap_or(-1.0);
+            m.borrow_mut().push((kind, index, y));
+        });
+    }
+    app.set_local_sel_count(3);
+    let right = |p: LogicalPosition| {
+        win.dispatch_event(WindowEvent::PointerMoved { position: p });
+        win.dispatch_event(WindowEvent::PointerPressed { position: p, button: PointerEventButton::Right });
+        win.dispatch_event(WindowEvent::PointerReleased { position: p, button: PointerEventButton::Right });
+    };
+    right(at(4.0));
+    frame();
+    // Scroll the list down five rows, then right-click the row under the same spot.
+    win.dispatch_event(WindowEvent::PointerScrolled { position: at(4.0), delta_x: 0.0, delta_y: -180.0 });
+    wait(100, &mut frame);
+    right(at(4.0));
+    frame();
+    let got = menus.borrow().clone();
+    println!("  menus opened: {got:?} (pointer y {})", ROW0_Y + 36.0 * 4.0);
+    check(
+        got.len() == 2 && got.iter().all(|&(k, _, y)| k == 8 && (y - (ROW0_Y + 36.0 * 4.0)).abs() < 20.0),
+        "a right-click opens the row menu at the pointer (also scrolled)",
+        &mut fails,
+    );
+    app.set_local_sel_count(0);
+    app.set_ctx_open(false);
+    wait(100, &mut frame);
+
+    // 5b. Starting a track (the host re-pushes the rows to mark it playing) must not
+    //     move the scrolled list: the same spot clicked again is the same row.
+    let hits = Rc::new(RefCell::new(Vec::<i32>::new()));
+    {
+        let h = hits.clone();
+        let w = app.as_weak();
+        app.on_local_row_activate(move |i| {
+            h.borrow_mut().push(i);
+            if let Some(a) = w.upgrade() {
+                // What playing does (`local_ui::push_rows`): the rows again, this one
+                // marked playing.
+                use slint::Model;
+                let m = a.get_local_rows();
+                let rows: Vec<LocalRow> = (0..m.row_count())
+                    .filter_map(|r| m.row_data(r))
+                    .enumerate()
+                    .map(|(r, mut row)| {
+                        row.playing = r as i32 == i;
+                        row
+                    })
+                    .collect();
+                local_ui::apply_rows(&a, rows);
+            }
+        });
+    }
+    let click = |p: LogicalPosition, frame: &mut dyn FnMut()| {
+        win.dispatch_event(WindowEvent::PointerMoved { position: p });
+        win.dispatch_event(WindowEvent::PointerPressed { position: p, button: PointerEventButton::Left });
+        frame();
+        win.dispatch_event(WindowEvent::PointerReleased { position: p, button: PointerEventButton::Left });
+        frame();
+    };
+    click(at(6.0), &mut frame);
+    wait(600, &mut frame);
+    click(at(6.0), &mut frame);
+    wait(600, &mut frame);
+    // ...and near the end of the list (scrolled almost, not quite, to the bottom).
+    win.dispatch_event(WindowEvent::PointerScrolled { position: at(6.0), delta_x: 0.0, delta_y: -2000.0 });
+    wait(100, &mut frame);
+    win.dispatch_event(WindowEvent::PointerScrolled { position: at(6.0), delta_x: 0.0, delta_y: 50.0 });
+    wait(100, &mut frame);
+    click(at(6.0), &mut frame);
+    wait(600, &mut frame);
+    click(at(6.0), &mut frame);
+    wait(600, &mut frame);
+    let got = hits.borrow().clone();
+    check(
+        got.len() == 4 && got[0] == got[1] && got[2] == got[3],
+        &format!("starting a track keeps the scrolled list still (rows clicked: {got:?})"),
+        &mut fails,
+    );
+
+    // 6. The filter panel's typed length: click "Shortest", type, Enter → committed.
+    let lens = Rc::new(RefCell::new(Vec::<(bool, String)>::new()));
+    {
+        let l = lens.clone();
+        app.on_local_flt_set_len(move |longest, text| l.borrow_mut().push((longest, text.to_string())));
+    }
+    app.set_local_flt_mode(1);
+    app.set_local_filters_open(true);
+    wait(100, &mut frame);
+    // The Shortest field (filter card under the search field, below Show and its hint).
+    let field = LogicalPosition::new(80.0, 297.0);
+    win.dispatch_event(WindowEvent::PointerMoved { position: field });
+    win.dispatch_event(WindowEvent::PointerPressed { position: field, button: PointerEventButton::Left });
+    win.dispatch_event(WindowEvent::PointerReleased { position: field, button: PointerEventButton::Left });
+    frame();
+    for ch in ["9", "0", "\n"] {
+        win.dispatch_event(WindowEvent::KeyPressed { text: ch.into() });
+        win.dispatch_event(WindowEvent::KeyReleased { text: ch.into() });
+        frame();
+    }
+    check(
+        *lens.borrow() == vec![(false, "90".to_string())],
+        &format!("filters: typing in Shortest and pressing Enter commits it once (got {:?})", lens.borrow()),
+        &mut fails,
+    );
+
+    println!("{:-<72}", "");
+    if fails.is_empty() {
+        println!("PASS \u{2014} Local list: quick click plays/clears, a 300 ms hold drag-selects, the tree collapses");
+    } else {
+        println!("FAIL \u{2014} {} check(s): {}", fails.len(), fails.join("; "));
+    }
+}
+
+/// Whether `press` completes a double-click begun by `prev` (both `(time, x, y)`).
+fn is_double_press(
+    prev: Option<(std::time::Instant, f32, f32)>,
+    press: (std::time::Instant, f32, f32),
+    limit: Duration,
+    slop: f32,
+) -> bool {
+    prev.is_some_and(|(t, px, py)| {
+        press.0.saturating_duration_since(t) <= limit && (press.1 - px).abs() <= slop && (press.2 - py).abs() <= slop
+    })
+}
+
+/// The system's double-click time and the distance (logical px) the second click may
+/// stray from the first.
+fn double_click_limits(scale: f32) -> (Duration, f32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK};
+        // SAFETY: plain system queries with no arguments to validate.
+        let (ms, cx, cy) = unsafe { (GetDoubleClickTime(), GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)) };
+        let ms = if ms == 0 { 500 } else { ms };
+        // The metric is the whole rectangle around the first click.
+        let slop = (cx.max(cy).max(4) as f32 / 2.0) / scale.max(0.5);
+        (Duration::from_millis(ms as u64), slop)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = scale;
+        (Duration::from_millis(500), 2.0)
     }
 }
 
@@ -6332,10 +8300,10 @@ fn selftest_menus() {
     let mut buffer = vec![Rgb565Pixel(0); (W * H) as usize];
 
     // Row centres at 980x660, measured off the --shot-ctx renders: the library list
-    // starts under the tab bar + sort toolbar, ListRow is 46px, TrackRow is 40px.
-    const LIKED_Y: f32 = 118.0;
-    const PLAYLIST1_Y: f32 = 164.0;
-    const TRACK0_Y: f32 = 148.0;
+    // starts under the tab control + sort toolbar, ListRow is 52px, TrackRow is 46px.
+    const LIKED_Y: f32 = 154.0;
+    const PLAYLIST1_Y: f32 = 206.0;
+    const TRACK0_Y: f32 = 196.0;
     const ROW_X: f32 = 120.0;
 
     let mut fails: Vec<String> = Vec::new();
@@ -6426,7 +8394,7 @@ fn selftest_menus() {
 
 
 
-    let row_y = |i: f32| TRACK0_Y + 40.0 * i;
+    let row_y = |i: f32| TRACK0_Y + 46.0 * i;
 
     // 6. Modifier DELIVERY, proven on its own with the shell's already-shipped
     //    Ctrl+K palette shortcut — it reads `modifiers.control` from exactly the
@@ -6513,8 +8481,20 @@ fn selftest_menus() {
         &mut fails,
     );
 
-    // 11. a plain click still plays the row it hit (a real pointer event)
+    // 11. with rows selected, a quick plain click clears them instead of playing —
+    //     that is how a selection is dropped (`RowTouch`)
     app.set_ctx_open(false);
+    win.dispatch_event(WindowEvent::PointerMoved { position: at(row_y(6.0)) });
+    win.dispatch_event(WindowEvent::PointerPressed { position: at(row_y(6.0)), button: PointerEventButton::Left });
+    win.dispatch_event(WindowEvent::PointerReleased { position: at(row_y(6.0)), button: PointerEventButton::Left });
+    check(
+        activated.borrow().is_empty() && app.get_sel_count() == 0,
+        "with rows selected, a quick click clears them instead of playing",
+        &mut fails,
+    );
+    // 12. ...and with nothing selected, a plain click plays the row it hit (past the
+    //     double-click window, so it is a fresh click)
+    std::thread::sleep(std::time::Duration::from_millis(600));
     win.dispatch_event(WindowEvent::PointerMoved { position: at(row_y(6.0)) });
     win.dispatch_event(WindowEvent::PointerPressed { position: at(row_y(6.0)), button: PointerEventButton::Left });
     win.dispatch_event(WindowEvent::PointerReleased { position: at(row_y(6.0)), button: PointerEventButton::Left });
@@ -7053,45 +9033,16 @@ async fn refresh_playback(
             // A shuffle/repeat change the user just made wins over a poll that
             // hasn't caught up with it yet.
             apply_options_hold(&mut pb);
+            note_polled_repeat(&pb);
+            // Our engine already said what it is playing; a read that still reports
+            // the track before it (the Web API lags a natural track end by a second
+            // or two) must not put the old title and cover back up.
+            let stale = engine_now_override(&mut pb, last);
+            LAST_POLL_STALE.store(stale, std::sync::atomic::Ordering::Relaxed);
             // Real playback supersedes a resume offer, and becomes the next one.
             take_resume_offer();
             save_resume(&pb);
-            // Fetch + decode the cover only when the art URL changes (not every poll).
-            let art_url = pb.track.as_ref().map(|t| t.album_art.clone()).unwrap_or_default();
-            // Before the push, so the media flyout picks up the new cover together
-            // with the new title.
-            #[cfg(windows)]
-            media_controls::set_art_url(&art_url);
-            push_now_playing(weak, &pb);
-            if art_url != *last_art {
-                *last_art = art_url.clone();
-                // A failed fetch/decode clears the art rather than leaving the
-                // previous track's cover (and accent) up for the whole new track.
-                if art_url.is_empty() {
-                    clear_art(weak);
-                } else {
-                    let decoded = match take_prefetched_art(&art_url) {
-                        Some(d) => Some(d),
-                        None => session.fetch_bytes(&art_url).await.ok().and_then(|b| decode_art(&b)),
-                    };
-                    match decoded {
-                        Some((rgba, w, h, glow)) => set_art(weak, rgba, w, h, glow),
-                        None => clear_art(weak),
-                    }
-                }
-            }
-            // Liked state follows the track: one me/tracks/contains per track change,
-            // not per poll (mirrors the host's checkLiked on trackchanged).
-            let tid = pb.track.as_ref().map(|t| t.id.clone()).unwrap_or_default();
-            if tid != liked.id {
-                liked.id = tid.clone();
-                liked.on = if tid.is_empty() {
-                    false
-                } else {
-                    session.is_track_saved(&tid).await.unwrap_or(false)
-                };
-                push_liked(weak, liked.on, false);
-            }
+            show_track_extras(weak, session, &pb, last_art, liked).await;
             *last = Some(pb);
             None
         }
@@ -7129,6 +9080,93 @@ async fn refresh_playback(
             None
         }
     }
+}
+
+/// Push `pb` to the now-playing view, then its cover (fetched and decoded only when
+/// the art URL changed) and its liked state (one `me/library/contains` per track
+/// change, not per poll — mirrors the host's checkLiked on trackchanged).
+async fn show_track_extras(
+    weak: &slint::Weak<MainWindow>,
+    session: &mut Session,
+    pb: &PlaybackState,
+    last_art: &mut String,
+    liked: &mut LikeState,
+) {
+    let art_url = pb.track.as_ref().map(|t| t.album_art.clone()).unwrap_or_default();
+    // Before the push, so the media flyout picks up the new cover together with the
+    // new title.
+    #[cfg(windows)]
+    media_controls::set_art_url(&art_url);
+    push_now_playing(weak, pb);
+    if art_url != *last_art {
+        *last_art = art_url.clone();
+        // A failed fetch/decode clears the art rather than leaving the previous
+        // track's cover (and accent) up for the whole new track.
+        if art_url.is_empty() {
+            clear_art(weak);
+        } else {
+            let decoded = match take_prefetched_art(&art_url) {
+                Some(d) => Some(d),
+                None => session.fetch_bytes(&art_url).await.ok().and_then(|b| decode_art(&b)),
+            };
+            match decoded {
+                Some((rgba, w, h, glow)) => set_art(weak, rgba, w, h, glow),
+                None => clear_art(weak),
+            }
+        }
+    }
+    let tid = pb.track.as_ref().map(|t| t.id.clone()).unwrap_or_default();
+    if tid != liked.id {
+        liked.id = tid.clone();
+        liked.on = if tid.is_empty() {
+            false
+        } else {
+            session.is_track_saved(&tid).await.unwrap_or(false)
+        };
+        push_liked(weak, liked.on, false);
+    }
+}
+
+/// What our own engine last said it is playing (`engine::Event::Track`), and on which
+/// Connect device. While that device is the one Spotify reports active, this is the
+/// truth about the track: the engine knows the moment it changes, the Web API a
+/// second or two later.
+struct EngineNow {
+    device_id: String,
+    track: Track,
+}
+
+static ENGINE_NOW: std::sync::Mutex<Option<EngineNow>> = std::sync::Mutex::new(None);
+/// Whether the last `me/player` read was behind the engine (see `engine_now_override`).
+/// The post-load catch-up keeps re-reading only while this holds.
+static LAST_POLL_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_engine_now(device_id: &str, track: Option<Track>) {
+    if let Ok(mut g) = ENGINE_NOW.lock() {
+        *g = track.map(|track| EngineNow { device_id: device_id.to_string(), track });
+    }
+}
+
+/// A read of our own device that names a different track than the engine is playing
+/// is behind: keep the engine's track (and the position the UI already has for it).
+/// Returns whether it was behind.
+fn engine_now_override(pb: &mut PlaybackState, last: &Option<PlaybackState>) -> bool {
+    let Ok(g) = ENGINE_NOW.lock() else { return false };
+    let Some(now) = g.as_ref() else { return false };
+    if now.device_id.is_empty() || pb.device_id != now.device_id {
+        return false;
+    }
+    if pb.track.as_ref().is_some_and(|t| t.id == now.track.id) {
+        return false;
+    }
+    pb.duration_ms = now.track.duration_ms;
+    pb.progress_ms = last
+        .as_ref()
+        .filter(|l| l.track.as_ref().is_some_and(|t| t.id == now.track.id))
+        .map(|l| l.progress_ms)
+        .unwrap_or(0);
+    pb.track = Some(now.track.clone());
+    true
 }
 
 /// Hardware media keys (Play/Pause, Next, Previous, Stop).
@@ -7294,6 +9332,9 @@ async fn end_autoplay_authority_inner(
     // early return below can't see it — but it must not land after the user has moved
     // on. (A new station request bumps the epoch again right after this.)
     cancel_pending_station();
+    // Any new play ends a running chart's background matching too — it appends to
+    // a list that is about to be replaced (see `bp_match_background`).
+    bp_active_seq.store(0, std::sync::atomic::Ordering::SeqCst);
     let was_station = *station_active;
     // NOT `bp_autoplay.is_some()`: the poll tick already drops `bp_autoplay` back to
     // `None` on its own the moment the playing track leaves the chart's sequence
@@ -7494,6 +9535,27 @@ fn engine_owns_playback(last: &Option<PlaybackState>, our_device_id: &str) -> bo
         && last.as_ref().is_some_and(|p| p.device_id == our_device_id)
 }
 
+/// `engine_owns_playback` for code without `last` at hand (background tasks): our
+/// engine has announced a track and no other device has taken over since
+/// (`ENGINE_NOW` is cleared on `Event::Inactive` and `Event::Exited`).
+fn engine_owns_now() -> bool {
+    engine::running() && ENGINE_NOW.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// Add one track to the queue. While our engine is the player this is a local
+/// command (the vendored `Spirc::add_to_queue`, the same path a remote "add to queue"
+/// takes), so it costs no Web-API request; otherwise `POST me/player/queue`.
+///
+/// Called once per track for a multi-track add, in order: each lands behind the
+/// one queued before it, on the engine exactly as on the Web API.
+async fn queue_one(session: &mut Session, uri: &str, engine_owned: bool) -> Result<(), String> {
+    if engine_owned && uri.starts_with("spotify:track:") {
+        engine::send(&serde_json::json!({ "cmd": "addtoqueue", "uris": [uri] }).to_string());
+        return Ok(());
+    }
+    session.add_to_queue(uri).await
+}
+
 /// Did Spotify refuse a player command on policy grounds rather than because
 /// something was actually wrong? Those are the ones worth retrying on the engine.
 fn is_player_restriction(e: &str) -> bool {
@@ -7620,9 +9682,18 @@ fn start_engine(
 /// Build the audio-output rows: "System default" first, then the real devices, with
 /// the configured one ticked. When the configured device has vanished the note says
 /// so plainly instead of leaving the user staring at an unticked list.
+/// The output names Settings is showing, in row order after "System default". A pick
+/// is a row index, so it must be read against THIS list: re-enumerating at click time
+/// (as this used to) shifted every row when a device came or went, or the OS default
+/// changed, in between — saving a device the user never clicked.
+static SHOWN_OUTPUTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 fn push_outputs(weak: &slint::Weak<MainWindow>) {
     let configured = lightify_core::config::load_config(&lightify_core::config::data_dir()).audio_output;
     let outputs = engine::audio_outputs();
+    if let Ok(mut g) = SHOWN_OUTPUTS.lock() {
+        *g = outputs.clone();
+    }
     let want = configured.trim();
     let missing = !want.is_empty()
         && !want.eq_ignore_ascii_case("default")
@@ -7751,8 +9822,26 @@ fn fmt_backoff(secs: u64) -> String {
 
 // ── UI marshaling helpers (run the closure on the Slint thread) ──────────────
 
+/// The titlebar pill: notices only (progress, confirmations, errors), never a
+/// resting state. Anything that isn't still in progress (a trailing "…") clears
+/// itself after a few seconds, unless a newer notice has replaced it.
 fn set_status(weak: &slint::Weak<MainWindow>, text: String) {
-    let _ = weak.upgrade_in_event_loop(move |app| app.set_status_text(text.into()));
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let weak2 = weak.clone();
+    let _ = weak.upgrade_in_event_loop(move |app| {
+        let transient = !text.is_empty() && !text.ends_with('\u{2026}');
+        app.set_status_text(text.into());
+        if transient {
+            slint::Timer::single_shot(std::time::Duration::from_secs(5), move || {
+                if GEN.load(std::sync::atomic::Ordering::Relaxed) == gen {
+                    if let Some(a) = weak2.upgrade() {
+                        a.set_status_text("".into());
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Library rows: "Liked Songs" pinned at the top (the saved-tracks pseudo-playlist),
@@ -8141,7 +10230,8 @@ async fn offer_resume(weak: &slint::Weak<MainWindow>, session: &mut Session, rp:
         app.set_duration(fmt_time(dur).into());
         app.set_playing(false);
     });
-    set_status(weak, "Press play to pick up where you left off".to_string());
+    // The paused track + play button already say "resume"; no status line for it.
+    set_status(weak, String::new());
     if !rp.album_art.is_empty() && *last_art != rp.album_art {
         *last_art = rp.album_art.clone();
         if let Some((rgba, w, h, glow)) = session.fetch_bytes(&rp.album_art).await.ok().and_then(|b| decode_art(&b)) {
@@ -8163,11 +10253,14 @@ fn next_repeat_mode(cur: &str) -> &'static str {
 
 /// A shuffle/repeat value the user just chose, held against polls that still report
 /// the old one (the Web API lags a change by a moment). Each field lets go as soon as
-/// a poll agrees, or when the hold runs out.
+/// a poll agrees, or when the hold runs out. `*_confirmed`: our own device has since
+/// reported that very value (see `accept_device_options`).
 struct OptionsHold {
     shuffle: Option<bool>,
     repeat: Option<String>,
     until: std::time::Instant,
+    shuffle_confirmed: bool,
+    repeat_confirmed: bool,
 }
 
 static OPTIONS_HOLD: std::sync::Mutex<Option<OptionsHold>> = std::sync::Mutex::new(None);
@@ -8195,12 +10288,20 @@ fn show_options(
         }
     }
     if let Ok(mut g) = OPTIONS_HOLD.lock() {
-        let h = g.get_or_insert(OptionsHold { shuffle: None, repeat: None, until: std::time::Instant::now() });
+        let h = g.get_or_insert(OptionsHold {
+            shuffle: None,
+            repeat: None,
+            until: std::time::Instant::now(),
+            shuffle_confirmed: false,
+            repeat_confirmed: false,
+        });
         if shuffle.is_some() {
             h.shuffle = shuffle;
+            h.shuffle_confirmed = false;
         }
         if repeat.is_some() {
             h.repeat = repeat.clone();
+            h.repeat_confirmed = false;
         }
         h.until = std::time::Instant::now() + OPTIONS_HOLD_FOR;
     }
@@ -8241,6 +10342,133 @@ fn apply_options_hold(pb: &mut PlaybackState) {
     }
 }
 
+/// Filter one shuffle/repeat report from our own engine through the hold, returning
+/// what to show. With no hold the device is the authority and wins outright. While a
+/// fresh choice is held:
+/// * a report of that very value confirms it — and the hold stays, so the polls that
+///   still carry the old value for a few seconds can't put the button back (this
+///   used to release the hold, which let exactly that happen);
+/// * any other value *before* that is the device passing through a step of the
+///   change (librespot reports each flag separately: repeat-one → off reads
+///   "repeat-one off" = repeat-all, then "repeat-all off"), and isn't shown;
+/// * any other value *after* it is a real change from elsewhere, and wins.
+fn accept_device_options(
+    shuffle: Option<bool>,
+    repeat: Option<String>,
+) -> (Option<bool>, Option<String>) {
+    let Ok(mut g) = OPTIONS_HOLD.lock() else { return (shuffle, repeat) };
+    let Some(h) = g.as_mut() else { return (shuffle, repeat) };
+    if std::time::Instant::now() >= h.until {
+        *g = None;
+        return (shuffle, repeat);
+    }
+    let shuffle = match (shuffle, h.shuffle) {
+        (Some(v), Some(held)) if v == held => {
+            h.shuffle_confirmed = true;
+            Some(v)
+        }
+        (Some(v), Some(_)) if h.shuffle_confirmed => {
+            h.shuffle = None;
+            Some(v)
+        }
+        (Some(_), Some(_)) => None,
+        (v, None) => v,
+        (None, Some(_)) => None,
+    };
+    let repeat = match (repeat, h.repeat.clone()) {
+        (Some(v), Some(held)) if v == held => {
+            h.repeat_confirmed = true;
+            Some(v)
+        }
+        (Some(v), Some(_)) if h.repeat_confirmed => {
+            h.repeat = None;
+            Some(v)
+        }
+        (Some(_), Some(_)) => None,
+        (v, None) => v,
+        (None, Some(_)) => None,
+    };
+    if h.shuffle.is_none() && h.repeat.is_none() {
+        *g = None;
+    }
+    (shuffle, repeat)
+}
+
+/// The repeat mode the user wants: their last press, or the last *announced* change
+/// (our engine's own reports, another device's state). Kept apart from what polls of
+/// our device say, because a load silently resets repeat there (librespot's
+/// `handle_load` → `reset_options`) and a poll can't tell that from a real change —
+/// this is what gets put back afterwards (`restore_repeat_after_load`).
+static REPEAT_CHOICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Our engine's Connect device id, for code that only sees a `PlaybackState`.
+static ENGINE_DEVICE_ID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// A track event this soon after a play request is that request's load.
+const PLAY_LOAD_WINDOW: Duration = Duration::from_secs(15);
+
+fn repeat_choice() -> Option<String> {
+    REPEAT_CHOICE.lock().ok().and_then(|g| g.clone())
+}
+
+fn set_repeat_choice(mode: &str) {
+    if let Ok(mut g) = REPEAT_CHOICE.lock() {
+        *g = Some(mode.to_string());
+    }
+}
+
+/// Learn the repeat choice from a poll — wholesale when playback is on another device
+/// (that device's state is the choice), but on our own device only the one silent
+/// change that is a real one: a skip out of repeat-one leaving repeat-all (a phone's
+/// "next", say). A silent drop to "off" is a load's reset, not a choice.
+fn note_polled_repeat(pb: &PlaybackState) {
+    let ours = engine::running()
+        && ENGINE_DEVICE_ID.lock().is_ok_and(|d| !d.is_empty() && pb.device_id == *d);
+    if let Ok(mut g) = REPEAT_CHOICE.lock() {
+        let skipped_out_of_one = g.as_deref() == Some("track") && pb.repeat_state == "context";
+        if g.is_none() || !ours || skipped_out_of_one {
+            *g = Some(pb.repeat_state.clone());
+        }
+    }
+}
+
+/// A load we asked for just reached our engine. librespot resets repeat on every load
+/// unless the play command carried options, and doesn't say so — so playing a new
+/// playlist quietly turned repeat off on the device while the button (until the next
+/// poll) still showed it on. Read the device's real state once Spotify shows the new
+/// track, and put the user's mode back if the load dropped it. Only the flags that
+/// differ are sent.
+async fn restore_repeat_after_load(
+    weak: &slint::Weak<MainWindow>,
+    session: &mut Session,
+    last: &mut Option<PlaybackState>,
+    engine_device_id: &str,
+    track_name: &str,
+) {
+    let Some(want) = repeat_choice() else { return };
+    if !engine::running() || engine_device_id.is_empty() || track_name.is_empty() {
+        return;
+    }
+    for attempt in 0..4 {
+        tokio::time::sleep(Duration::from_millis(if attempt == 0 { 450 } else { 650 })).await;
+        match session.playback().await {
+            Ok(Some(pb)) if pb.device_id != engine_device_id => return,
+            Ok(Some(pb)) if pb.track.as_ref().is_some_and(|t| t.name == track_name) => {
+                if pb.repeat_state != want {
+                    engine::send(
+                        &serde_json::json!({ "cmd": "repeat", "mode": want, "from": pb.repeat_state }).to_string(),
+                    );
+                    // Held, so the polls that still read the reset value don't show it.
+                    show_options(weak, last, None, Some(want));
+                }
+                return;
+            }
+            Err(e) if lightify_core::ratelimit::is_rate_limited(&e) => return,
+            _ => {}
+        }
+    }
+}
+
 fn push_idle(weak: &slint::Weak<MainWindow>) {
     let _ = weak.upgrade_in_event_loop(|app| {
         app.set_track_name("\u{2014}".into());
@@ -8266,7 +10494,10 @@ fn poll_interval(every: Duration) -> tokio::time::Interval {
 /// Playback-poll floor while our own engine owns playback. The engine already pushes
 /// play/pause, seeks, volume and every track change (`engine::Event`), so the Web-API
 /// poll is only reconciliation there (shuffle/repeat changed elsewhere, a handoff).
-const ENGINE_OWNED_POLL: Duration = Duration::from_secs(15);
+///
+/// Rare on purpose: track changes, play/pause, shuffle/repeat and volume all arrive as
+/// engine events, and a handoff to another device as `Event::Inactive`.
+const ENGINE_OWNED_POLL: Duration = Duration::from_secs(120);
 /// Playback-poll floor while nothing is playing: nothing to animate, and a resume from
 /// another device showing up a few seconds late is harmless.
 const IDLE_POLL: Duration = Duration::from_secs(10);
@@ -8372,6 +10603,144 @@ async fn settle_refresh(
 ) {
     tokio::time::sleep(Duration::from_millis(350)).await;
     refresh_playback(weak, session, last, last_art, liked).await;
+}
+
+/// `settle_refresh` without holding the worker: the re-read happens on the loop's
+/// `poll_soon` timer, so the next click isn't queued behind a 350 ms sleep and three
+/// requests. A pending earlier deadline wins; two plays in a row read once.
+fn refresh_soon(poll_soon: &mut Option<tokio::time::Instant>) {
+    let at = tokio::time::Instant::now() + Duration::from_millis(350);
+    *poll_soon = Some(poll_soon.map_or(at, |p| p.min(at)));
+}
+
+/// What the Web API is sent for a uri-list play when our engine can't take it.
+/// (`me/player/play` with `uris` has a practical length limit.)
+const WEB_API_URIS_MAX: usize = 50;
+
+/// Play the plain track list `uris` starting at `index` (Liked Songs, an artist's
+/// tracks, a selection — anything without a context). On our own engine it is
+/// loaded directly: the whole list, no Web-API round trip, shuffle/repeat kept.
+/// Returns whether it went that way; otherwise only `WEB_API_URIS_MAX` tracks from
+/// `index` went through the Web API, and only those will play.
+async fn play_track_list(
+    session: &mut Session,
+    uris: &[String],
+    index: usize,
+    position_ms: u64,
+    last: &Option<PlaybackState>,
+    engine_device_id: &str,
+) -> Result<bool, String> {
+    if uris.is_empty() {
+        return Err("Nothing to play".to_string());
+    }
+    let index = index.min(uris.len() - 1);
+    if engine::running() && !engine_device_id.is_empty() {
+        let shuffle = last.as_ref().is_some_and(|p| p.shuffle_state);
+        let repeat = repeat_choice()
+            .or_else(|| last.as_ref().map(|p| p.repeat_state.clone()))
+            .unwrap_or_else(|| "off".into());
+        engine::send(
+            &serde_json::json!({
+                "cmd": "loadtracks", "uris": uris, "index": index, "position_ms": position_ms.min(u32::MAX as u64),
+                "shuffle": shuffle, "repeat": repeat,
+            })
+            .to_string(),
+        );
+        note_engine_load();
+        return Ok(true);
+    }
+    let end = (index + WEB_API_URIS_MAX).min(uris.len());
+    session.play_uris(&uris[index..end]).await?;
+    if position_ms > 0 {
+        session.seek(position_ms).await?;
+    }
+    Ok(false)
+}
+
+/// The account's Liked Songs as a playable context, or `None` without a user id.
+fn liked_context(session: &Session) -> Option<String> {
+    let id = session.user_id();
+    (!id.is_empty()).then(|| format!("spotify:user:{id}:collection"))
+}
+
+/// Start `context_uri` at `track_uri` on our own engine, which resolves the context
+/// itself (the only way to start Liked Songs as a whole: the Web API won't). False
+/// when the engine isn't up to take it.
+fn engine_play_context(
+    context_uri: &str,
+    track_uri: &str,
+    position_ms: u64,
+    last: &Option<PlaybackState>,
+    engine_device_id: &str,
+) -> bool {
+    if !engine::running() || engine_device_id.is_empty() {
+        return false;
+    }
+    let shuffle = last.as_ref().is_some_and(|p| p.shuffle_state);
+    let repeat = repeat_choice()
+        .or_else(|| last.as_ref().map(|p| p.repeat_state.clone()))
+        .unwrap_or_else(|| "off".into());
+    engine::send(
+        &serde_json::json!({
+            "cmd": "loadcontext", "context_uri": context_uri, "track_uri": track_uri,
+            "position_ms": position_ms.min(u32::MAX as u64), "shuffle": shuffle, "repeat": repeat,
+        })
+        .to_string(),
+    );
+    note_engine_load();
+    true
+}
+
+/// When we last asked our engine to load something (`loadtracks` / `loadcontext`).
+/// The track such a load brings is shown from the engine's own event at once, then
+/// read from the Web API ONCE, a moment later, for what only a read knows: the new
+/// context (the library's "playing here" row) — not the 2–6 reads a Web-API load needs.
+static ENGINE_LOAD_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn note_engine_load() {
+    if let Ok(mut g) = ENGINE_LOAD_AT.lock() {
+        *g = Some(std::time::Instant::now());
+    }
+}
+
+/// Was there an engine load in the last few seconds? Consumes it.
+fn take_engine_load() -> bool {
+    ENGINE_LOAD_AT
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(10))
+}
+
+/// Is `uri` a Liked Songs context (`spotify:user:<id>:collection`)?
+fn is_liked_context(uri: &str) -> bool {
+    uri.starts_with("spotify:user:") && uri.ends_with(":collection")
+}
+
+/// Recent search answers, so going back to a query (or backspacing onto one) shows
+/// it again without another request. Short-lived: results do change.
+static SEARCH_CACHE: std::sync::Mutex<Vec<(String, std::time::Instant, SearchResults)>> =
+    std::sync::Mutex::new(Vec::new());
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(300);
+const SEARCH_CACHE_MAX: usize = 20;
+
+fn cached_search(q: &str) -> Option<SearchResults> {
+    let key = q.trim().to_lowercase();
+    let g = SEARCH_CACHE.lock().ok()?;
+    g.iter()
+        .find(|(k, at, _)| *k == key && at.elapsed() < SEARCH_CACHE_TTL)
+        .map(|(_, _, r)| r.clone())
+}
+
+fn cache_search(q: &str, r: &SearchResults) {
+    let key = q.trim().to_lowercase();
+    if let Ok(mut g) = SEARCH_CACHE.lock() {
+        g.retain(|(k, at, _)| *k != key && at.elapsed() < SEARCH_CACHE_TTL);
+        if g.len() >= SEARCH_CACHE_MAX {
+            g.remove(0);
+        }
+        g.push((key, std::time::Instant::now(), r.clone()));
+    }
 }
 
 fn connected_status(session: &Session) -> String {
@@ -8753,6 +11122,9 @@ fn set_search_loading(weak: &slint::Weak<MainWindow>, on: bool) {
 }
 
 fn push_search(weak: &slint::Weak<MainWindow>, rows: Vec<SearchRow>) {
+    if let Ok(mut tops) = SEARCH_ROW_TOPS.lock() {
+        *tops = search_row_tops(&rows);
+    }
     let keys: Vec<String> = rows.iter().map(|r| format!("{}\u{1f}{}\u{1f}{}", r.kind, r.name, r.sub)).collect();
     let v = list_pushed(SEL_SEARCH as usize, list_identity(keys.iter().map(|k| k.as_str())));
     thumbs::request_search(weak, &rows);
@@ -8793,6 +11165,10 @@ fn current_id(last: &Option<PlaybackState>) -> String {
     last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.id.clone()).unwrap_or_default()
 }
 
+fn current_uri(last: &Option<PlaybackState>) -> String {
+    last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()).unwrap_or_default()
+}
+
 /// Sidebar toggle semantics: pressing the *active* mode's button closes it (→ 0);
 /// pressing any other button opens that mode. Shared by the worker and the self-test.
 fn next_sidebar_mode(current: i32, pressed: i32) -> i32 {
@@ -8811,15 +11187,116 @@ fn build_side_rows(tracks: &[Track], playing_id: &str, show_time: bool) -> Vec<S
         .map(|t| SideRow {
             name: t.name.clone().into(),
             artist: t.artists.clone().into(),
+            // RECENT: when it played. QUEUE: how long it is (the v6 queue design).
             time: if show_time {
                 t.added_at.as_deref().map(rel_time).unwrap_or_default().into()
+            } else if t.duration_ms > 0 {
+                fmt_time(t.duration_ms).into()
             } else {
                 slint::SharedString::new()
             },
             playing: !playing_id.is_empty() && t.id == *playing_id,
             selected: false,
+            pending: 0,
         })
         .collect()
+}
+
+/// A Beatport chart lining up on our engine, as the QUEUE panel shows it: the strip
+/// under the header, and — after the tracks already found (the queue mirror) — the
+/// chart rows still to be looked up, as placeholders. Read by `set_sidebar`, so
+/// every path that redraws the QUEUE panel keeps them.
+struct BpPanel {
+    /// The sequence it belongs to; shown only while that is the live one.
+    seq_id: u64,
+    active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    title: String,
+    found: usize,
+    total: usize,
+    /// Chart rows not looked up yet, (title, artists), next first; the first of them
+    /// is chart row `next_index` of the matcher's source.
+    waiting: Vec<(String, String)>,
+    next_index: usize,
+    /// The chart row the play started from (`total` counts from here).
+    start: usize,
+    done: bool,
+    missed: usize,
+}
+
+/// The placeholder rows for `source[next..]`.
+fn bp_waiting(source: &[BeatportTrack], next: usize) -> Vec<(String, String)> {
+    source
+        .get(next..)
+        .unwrap_or(&[])
+        .iter()
+        .map(|b| (b.name.trim().to_string(), b.artists.clone()))
+        .collect()
+}
+
+/// The matcher has looked up chart rows up to `next_index`, `found` of them on
+/// Spotify: drop the placeholders it got through.
+fn bp_panel_progress(seq_id: u64, found: usize, next_index: usize, done: bool) {
+    let Ok(mut g) = BP_PANEL.lock() else { return };
+    let Some(p) = g.as_mut().filter(|p| p.seq_id == seq_id) else { return };
+    let through = next_index.saturating_sub(p.next_index).min(p.waiting.len());
+    p.waiting.drain(..through);
+    p.next_index = p.next_index.max(next_index);
+    p.found = found;
+    p.missed = p.next_index.saturating_sub(p.start).saturating_sub(found);
+    p.done = done || p.waiting.is_empty();
+}
+
+static BP_PANEL: std::sync::Mutex<Option<BpPanel>> = std::sync::Mutex::new(None);
+
+fn set_bp_panel(panel: Option<BpPanel>) {
+    if let Ok(mut g) = BP_PANEL.lock() {
+        *g = panel;
+    }
+}
+
+/// `chart` from `source[next..]`, as placeholder rows plus the strip's numbers.
+fn bp_panel_rows() -> (Vec<SideRow>, String, i32, i32, String) {
+    let Ok(g) = BP_PANEL.lock() else { return (Vec::new(), String::new(), 0, 0, String::new()) };
+    let Some(p) = g.as_ref().filter(|p| p.active.load(std::sync::atomic::Ordering::SeqCst) == p.seq_id) else {
+        return (Vec::new(), String::new(), 0, 0, String::new());
+    };
+    if p.done {
+        let note = if p.missed == 0 {
+            format!("All {} found on Spotify", p.found)
+        } else {
+            // Short enough for the 300 px drawer in the bundled font (the longer
+            // "… · 4 aren't on Spotify" was cut off).
+            format!("{} of {} found \u{00b7} {} not on Spotify", p.found, p.total, p.missed)
+        };
+        return (Vec::new(), String::new(), 0, 0, note);
+    }
+    let rows = p
+        .waiting
+        .iter()
+        .enumerate()
+        .map(|(i, (name, artist))| SideRow {
+            name: name.clone().into(),
+            artist: artist.clone().into(),
+            time: slint::SharedString::new(),
+            playing: false,
+            selected: false,
+            pending: if i == 0 { 1 } else { 2 },
+        })
+        .collect();
+    (rows, p.title.clone(), p.found as i32, p.total as i32, String::new())
+}
+
+/// "beatport · top 100 · tech house" — the strip's label for a chart.
+fn bp_chart_title(genres: &[(String, String)], idx: usize, kind: &str) -> String {
+    let what = match kind {
+        "hype" => "hype 100",
+        "releases" => "top 100 releases",
+        _ => "top 100",
+    };
+    match genres.get(idx).map(|(name, slug)| (name, slug.is_empty())) {
+        Some((name, false)) => format!("// beatport \u{00b7} {what} \u{00b7} {}", name.to_lowercase()),
+        _ => format!("// beatport \u{00b7} {what}"),
+    }
 }
 
 /// Push the sidebar mode + rows to the UI. `empty` (when non-blank) sets the
@@ -8828,8 +11305,19 @@ fn set_sidebar(weak: &slint::Weak<MainWindow>, mode: i32, rows: Vec<SideRow>, em
     // Identity is the track, not its relative "5m ago" time, which ticks on its own.
     let keys: Vec<String> = rows.iter().map(|r| format!("{mode}\u{1f}{}\u{1f}{}", r.name, r.artist)).collect();
     let v = list_pushed(SEL_SIDEBAR as usize, list_identity(keys.iter().map(|k| k.as_str())));
+    // A chart lining up adds its placeholder rows AFTER the identity above: they sit
+    // below every real row (so no real row's index moves), and they change every few
+    // seconds — counting them would turn every click on a real row into "that list
+    // just changed" for as long as the chart lines up.
+    let (pending, strip, found, total, done_note) = if mode == 1 { bp_panel_rows() } else { Default::default() };
+    let mut rows = rows;
+    rows.extend(pending);
     let _ = weak.upgrade_in_event_loop(move |app| {
         list_shown(SEL_SIDEBAR as usize, v);
+        app.set_bp_strip_title(strip.into());
+        app.set_bp_strip_found(found);
+        app.set_bp_strip_total(total);
+        app.set_bp_done_note(done_note.into());
         app.set_sidebar_mode(mode);
         if !empty.is_empty() {
             app.set_sidebar_empty(empty.into());
@@ -8900,9 +11388,13 @@ async fn refresh_sidebar(
             // whole-playlist/album play or a station, which never built one. Ask
             // Spotify directly, in the background — see `Cmd::SidebarFetched` for
             // where the result (and the mirror backfill this used to do inline)
-            // lands once it comes back.
+            // lands once it comes back. Rows already showing stay up until then;
+            // only an empty panel says "Loading queue…" (blanking it on every
+            // refresh read as the queue being cleared).
             *generation += 1;
-            set_sidebar(weak, 1, vec![], "Loading queue\u{2026}".to_string());
+            if tracks.is_empty() {
+                set_sidebar(weak, 1, vec![], "Loading queue\u{2026}".to_string());
+            }
             spawn_sidebar_fetch(self_tx, 1, *generation);
         }
         2 => {
@@ -8960,6 +11452,14 @@ fn tick_queue_sidebar(
         .unwrap_or_default();
     if let Some(m) = mirror.as_mut() {
         if m.advance(&playing_uri) {
+            // Spotify only ever reports ~20 upcoming tracks; a mirror copied from that
+            // ran down to an empty panel while the playlist kept playing. Ask for the
+            // next window before it does (the answer replaces it — `SidebarFetched`).
+            if m.wants_refill() {
+                m.refill_for = m.current_uri.clone();
+                *generation += 1;
+                spawn_sidebar_fetch(self_tx, 1, *generation);
+            }
             let moved = m.upcoming.len() != tracks.len()
                 || m.upcoming.first().map(|t| &t.uri) != tracks.first().map(|t| &t.uri);
             if moved {
@@ -9003,11 +11503,52 @@ struct QueueMirror {
     /// and the moment it started playing, `advance` drained every row above it, so
     /// the panel emptied.
     queued: usize,
+    /// Copied from Spotify's own `me/player/queue`, which only ever returns ~20
+    /// items. Such a mirror is a window onto a longer context, not the whole of it,
+    /// so it is topped up from Spotify as it runs low (`tick_queue_sidebar`) instead
+    /// of draining to an empty panel while the playlist plays on.
+    from_spotify: bool,
+    /// The track a top-up was last requested on — at most one per track change.
+    refill_for: String,
+    /// When this mirror was built, and the track that was playing before the play
+    /// that built it (`stale_uri`, empty when none) — see `advance`.
+    built_at: std::time::Instant,
+    stale_uri: String,
 }
+
+/// Top a Spotify-backed mirror up once it is down to this many upcoming tracks.
+const QUEUE_REFILL_AT: usize = 5;
 
 impl QueueMirror {
     fn new(current_uri: String, upcoming: Vec<Track>) -> Self {
-        Self { upcoming, current_uri, queued: 0 }
+        Self {
+            upcoming,
+            current_uri,
+            queued: 0,
+            from_spotify: false,
+            refill_for: String::new(),
+            built_at: std::time::Instant::now(),
+            stale_uri: String::new(),
+        }
+    }
+
+    /// Built by a play that replaced `previous_uri` (see `advance`).
+    fn replacing(mut self, previous_uri: &str) -> Self {
+        if previous_uri != self.current_uri {
+            self.stale_uri = previous_uri.to_string();
+        }
+        self
+    }
+
+    /// A mirror backfilled from Spotify's (truncated) queue — see `from_spotify`.
+    fn from_spotify(current_uri: String, upcoming: Vec<Track>) -> Self {
+        Self { from_spotify: true, ..Self::new(current_uri, upcoming) }
+    }
+
+    /// Spotify-backed and running low: time to ask Spotify for the next window.
+    /// Once per track, so a context that is genuinely ending isn't re-polled.
+    fn wants_refill(&self) -> bool {
+        self.from_spotify && self.upcoming.len() <= QUEUE_REFILL_AT && self.refill_for != self.current_uri
     }
 
     /// A track the user just queued: plays after earlier additions, before the
@@ -9027,6 +11568,13 @@ impl QueueMirror {
     /// missing one would leave a stale list on screen.
     fn advance(&mut self, playing_uri: &str) -> bool {
         if playing_uri.is_empty() || playing_uri == self.current_uri {
+            return true;
+        }
+        // Right after a local play, polls can still report the track that was playing
+        // before it. That is neither a departure (dropping the mirror swapped the list
+        // the user clicked in for Spotify's ~20-item view of the context) nor progress
+        // (when it sits further down the same list, folding to it ate the rows above).
+        if playing_uri == self.stale_uri && self.built_at.elapsed() < PLAY_LOAD_WINDOW {
             return true;
         }
         let Some(at) = self.upcoming.iter().position(|t| t.uri == playing_uri) else {
@@ -9127,7 +11675,11 @@ fn spawn_sidebar_fetch(self_tx: &tokio::sync::mpsc::UnboundedSender<Cmd>, mode: 
 fn spawn_downloads_refresh(weak: &slint::Weak<MainWindow>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+    // Asked for while a read was out: that read may predate what changed (a download
+    // just added), so read once more when it lands rather than dropping the request.
+    static AGAIN: AtomicBool = AtomicBool::new(false);
     if IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        AGAIN.store(true, Ordering::SeqCst);
         return;
     }
     let weak = weak.clone();
@@ -9142,20 +11694,26 @@ fn spawn_downloads_refresh(weak: &slint::Weak<MainWindow>) {
             }
         }
         let _latch = Latch;
-        let result = downloader::snapshot().await;
-        match result {
-            Ok(items) => {
-                // `updateSidebarClearButton`: Clear is live only when something is
-                // actually in a finished state for `/api/clear_items` to drop.
-                let clearable = items.iter().any(|i| i.finished());
-                set_dl_rows(
-                    &weak,
-                    build_dl_rows(&items),
-                    "No downloads queued".to_string(),
-                    clearable,
-                );
+        loop {
+            AGAIN.store(false, Ordering::SeqCst);
+            let result = downloader::snapshot().await;
+            match result {
+                Ok(items) => {
+                    // `updateSidebarClearButton`: Clear is live only when something is
+                    // actually in a finished state for `/api/clear_items` to drop.
+                    let clearable = items.iter().any(|i| i.finished());
+                    set_dl_rows(
+                        &weak,
+                        build_dl_rows(&items),
+                        "No downloads queued".to_string(),
+                        clearable,
+                    );
+                }
+                Err(e) => set_dl_rows(&weak, vec![], format!("Downloads \u{2014} {e}"), false),
             }
-            Err(e) => set_dl_rows(&weak, vec![], format!("Downloads \u{2014} {e}"), false),
+            if !AGAIN.load(Ordering::SeqCst) {
+                break;
+            }
         }
     });
 }
@@ -9252,7 +11810,7 @@ async fn bp_refill(
         if !seq.seen.insert(matched.uri.clone()) {
             continue;
         }
-        if let Err(e) = session.add_to_queue(&matched.uri).await {
+        if let Err(e) = queue_one(session, &matched.uri, engine_owns_now()).await {
             set_status(weak, format!("Beatport queue refill \u{2014} {e}"));
             break;
         }
@@ -9351,7 +11909,7 @@ async fn bp_refill_background(
         if active_seq.load(std::sync::atomic::Ordering::SeqCst) != seq_id {
             break;
         }
-        if let Err(e) = session.add_to_queue(&matched.uri).await {
+        if let Err(e) = queue_one(&mut session, &matched.uri, engine_owns_now()).await {
             error = Some(e);
             break;
         }
@@ -9360,6 +11918,134 @@ async fn bp_refill_background(
     }
     let completed = next_index >= source.len();
     (queued, seen, next_index, completed, error)
+}
+
+/// A Beatport chart playing as one list on our engine (`Cmd::BpPlay`'s engine path):
+/// the rest of the chart is appended to it as `bp_match_background` matches it.
+struct BpList {
+    /// The `BpAutoplay::id` it was started under (`bp_active_seq` while it's current).
+    id: u64,
+    /// The first track it was loaded with — appends are dropped once it's gone.
+    anchor: String,
+    /// Tracks on the list so far, and chart rows it started from.
+    lined_up: usize,
+    total: usize,
+    /// Chart rows (of the whole chart) looked up so far, found or not.
+    next_index: usize,
+}
+
+/// Chart rows matched per append once the first few are in. Small enough that the
+/// list keeps growing every few seconds, large enough not to churn the engine.
+const BP_APPEND_CHUNK: usize = 5;
+/// The first rows after the clicked one go to the engine one at a time, so what plays
+/// next is lined up within a second or two of the click.
+const BP_FRONT_ROWS: usize = 5;
+/// Requests chart matching may have in flight per rolling 30 s window
+/// (`ratelimit::WINDOW`). Under the background budget (`BACKGROUND_BUDGET`, 45) on
+/// purpose: what the user does meanwhile — a search, a click — keeps the rest.
+const BP_MATCH_BUDGET: usize = 25;
+/// The least gap between two looked-up rows (a cached answer needs none).
+const BP_MATCH_GAP: Duration = Duration::from_millis(120);
+/// ISRC lookups are tried for the first rows of every chart, then only while they
+/// keep paying off: chart rows are mostly extended mixes, which carry their own ISRC,
+/// and Spotify often has only the radio edit — a miss then costs the name search on
+/// top. Below one hit in three after this many tries, the rest of the chart goes
+/// straight to the name search.
+const BP_ISRC_PROBE: u32 = 8;
+
+/// Match `source[next_index..]` on Spotify and self-send the results as
+/// `Cmd::BpMatched` for the worker to append. Runs to the end of the chart — nothing
+/// here depends on recognising what is playing — and stops the moment the sequence
+/// is no longer the current one (`active_seq`). Paced by the rate window rather than
+/// a fixed sleep: it uses up to `BP_MATCH_BUDGET` requests per window and waits out a
+/// rate limit instead of skipping rows; answers from the match cache cost nothing and
+/// don't wait at all.
+async fn bp_match_background(
+    source: Vec<BeatportTrack>,
+    mut next_index: usize,
+    mut seen: std::collections::HashSet<String>,
+    seq_id: u64,
+    active_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
+) {
+    use lightify_core::MatchHow;
+    let current = |a: &std::sync::Arc<std::sync::atomic::AtomicU64>| a.load(std::sync::atomic::Ordering::SeqCst) == seq_id;
+    let mut session = match Session::load() {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(Cmd::BpMatched { seq_id, tracks: Vec::new(), next_index, done: true, error: Some(e) });
+            return;
+        }
+    };
+    let first = next_index;
+    let (mut isrc_tries, mut isrc_hits) = (0u32, 0u32);
+    let mut strikes = 0u32;
+    let mut batch: Vec<Track> = Vec::new();
+    let mut since_send = 0usize;
+    while next_index < source.len() {
+        if !current(&active_seq) {
+            return;
+        }
+        // Wait for room in the window (or out a rate limit) before a row that may
+        // need the network.
+        if lightify_core::ratelimit::blocked_for().is_some()
+            || lightify_core::ratelimit::recent_requests() >= BP_MATCH_BUDGET
+        {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            continue;
+        }
+        let bt = &source[next_index];
+        let use_isrc = isrc_tries < BP_ISRC_PROBE || isrc_hits * 3 >= isrc_tries;
+        let isrc = if use_isrc { bt.isrc.as_str() } else { "" };
+        let mut error = None;
+        match session.beatport_match_with(&bt.name, &bt.artists, isrc).await {
+            Ok((found, how)) => {
+                next_index += 1;
+                since_send += 1;
+                strikes = 0;
+                match how {
+                    MatchHow::Isrc => {
+                        isrc_tries += 1;
+                        isrc_hits += 1;
+                    }
+                    MatchHow::IsrcMissed => isrc_tries += 1,
+                    _ => {}
+                }
+                if let Some(t) = found.filter(|t| seen.insert(t.uri.clone())) {
+                    batch.push(t);
+                }
+                if how != MatchHow::Cached {
+                    tokio::time::sleep(BP_MATCH_GAP).await;
+                }
+            }
+            Err(e) => {
+                // Retried, not skipped: a skipped row is a hole in the chart.
+                // A row that keeps failing on its own is given up on, though.
+                strikes += 1;
+                if strikes >= 3 {
+                    next_index += 1;
+                    strikes = 0;
+                }
+                error = Some(e);
+            }
+        }
+        let done = next_index >= source.len();
+        let chunk = if next_index - first <= BP_FRONT_ROWS { 1 } else { BP_APPEND_CHUNK };
+        // Send when a chunk is ready — and every few rows regardless, so the panel's
+        // placeholders move on even through a run of rows Spotify doesn't have.
+        if batch.len() >= chunk || since_send >= BP_APPEND_CHUNK || done || error.is_some() {
+            if !current(&active_seq) {
+                return;
+            }
+            let wait = error.as_deref().map(|e| rate_limit_backoff(e).unwrap_or(5).clamp(2, 120));
+            let tracks = std::mem::take(&mut batch);
+            since_send = 0;
+            let _ = tx.send(Cmd::BpMatched { seq_id, tracks, next_index, done, error });
+            if let Some(secs) = wait {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+            }
+        }
+    }
 }
 
 /// How many queued-ahead tracks are still in front of what is playing.
@@ -9677,81 +12363,151 @@ fn mini_size(mode: &str) -> (f64, f64) {
 /// the full min), toggle always-on-top, capture the pre-mini size once on entry, and
 /// restore it on exit. Runs on the UI thread (from the `set-mini-mode` callback).
 fn apply_mini_mode(app: &MainWindow, mode: &str) {
-    use slint::winit_030::winit::dpi::LogicalSize;
+    use slint::winit_030::winit::dpi::{LogicalSize, PhysicalPosition};
     use slint::winit_030::winit::window::WindowLevel;
     use slint::winit_030::WinitWindowAccessor;
 
     let was_off = app.get_mini_mode() == "off";
+    if was_off && mode != "off" {
+        // Record the full window as it is right now (a move/resize capture may still be
+        // pending), BEFORE the property flips and the window shrinks.
+        app.window().with_winit_window(|w| window_geom::capture(w, false));
+    }
     // Set the property first so the bound min-width/min-height relax before we resize.
     app.set_mini_mode(mode.into());
     if mode != "off" {
         app.set_mini_last(mode.into());
         save_mini_mode(mode);
     }
+    let g = window_geom::get();
 
+    let mut unmaximizing = false;
     app.window().with_winit_window(|w| {
-        use slint::winit_030::winit::dpi::LogicalPosition;
-
         if mode == "off" {
-            // Drop always-on-top and the mini min-size FIRST: a window whose minimum is
-            // still the mini size silently clamps the restore, which is half of what
-            // "the window comes back wrong" was.
+            // Drop always-on-top and the mini size lock FIRST: a window whose min/max is
+            // still the mini size silently clamps the restore.
             let _ = w.set_window_level(WindowLevel::Normal);
-            w.set_min_inner_size(Some(LogicalSize::new(640.0, 460.0)));
-
-            // A window that was maximized before going mini comes back maximized;
-            // restoring its *pixel* size instead would produce a merely-large window
-            // that no longer fills the screen and is not in the maximized state.
-            if app.get_mini_prev_max() {
-                w.set_maximized(true);
+            w.set_resizable(true);
+            w.set_max_inner_size(None::<LogicalSize<f64>>);
+            w.set_min_inner_size(Some(LogicalSize::new(window_geom::MIN_W, window_geom::MIN_H)));
+            if w.is_maximized() {
+                // Only reachable if something maximized the mini player anyway. The
+                // un-maximize completes asynchronously and restores the MINI size last,
+                // over any size requested now — so the full rect goes back once it has.
+                w.set_maximized(false);
+                unmaximizing = true;
             } else {
-                let (rw, rh) = {
-                    let pw = app.get_mini_prev_w() as f64;
-                    let ph = app.get_mini_prev_h() as f64;
-                    if pw >= 640.0 && ph >= 460.0 { (pw, ph) } else { (980.0, 660.0) }
-                };
-                let _ = w.request_inner_size(LogicalSize::new(rw, rh));
-                // ...and put it back where it was. The mini player is draggable and
-                // always-on-top, so by the time it is dismissed it is usually nowhere
-                // near where the full window started; restoring only the size left the
-                // big window parked at the mini player's corner, which is the "spawns
-                // in a weird location" report. Position goes AFTER the resize so the
-                // window manager doesn't re-clamp it against the old geometry.
-                if app.get_mini_prev_pos_valid() {
-                    w.set_outer_position(LogicalPosition::new(
-                        app.get_mini_prev_x() as f64,
-                        app.get_mini_prev_y() as f64,
-                    ));
-                }
+                restore_full_window(w, &g);
             }
         } else {
-            // Capture the pre-mini geometry once, only when entering from full.
-            if was_off {
-                let sf = w.scale_factor();
-                let maximized = w.is_maximized();
-                app.set_mini_prev_max(maximized);
-                if !maximized {
-                    let sz = w.inner_size();
-                    app.set_mini_prev_w((sz.width as f64 / sf) as f32);
-                    app.set_mini_prev_h((sz.height as f64 / sf) as f32);
-                    match w.outer_position() {
-                        Ok(pos) => {
-                            app.set_mini_prev_x((pos.x as f64 / sf) as f32);
-                            app.set_mini_prev_y((pos.y as f64 / sf) as f32);
-                            app.set_mini_prev_pos_valid(true);
-                        }
-                        // Wayland and friends refuse to report a position; fall back to
-                        // "restore the size only" rather than guessing at coordinates.
-                        Err(_) => app.set_mini_prev_pos_valid(false),
-                    }
-                }
-            }
             let (mw, mh) = mini_size(mode);
             w.set_maximized(false);
+            // The mini layouts are fixed sizes: min AND max, so the edges don't resize
+            // it — and not resizable, so Windows offers no maximize (Win+Up) either.
             w.set_min_inner_size(Some(LogicalSize::new(mw, mh)));
+            w.set_max_inner_size(Some(LogicalSize::new(mw, mh)));
+            w.set_resizable(false);
             let _ = w.request_inner_size(LogicalSize::new(mw, mh));
+            // Back where the mini player was last time (switching between mini layouts
+            // keeps it where it is).
+            if was_off {
+                if let Some((x, y)) = g.mini_pos.filter(|&(x, y)| window_geom::on_screen(x, y)) {
+                    w.set_outer_position(PhysicalPosition::new(x, y));
+                }
+            }
             let _ = w.set_window_level(WindowLevel::AlwaysOnTop);
         }
+    });
+    if unmaximizing {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(120), move || {
+            if let Some(a) = weak.upgrade() {
+                a.window().with_winit_window(|w| restore_full_window(w, &window_geom::get()));
+            }
+        });
+    }
+}
+
+/// Put the full window back: its normal rect first, then maximized on top when it was
+/// — so a window maximized before the mini player comes back maximized AND
+/// un-maximizes to its own size, not the mini player's.
+fn restore_full_window(w: &slint::winit_030::winit::window::Window, g: &window_geom::Geom) {
+    use slint::winit_030::winit::dpi::{LogicalSize, PhysicalPosition};
+    let (rw, rh) = g.normal.map(|r| (r.w, r.h)).unwrap_or((window_geom::DEFAULT_W, window_geom::DEFAULT_H));
+    let _ = w.request_inner_size(LogicalSize::new(rw, rh));
+    // Position after the size, so the window manager doesn't re-clamp it against the
+    // mini player's geometry; and only to a place that is still on a screen.
+    if let Some(r) = g.normal.filter(|r| window_geom::on_screen(r.x, r.y)) {
+        w.set_outer_position(PhysicalPosition::new(r.x, r.y));
+    }
+    if g.maximized {
+        w.set_maximized(true);
+    }
+}
+
+/// Apply the saved geometry before the window first shows.
+fn restore_window_geometry(app: &MainWindow) {
+    let g = window_geom::get();
+    if let Some(r) = g.normal {
+        app.window().set_size(slint::LogicalSize::new(r.w as f32, r.h as f32));
+        if window_geom::on_screen(r.x, r.y) {
+            app.window().set_position(slint::PhysicalPosition::new(r.x, r.y));
+        }
+    }
+    if g.maximized {
+        app.window().set_maximized(true);
+    }
+}
+
+/// Record the window's settled state now and write it if it changed.
+fn capture_window_geometry(app: &MainWindow) {
+    use slint::winit_030::WinitWindowAccessor;
+    let mini = app.get_mini_mode() != "off";
+    app.window().with_winit_window(|w| window_geom::capture(w, mini));
+    window_geom::save_if_changed();
+}
+
+/// Follow moves and resizes: captured once the window has been still for a moment
+/// (a drag sends dozens of events; only where it ends matters), and on close.
+fn track_window_geometry(app: &MainWindow) {
+    use slint::winit_030::winit::event::WindowEvent;
+    use slint::winit_030::{EventResult, WinitWindowAccessor};
+    const SETTLE: Duration = Duration::from_millis(400);
+    let weak = app.as_weak();
+    let settle = Rc::new(slint::Timer::default());
+    app.window().on_winit_window_event(move |_, ev| {
+        match ev {
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                // The mini player is a fixed size; if the system maximized it anyway
+                // (a snap gesture the non-resizable style didn't stop), undo it.
+                if let Some(a) = weak.upgrade().filter(|a| a.get_mini_mode() != "off") {
+                    a.window().with_winit_window(|w| {
+                        if w.is_maximized() {
+                            w.set_maximized(false);
+                        }
+                    });
+                }
+                let weak = weak.clone();
+                settle.start(slint::TimerMode::SingleShot, SETTLE, move || {
+                    if let Some(a) = weak.upgrade() {
+                        capture_window_geometry(&a);
+                    }
+                });
+            }
+            WindowEvent::CloseRequested => {
+                settle.stop();
+                if let Some(a) = weak.upgrade() {
+                    capture_window_geometry(&a);
+                }
+            }
+            // Files dragged in from Explorer (the Local view takes them; elsewhere they
+            // are ignored). winit sends one event per file, so they are gathered first.
+            WindowEvent::HoveredFile(p) => local_ui::drag_event(local_ui::Drag::Hover(p.clone())),
+            WindowEvent::HoveredFileCancelled => local_ui::drag_event(local_ui::Drag::Cancel),
+            WindowEvent::DroppedFile(p) => local_ui::drag_event(local_ui::Drag::Drop(p.clone())),
+            _ => {}
+        }
+        EventResult::Propagate
     });
 }
 
@@ -9763,6 +12519,182 @@ fn mini_mode_path() -> std::path::PathBuf {
 
 fn save_mini_mode(mode: &str) {
     let _ = std::fs::write(mini_mode_path(), mode);
+}
+
+// ── Self-update ───────────────────────────────────────────────────────────────
+//
+// `lightify_core::update` does the work (signed manifest on lightify.stream, verified
+// download into %LOCALAPPDATA%\Lightify\updates); this is the UI side: when to check,
+// what the footer pill and Settings › updates show, and handing over to the installer's
+// `--update` mode on Restart. Nothing installs without the user pressing Restart.
+
+/// "Install updates automatically" (Settings › updates), on unless switched off.
+fn update_auto_path() -> std::path::PathBuf {
+    lightify_core::config::data_dir().join("lightify_shell_autoupdate.txt")
+}
+
+fn load_update_auto() -> bool {
+    std::fs::read_to_string(update_auto_path()).map(|s| s.trim() != "off").unwrap_or(true)
+}
+
+fn save_update_auto(on: bool) {
+    let _ = std::fs::write(update_auto_path(), if on { "on" } else { "off" });
+}
+
+/// The version the user pressed "Mark seen" on: the settings cog stops pulsing for
+/// it, and it isn't downloaded automatically (a newer one is, and pulses again).
+fn update_seen_path() -> std::path::PathBuf {
+    lightify_core::config::data_dir().join("lightify_shell_update_seen.txt")
+}
+
+fn load_update_seen() -> String {
+    std::fs::read_to_string(update_seen_path()).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+fn install_updater(app: &MainWindow) {
+    app.set_update_auto(load_update_auto());
+    app.set_update_seen_version(load_update_seen().into());
+    {
+        let weak = app.as_weak();
+        app.on_update_mark_seen(move || {
+            if let Some(a) = weak.upgrade() {
+                let v = a.get_update_version().to_string();
+                if !v.is_empty() {
+                    let _ = std::fs::write(update_seen_path(), &v);
+                    a.set_update_seen_version(v.into());
+                }
+            }
+        });
+    }
+    // A verified installer left over from last session is offered straight away.
+    // `pending` re-hashes the file (~100 MB), so never on the UI thread.
+    {
+        let weak = app.as_weak();
+        std::thread::spawn(move || {
+            if let Some((ver, _)) = lightify_core::update::pending(env!("CARGO_PKG_VERSION")) {
+                let _ = weak.upgrade_in_event_loop(move |a| {
+                    if a.get_update_state() != "ready" {
+                        a.set_update_version(ver.into());
+                        a.set_update_state("ready".into());
+                    }
+                });
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_update_check(move || spawn_update_check(weak.clone(), true));
+    }
+    {
+        let weak = app.as_weak();
+        app.on_set_update_auto(move |on| {
+            save_update_auto(on);
+            if on {
+                spawn_update_check(weak.clone(), false);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_update_restart(move || {
+            // Re-verify off the UI thread (`pending` re-hashes), then hand over.
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let Some((_, installer)) = lightify_core::update::pending(env!("CARGO_PKG_VERSION")) else {
+                    let _ = weak.upgrade_in_event_loop(|a| {
+                        a.set_update_state("error".into());
+                        a.set_update_note("The downloaded update is gone \u{2014} check again".into());
+                    });
+                    return;
+                };
+                match lightify_core::update::launch_update(&installer) {
+                    // The installer waits for this process to exit, then swaps the
+                    // files and relaunches; leave the same way the close button does.
+                    Ok(()) => {
+                        let _ = slint::invoke_from_event_loop(|| {
+                            let _ = slint::quit_event_loop();
+                        });
+                    }
+                    Err(e) => {
+                        let _ = weak.upgrade_in_event_loop(move |a| {
+                            a.set_update_state("error".into());
+                            a.set_update_note(format!("Couldn't start the update: {e}").into());
+                        });
+                    }
+                }
+            });
+        });
+    }
+    // First check shortly after launch (never in the way of startup), then every 6h.
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_secs(8), move || {
+        spawn_update_check(weak.clone(), false);
+    });
+    let weak = app.as_weak();
+    let every = slint::Timer::default();
+    every.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(6 * 3600), move || {
+        spawn_update_check(weak.clone(), false);
+    });
+    // The timer must outlive this function; it lives as long as the app.
+    std::mem::forget(every);
+}
+
+/// Check (and, if newer, download) on a worker thread. `manual` = the user pressed
+/// "Check now" / "Download": it downloads whatever it finds, and reports failures.
+/// A background check always looks (so a new version can be shown even with
+/// automatic updates off) but only downloads when they're on and the version hasn't
+/// been marked seen; otherwise it reports the version as "available".
+fn spawn_update_check(weak: slint::Weak<MainWindow>, manual: bool) {
+    let Some(app) = weak.upgrade() else { return };
+    let state = app.get_update_state().to_string();
+    if state == "checking" || state == "downloading" || state == "ready" {
+        return;
+    }
+    let auto = app.get_update_auto();
+    let seen = app.get_update_seen_version().to_string();
+    app.set_update_state("checking".into());
+    std::thread::spawn(move || {
+        let set = |weak: &slint::Weak<MainWindow>, state: &'static str, ver: String, note: String| {
+            let _ = weak.upgrade_in_event_loop(move |a| {
+                a.set_update_state(state.into());
+                a.set_update_version(ver.into());
+                a.set_update_note(note.into());
+            });
+        };
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            set(&weak, "error", String::new(), "Couldn't start the update check".into());
+            return;
+        };
+        let current = env!("CARGO_PKG_VERSION");
+        match rt.block_on(lightify_core::update::check(current)) {
+            Ok(None) => set(&weak, "current", String::new(), String::new()),
+            Ok(Some(rel)) if !manual && (!auto || rel.version == seen) => {
+                set(&weak, "available", rel.version.clone(), String::new());
+            }
+            Ok(Some(rel)) => {
+                set(&weak, "downloading", rel.version.clone(), String::new());
+                let pw = weak.clone();
+                let last = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+                let progress = move |done: u64, total: u64| {
+                    if total == 0 {
+                        return;
+                    }
+                    let pct = (done.saturating_mul(100) / total) as u32;
+                    if last.swap(pct, std::sync::atomic::Ordering::Relaxed) != pct {
+                        let _ = pw.upgrade_in_event_loop(move |a| a.set_update_progress(pct as f32 / 100.0));
+                    }
+                };
+                match rt.block_on(lightify_core::update::download(&rel, progress)) {
+                    Ok(_) => set(&weak, "ready", rel.version.clone(), String::new()),
+                    Err(e) => set(&weak, "error", rel.version.clone(), format!("Update failed: {e}")),
+                }
+            }
+            Err(e) if manual => set(&weak, "error", String::new(), format!("Couldn't check for updates: {e}")),
+            // A quiet background check that failed (offline, server down) just goes
+            // back to idle; it tries again later.
+            Err(_) => set(&weak, "idle", String::new(), String::new()),
+        }
+    });
 }
 
 /// Read the persisted mini layout, validated; defaults to "square" (matches the shipped
@@ -9809,6 +12741,10 @@ struct PersistedQueue {
     current_uri: String,
     /// Upcoming track uris, in display order, as of the last time it was captured.
     upcoming: Vec<String>,
+    /// How many leading `upcoming` entries were queued by hand; the rest were the
+    /// playing context's own next tracks. `None` (older files, stations): all of them.
+    #[serde(default)]
+    queued: Option<usize>,
 }
 
 /// The most queue entries ever persisted, restored, or rebuilt one POST at a time.
@@ -9822,12 +12758,18 @@ const QUEUE_KEEP_MAX: usize = 20;
 
 /// Save the queue, or clear the file when there's nothing worth remembering.
 fn save_queue(current_uri: &str, upcoming: &[String]) {
+    save_queue_marked(current_uri, upcoming, None);
+}
+
+/// `save_queue`, recording how many leading entries were hand-queued (see
+/// `PersistedQueue::queued`).
+fn save_queue_marked(current_uri: &str, upcoming: &[String], queued: Option<usize>) {
     if current_uri.is_empty() || upcoming.is_empty() {
         let _ = std::fs::remove_file(queue_path());
         return;
     }
     let keep = &upcoming[..upcoming.len().min(QUEUE_KEEP_MAX)];
-    let pq = PersistedQueue { current_uri: current_uri.to_string(), upcoming: keep.to_vec() };
+    let pq = PersistedQueue { current_uri: current_uri.to_string(), upcoming: keep.to_vec(), queued };
     if let Ok(json) = serde_json::to_string(&pq) {
         let _ = lightify_core::config::write_atomic(&queue_path(), json.as_bytes());
     }
@@ -9838,7 +12780,11 @@ fn save_queue(current_uri: &str, upcoming: &[String]) {
 fn persist_mirror(mirror: &Option<QueueMirror>) {
     match mirror {
         Some(m) if !m.upcoming.is_empty() => {
-            save_queue(&m.current_uri, &m.upcoming.iter().map(|t| t.uri.clone()).collect::<Vec<_>>());
+            save_queue_marked(
+                &m.current_uri,
+                &m.upcoming.iter().map(|t| t.uri.clone()).collect::<Vec<_>>(),
+                Some(m.queued),
+            );
         }
         _ => save_queue("", &[]),
     }
@@ -9881,12 +12827,27 @@ async fn restore_queue(
     let Some(pq) = load_queue() else { return };
     let playing_uri = last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()).unwrap_or_default();
     let Some(remaining) = queue_restore_point(&pq, &playing_uri) else { return };
+    // Inside a playlist/album the context already carries its own next tracks;
+    // queueing the remembered copies of them as well played each of them twice.
+    // Only what was queued by hand needs putting back there.
+    let in_context = last
+        .as_ref()
+        .and_then(|p| p.context_uri.as_deref())
+        .is_some_and(|c| c.starts_with("spotify:playlist:") || c.starts_with("spotify:album:"));
+    let remaining = match pq.queued {
+        Some(q) if in_context => {
+            // `remaining` is a suffix of `upcoming`; keep only its hand-queued head.
+            let skipped = pq.upcoming.len() - remaining.len();
+            &remaining[..q.saturating_sub(skipped).min(remaining.len())]
+        }
+        _ => remaining,
+    };
     if remaining.is_empty() {
         return;
     }
     let mut queued = 0usize;
     for uri in remaining.iter().take(QUEUE_KEEP_MAX) {
-        match session.add_to_queue(uri).await {
+        match queue_one(session, uri, engine_owns_now()).await {
             Ok(()) => queued += 1,
             Err(_) => break,
         }
@@ -10090,6 +13051,8 @@ enum PagerSource {
     None,
     Liked,
     Playlist(String),
+    /// An artist's discography (search drill-in only), paged by release, not track.
+    Artist(String),
 }
 
 struct TrackPager {
@@ -10138,6 +13101,7 @@ impl TrackPager {
     fn page_size(&self) -> u32 {
         match self.source {
             PagerSource::Liked => Session::LIKED_PAGE,
+            PagerSource::Artist(_) => Session::ARTIST_RELEASE_PAGE,
             _ => Session::PLAYLIST_PAGE,
         }
     }
@@ -10267,7 +13231,15 @@ fn stamp_current(surface: usize, cmd: Cmd) -> Cmd {
 fn unstamp(cmd: Cmd) -> Cmd {
     match cmd {
         Cmd::Stamped { surface, version, inner } => {
-            if list_version(surface) == version { unstamp(*inner) } else { Cmd::StaleClick }
+            if list_version(surface) == version {
+                unstamp(*inner)
+            } else if matches!(*inner, Cmd::SelectDragTo { .. }) {
+                // A drag over a list that changed under it just ends; reporting it as a
+                // stale click re-posted the notice ~30 times a second while the mouse moved.
+                Cmd::SelectDragEnd
+            } else {
+                Cmd::StaleClick
+            }
         }
         c => c,
     }
@@ -10294,6 +13266,24 @@ fn drop_selection(
     push_selection(weak, scope, selected, &[]);
 }
 
+/// `drop_selection` for the left track list, which needs the view to un-highlight its
+/// rows (they are addressed through the sort/filter view).
+fn drop_track_selection(
+    weak: &slint::Weak<MainWindow>,
+    selected: &mut std::collections::BTreeSet<usize>,
+    sel_anchor: &mut Option<usize>,
+    sel_scope: &mut i32,
+    view: &[usize],
+) {
+    if *sel_scope != SEL_TRACKS {
+        return;
+    }
+    selected.clear();
+    *sel_anchor = None;
+    *sel_scope = SEL_NONE;
+    push_selection(weak, SEL_TRACKS, selected, view);
+}
+
 fn exit_search_drill(
     weak: &slint::Weak<MainWindow>,
     selected: &mut std::collections::BTreeSet<usize>,
@@ -10303,11 +13293,7 @@ fn exit_search_drill(
     s_context: &mut Option<String>,
     s_pager: &mut TrackPager,
 ) {
-    if *sel_scope == SEL_SEARCH_DRILL {
-        selected.clear();
-        *sel_anchor = None;
-        *sel_scope = SEL_NONE;
-    }
+    drop_selection(weak, SEL_SEARCH_DRILL, selected, sel_anchor, sel_scope);
     s_tracks.clear();
     *s_context = None;
     *s_pager = TrackPager::default();
@@ -10353,28 +13339,56 @@ async fn load_next_search_page(
     let _ = weak.upgrade_in_event_loop(|app| app.set_search_tracks_more(false));
 
     let limit = pager.page_size();
-    let fetched = match &pager.source {
-        PagerSource::Liked => session.saved_tracks_page(pager.offset).await,
-        PagerSource::Playlist(id) => session.playlist_tracks_page(id, pager.offset).await,
-        PagerSource::None => Ok(lightify_core::TrackPage {
-            tracks: Vec::new(),
-            total: 0,
-            partial: false,
-        }),
+    // One failed page used to end the list for good ("stopped after N tracks") — a
+    // network hiccup mid-scroll left a 900-track playlist looking like 300. Transient
+    // failures get two more tries; a rate limit doesn't (hammering prolongs it).
+    let mut attempt = 0u64;
+    let fetched = loop {
+        let r = match &pager.source {
+            PagerSource::Liked => session.saved_tracks_page(pager.offset).await,
+            PagerSource::Playlist(id) => session.playlist_tracks_page(id, pager.offset).await,
+            PagerSource::Artist(id) => session.artist_tracks_page(id, pager.offset).await,
+            PagerSource::None => Ok(lightify_core::TrackPage {
+                tracks: Vec::new(),
+                total: 0,
+                partial: false,
+                raw: 0,
+            }),
+        };
+        match r {
+            Err(e) if attempt < 2 && !lightify_core::ratelimit::is_rate_limited(&e) => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(700 * attempt)).await;
+            }
+            r => break r,
+        }
     };
     match fetched {
         Ok(page) => {
             pager.partial |= page.partial;
-            let n = page.tracks.len() as u32;
+            // Entries Spotify sent, not rows kept (see `TrackPage::raw`).
+            let n = page.raw as u32;
             if page.total > 0 {
                 pager.total = page.total;
             }
-            tracks.extend(page.tracks);
             pager.offset += limit;
-            pager.done = n < limit || (pager.total > 0 && tracks.len() as u32 >= pager.total);
+            if matches!(pager.source, PagerSource::Artist(_)) {
+                // Paged by release: a page's track count says nothing about whether
+                // more releases follow (pages also run short mid-list), and the same
+                // song recurs across a single, its album and compilations.
+                lightify_core::append_new_songs(tracks, page.tracks);
+                pager.done = pager.offset >= pager.total;
+            } else {
+                tracks.extend(page.tracks);
+                pager.done = n < limit || (pager.total > 0 && tracks.len() as u32 >= pager.total);
+            }
             push_search_tracks(weak, tracks);
             let loaded = tracks.len();
-            if loaded == 0 {
+            if loaded == 0 && !pager.done {
+                // Nothing credited to the artist in these releases; the list's own
+                // near-the-end check asks for the next page straight away.
+                set_status(weak, format!("Loading \u{201c}{}\u{201d}\u{2026}", pager.name));
+            } else if loaded == 0 {
                 set_status(weak, "No tracks to show".to_string());
             } else if pager.done && pager.partial {
                 set_status(
@@ -10440,21 +13454,36 @@ async fn load_next_track_page(
     }
 
     let limit = pager.page_size();
-    let fetched = match &pager.source {
-        PagerSource::Liked => session.saved_tracks_page(pager.offset).await,
-        PagerSource::Playlist(id) => session.playlist_tracks_page(id, pager.offset).await,
-        PagerSource::None => Ok(lightify_core::TrackPage {
-            tracks: Vec::new(),
-            total: 0,
-            partial: false,
-        }),
+    // One failed page used to end the list for good ("stopped after N tracks") — a
+    // network hiccup mid-scroll left a 900-track playlist looking like 300. Transient
+    // failures get two more tries; a rate limit doesn't (hammering prolongs it).
+    let mut attempt = 0u64;
+    let fetched = loop {
+        let r = match &pager.source {
+            PagerSource::Liked => session.saved_tracks_page(pager.offset).await,
+            PagerSource::Playlist(id) => session.playlist_tracks_page(id, pager.offset).await,
+            PagerSource::None | PagerSource::Artist(_) => Ok(lightify_core::TrackPage {
+                tracks: Vec::new(),
+                total: 0,
+                partial: false,
+                raw: 0,
+            }),
+        };
+        match r {
+            Err(e) if attempt < 2 && !lightify_core::ratelimit::is_rate_limited(&e) => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(700 * attempt)).await;
+            }
+            r => break r,
+        }
     };
 
     match fetched {
         Ok(page) => {
-            let (batch, total) = (page.tracks, page.total);
+            let (batch, total, raw) = (page.tracks, page.total, page.raw);
             pager.partial |= page.partial;
-            let n = batch.len() as u32;
+            // Entries Spotify sent, not rows kept (see `TrackPage::raw`).
+            let n = raw as u32;
             if total > 0 {
                 pager.total = total;
             }
@@ -10548,6 +13577,77 @@ fn sel_key(scope: i32, row: usize, view: &[usize]) -> Option<usize> {
     } else {
         Some(row)
     }
+}
+
+// ── Hold-to-select drags ──────────────────────────────────────────────────────
+//
+// The UI reports a drag as a y in the list's content; these map it to a display
+// row. The heights must match the row components in ui/app.slint (TrackRow 46,
+// BpRow 46, SideTrackRow 48; SearchResultRow varies by kind).
+const ROW_H_TRACK: f32 = 46.0;
+const ROW_H_BEATPORT: f32 = 46.0;
+const ROW_H_SIDEBAR: f32 = 48.0;
+
+/// Top edge of every search-result row, as last pushed (the list mixes heights).
+static SEARCH_ROW_TOPS: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+
+fn search_row_tops(rows: &[SearchRow]) -> Vec<f32> {
+    let mut y = 0.0;
+    rows.iter()
+        .map(|r| {
+            let top = y;
+            y += match r.kind.as_str() {
+                "header" | "recent" => 36.0,
+                "top" => 96.0,
+                _ => 52.0,
+            };
+            top
+        })
+        .collect()
+}
+
+/// The display row under content-y `y` in `scope`'s list of `len` rows.
+fn drag_row(scope: i32, y: f32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let y = y.max(0.0);
+    let row = if scope == SEL_SEARCH {
+        let tops = SEARCH_ROW_TOPS.lock().map(|t| t.clone()).unwrap_or_default();
+        tops.iter().rposition(|t| *t <= y).unwrap_or(0)
+    } else {
+        let h = match scope {
+            SEL_BEATPORT => ROW_H_BEATPORT,
+            SEL_SIDEBAR => ROW_H_SIDEBAR,
+            _ => ROW_H_TRACK,
+        };
+        (y / h) as usize
+    };
+    row.min(len - 1)
+}
+
+/// `base` plus every selectable row between `from` and `to` (display rows, either
+/// order) — one hold-to-select drag added on top of what was already selected.
+/// `selectable` says which display rows can be picked (search mixes in headers,
+/// artists and albums, which never are).
+fn drag_selection(
+    scope: i32,
+    base: &std::collections::BTreeSet<usize>,
+    from: usize,
+    to: usize,
+    view: &[usize],
+    selectable: impl Fn(usize) -> bool,
+) -> std::collections::BTreeSet<usize> {
+    let (lo, hi) = if to < from { (to, from) } else { (from, to) };
+    let mut out = base.clone();
+    for r in lo..=hi {
+        if selectable(r) {
+            if let Some(k) = sel_key(scope, r, view) {
+                out.insert(k);
+            }
+        }
+    }
+    out
 }
 
 fn selection_flags(
@@ -10658,7 +13758,7 @@ fn push_selection(
             let n = app.get_search_tracks().row_count();
             apply_search_drill_selection(&app, &selection_flags_direct(&selected, n));
         }
-        _ => {}
+        _ => app.set_sel_count(selected.len() as i32),
     });
 }
 
@@ -10688,7 +13788,6 @@ fn scoped_selection_uris(
                 .filter(|t| !t.uri.is_empty())
                 .filter(|t| seen.insert(t.uri.clone()))
                 .map(|t| t.uri.clone())
-                .take(50)
                 .collect()
         }
         SEL_SEARCH => {
@@ -10702,7 +13801,6 @@ fn scoped_selection_uris(
                     _ => None,
                 })
                 .filter(|u| seen.insert(u.clone()))
-                .take(50)
                 .collect()
         }
         SEL_SIDEBAR => {
@@ -10716,7 +13814,6 @@ fn scoped_selection_uris(
                 .filter(|t| !t.uri.is_empty())
                 .filter(|t| seen.insert(t.uri.clone()))
                 .map(|t| t.uri.clone())
-                .take(50)
                 .collect()
         }
         _ => Vec::new(),
@@ -10739,8 +13836,8 @@ fn selection_uris(
         .filter(|t| !t.uri.is_empty())
         .filter(|t| seen.insert(t.uri.clone()))
         .map(|t| t.uri.clone())
-        // Spotify's play endpoint takes at most 50 uris; the host slices too.
-        .take(50)
+        // No cap here: the engine plays any length, `play_track_list` slices for the
+        // Web API itself, and a saved playlist must get every selected track.
         .collect()
 }
 
@@ -10812,11 +13909,15 @@ fn clear_queue_command(last: &Option<PlaybackState>, keep_current: bool) -> Stri
     let current = last.as_ref().filter(|_| keep_current).and_then(|p| {
         p.track.as_ref().filter(|t| !t.uri.is_empty()).map(|t| (t.uri.clone(), p.progress_ms, p.is_playing))
     });
+    // The reset wipes repeat on the device; the engine keeps the user's mode (see its
+    // `ClearQueue`), and a Web-API play that follows gets it back from
+    // `restore_repeat_after_load`.
+    let repeat = repeat_choice().unwrap_or_default();
     match current {
         Some((uri, position_ms, playing)) => serde_json::json!({
-            "cmd": "clearqueue", "keep_uri": uri, "position_ms": position_ms, "playing": playing,
+            "cmd": "clearqueue", "keep_uri": uri, "position_ms": position_ms, "playing": playing, "repeat": repeat,
         }),
-        None => serde_json::json!({ "cmd": "clearqueue" }),
+        None => serde_json::json!({ "cmd": "clearqueue", "repeat": repeat }),
     }
     .to_string()
 }
@@ -11035,27 +14136,94 @@ fn search_track_menu(row: usize, uri: &str, id: &str, show_like: bool) -> Vec<Ct
 }
 
 /// A search *playlist* hit — `appendSearchPlaylistResult` (`app.js:2764`).
+/// "Add to queue" is a shell addition (the original only queued single tracks).
 fn search_playlist_menu(row: usize) -> Vec<CtxItem> {
     vec![
         CtxItem::new("Play", Cmd::PlaySearchContext(row)),
+        CtxItem::new("Add to queue", Cmd::QueueSearchHit(row)),
         CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
         CtxItem::new("Save playlist", Cmd::SaveSearchItem(row)),
         CtxItem::new("Download", Cmd::DownloadSearchItem(row)),
     ]
 }
 
-/// A search *album* hit — `app.js:2749`.
+/// A search *album* hit — `app.js:2749`, plus the shell's "Add to queue".
 fn search_album_menu(row: usize) -> Vec<CtxItem> {
     vec![
         CtxItem::new("Play", Cmd::PlaySearchContext(row)),
+        CtxItem::new("Add to queue", Cmd::QueueSearchHit(row)),
         CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
         CtxItem::new("Save album", Cmd::SaveSearchItem(row)),
     ]
 }
 
-/// A search *artist* hit — `app.js:2731`.
+/// A search *artist* hit — `app.js:2731`, plus queueing the artist's top songs
+/// (the same list "Show tracks" opens).
 fn search_artist_menu(row: usize) -> Vec<CtxItem> {
-    vec![CtxItem::new("Show tracks", Cmd::OpenSearch(row))]
+    vec![
+        CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
+        CtxItem::new("Add top songs to queue", Cmd::QueueSearchHit(row)),
+    ]
+}
+
+/// Most tracks one "Add to queue" on a whole album / playlist / artist sends. The
+/// same 50 a multi-row selection is capped at (`scoped_selection_uris`): Spotify has
+/// no batch queue endpoint, so every track is its own request against the dev-mode
+/// quota, and the worker is busy until the run ends.
+const QUEUE_HIT_MAX: usize = 50;
+
+/// The tracks a search hit's "Add to queue" sends, in the hit's own order: playable,
+/// de-duplicated, at most [`QUEUE_HIT_MAX`]. Also returns the hit's name and how many
+/// tracks it holds, so a capped run can say so. Playlists are read a page at a time
+/// (with the drill-in's embed fallback) only until enough tracks are in hand.
+async fn search_hit_tracks(
+    session: &mut Session,
+    action: &SearchAction,
+) -> Result<(String, Vec<Track>, usize), String> {
+    let (name, fetched, total) = match action {
+        SearchAction::Album { id, name, .. } => {
+            let t = session.album_tracks(id).await?;
+            let n = t.len();
+            (name.clone(), t, n)
+        }
+        SearchAction::Artist { id, name } => {
+            let t = session.artist_tracks(id, name).await?;
+            let n = t.len();
+            (name.clone(), t, n)
+        }
+        SearchAction::Playlist { id, name, .. } => {
+            let mut out: Vec<Track> = Vec::new();
+            let mut total = 0usize;
+            let mut offset = 0u32;
+            loop {
+                let page = match session.playlist_tracks_page(id, offset).await {
+                    Ok(p) => p,
+                    // Keep what already arrived; a later page failing isn't a reason
+                    // to queue nothing.
+                    Err(e) if out.is_empty() => return Err(e),
+                    Err(_) => break,
+                };
+                let n = page.raw as u32;
+                total = total.max(page.total as usize);
+                out.extend(page.tracks);
+                offset += Session::PLAYLIST_PAGE;
+                let usable = out.iter().filter(|t| t.is_playable && !t.uri.is_empty()).count();
+                if n < Session::PLAYLIST_PAGE || usable >= QUEUE_HIT_MAX || (total > 0 && out.len() >= total) {
+                    break;
+                }
+            }
+            let total = total.max(out.len());
+            (name.clone(), out, total)
+        }
+        _ => return Err("Nothing to queue here".to_string()),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let tracks: Vec<Track> = fetched
+        .into_iter()
+        .filter(|t| t.is_playable && !t.uri.is_empty() && seen.insert(t.uri.clone()))
+        .take(QUEUE_HIT_MAX)
+        .collect();
+    Ok((name, tracks, total))
 }
 
 /// A Beatport chart row — `app.js:3489`.
@@ -11168,13 +14336,14 @@ fn download_row_menu(item: &downloader::Item) -> Vec<CtxItem> {
 
 /// Push a built menu to the UI (opening it) and return the parallel action list,
 /// the same shape the command palette uses.
-/// `.ctx-menu` is `min-width: 156px` and grows to fit its longest item. A Slint
+/// `.ctx-menu` has a minimum width and grows to fit its longest item. A Slint
 /// element that isn't inside a layout can't size itself to its content, so the width
-/// is estimated here from the label lengths (12px UI font ≈ 5.8px per glyph, plus the
-/// 14px padding on each side) and clamped so a long label never runs off the panel.
+/// is estimated here from the label lengths (13px Space Grotesk medium ≈ 7.0px per
+/// glyph, plus 10px row padding and 6px panel padding each side) and clamped so a
+/// long label never runs off the panel.
 fn menu_width(items: &[CtxItem]) -> f32 {
     let longest = items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
-    (longest as f32 * 5.8 + 30.0).clamp(156.0, 280.0)
+    (longest as f32 * 7.0 + 34.0).clamp(176.0, 320.0)
 }
 
 fn ctx_rows(items: &[CtxItem]) -> Vec<MenuItem> {
@@ -11368,13 +14537,12 @@ fn set_art(weak: &slint::Weak<MainWindow>, rgba: Vec<u8>, w: u32, h: u32, glow: 
         app.set_prev_art(app.get_album_art());
         app.set_album_art(slint::Image::from_rgba8(buf));
         app.set_glow(glow);
-        // Solid (opaque) form of the same album tint, for the mini-player frame + edge line.
+        // Solid (opaque) form of the same album tint. The UI re-points the global accent
+        // from it (like the original's `applyDynamicAccent` reassigning `--accent`: the
+        // play/pause button, volume, progress, tabs, highlighted rows, the mini frame) —
+        // unless a local track is what's present, whose cover tint wins then.
         let solid = slint::Color::from_argb_u8(255, glow.red(), glow.green(), glow.blue());
-        app.set_mini_accent(solid);
-        // Re-point the global accent too — like the original's `applyDynamicAccent`
-        // reassigning `--accent`, this is what recolours the play/pause button,
-        // volume slider, progress bar, tabs, and every highlighted track/playlist row.
-        app.global::<Pal>().set_accent(solid);
+        app.set_spotify_accent(solid);
     });
 }
 
@@ -11382,10 +14550,8 @@ fn clear_art(weak: &slint::Weak<MainWindow>) {
     let _ = weak.upgrade_in_event_loop(|app| {
         app.set_album_art(slint::Image::default());
         app.set_glow(slint::Color::from_argb_u8(0x55, 0x34, 0xd3, 0x99));
-        let default_accent = slint::Color::from_argb_u8(0xff, 0x34, 0xd3, 0x99);
-        app.set_mini_accent(default_accent);
         // Matches `resetDynamicAccent` — back to the default teal when no cover is loaded.
-        app.global::<Pal>().set_accent(default_accent);
+        app.set_spotify_accent(slint::Color::from_argb_u8(0xff, 0x34, 0xd3, 0x99));
     });
 }
 
@@ -11441,6 +14607,18 @@ struct Snapshot {
 /// Like fetch_snapshot but switched to the Search tab with results for `query`.
 /// `--shot-search`'s query and filter, so the render shows them in the box and chips.
 static SHOT_SEARCH: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+/// `--shot-artfull`: render with the cover expanded.
+static SHOT_ART_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `--shot-nameprompt`: render with the name prompt open (0 left, 1 right; -1 off).
+static SHOT_NAME_PROMPT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// `--shot-update`: the update state to show in Settings ("" = not this shot).
+static SHOT_UPDATE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// `--shot-bpqueue`: 0 off, 1 a chart lining up, 2 lined up.
+/// `--shot-local`: the Local view variant to show ("" = not this shot).
+static SHOT_LOCAL: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// `--shot-lava <variant>[@secs]`, as `SHOT_LOCAL`.
+static SHOT_LAVA: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static SHOT_BP_QUEUE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 async fn fetch_search_snapshot(query: &str, filter: &str) -> Snapshot {
     let mut base = fetch_snapshot().await;
@@ -11548,10 +14726,8 @@ async fn fetch_snapshot() -> Snapshot {
     let mut now = s.playback().await.ok().flatten();
     // Mirror the live app's resume offer (UI-PLAN D3): nothing playing anywhere +
     // a saved resume point = that track, paused where it stopped.
-    let mut resume_status = None;
     if now.is_none() {
         if let Some(rp) = load_resume() {
-            resume_status = Some("Press play to pick up where you left off".to_string());
             now = Some(resume_as_playback(&rp));
         }
     }
@@ -11567,7 +14743,6 @@ async fn fetch_snapshot() -> Snapshot {
         Some(id) if !id.is_empty() => s.is_track_saved(&id).await.unwrap_or(false),
         _ => false,
     };
-    let status = resume_status.unwrap_or(status);
     Snapshot {
         playlists, now, status, drill: None, art, tab: 0, search: vec![], shuffle, repeat,
         sidebar: None, downloads: None, downloader: None,
@@ -11582,11 +14757,39 @@ async fn fetch_snapshot() -> Snapshot {
 /// is built from a real track.
 /// Search, then drill the first playlist hit — renders the search tab's own
 /// drill-in (`#search-drill`) the way clicking that row does.
-async fn fetch_search_drill_snapshot(query: &str) -> Snapshot {
-    let mut base = fetch_search_snapshot(query, "all").await;
+async fn fetch_search_drill_snapshot(query: &str, artist: bool) -> Snapshot {
+    let mut base = fetch_search_snapshot(query, if artist { "artists" } else { "all" }).await;
     if let Ok(mut s) = Session::load() {
         if let Ok(res) = s.search(query).await {
-            if let Some(pl) = res.playlists.first().cloned() {
+            if artist {
+                // The first artist hit's discography, two release pages deep — the
+                // first page plus the one the list's near-the-end check asks for.
+                if let Some(a) = res.artists.first().cloned() {
+                    let mut tracks = Vec::new();
+                    let mut offset = 0;
+                    let mut error = None;
+                    for _ in 0..2 {
+                        match s.artist_tracks_page(&a.id, offset).await {
+                            Ok(page) => {
+                                lightify_core::append_new_songs(&mut tracks, page.tracks);
+                                offset += Session::ARTIST_RELEASE_PAGE;
+                                if offset >= page.total {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    base.status = match error {
+                        Some(e) => format!("Artist \u{2014} {e}"),
+                        None => format!("Loaded {} tracks from \u{201c}{}\u{201d}\u{2026}", tracks.len(), a.name),
+                    };
+                    base.search_drill = Some((a.name, tracks));
+                }
+            } else if let Some(pl) = res.playlists.first().cloned() {
                 if let Ok(page) = s.playlist_tracks_page(&pl.id, 0).await {
                     base.status = if page.partial {
                         format!(
@@ -11622,13 +14825,15 @@ async fn fetch_mini_snapshot(mode: &str) -> Snapshot {
 }
 
 /// Like fetch_snapshot but with the Beatport tab open on a scraped chart, for
-/// headless verification. `kind` = tracks | hype | releases (genre = Overall).
-async fn fetch_beatport_snapshot(kind: &str) -> Snapshot {
+/// headless verification. `kind` = tracks | hype | releases; `genre` indexes
+/// `beatport_genres()` (0 = Overall).
+async fn fetch_beatport_snapshot(kind: &str, genre: usize) -> Snapshot {
     let mut base = fetch_snapshot().await;
     base.tab = 2;
+    let slug = lightify_core::beatport_genres().get(genre).map(|(_, s)| s.clone()).unwrap_or_default();
     if let Ok(s) = Session::load() {
-        match s.beatport_chart("", kind).await {
-            Ok(t) => base.beatport = Some((0, kind.to_string(), t)),
+        match s.beatport_chart(&slug, kind).await {
+            Ok(t) => base.beatport = Some((genre, kind.to_string(), t)),
             Err(e) => base.status = format!("Beatport: {e}"),
         }
     }
@@ -11720,7 +14925,8 @@ async fn fetch_sidebar_snapshot(mode: i32) -> Snapshot {
 }
 
 fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
-    app.set_status_text(snap.status.clone().into());
+    // `status` is the account line (Settings); the titlebar pill stays empty at rest.
+    app.set_status_text("".into());
     // No usable session: the live app shows the sign-in page (`obtain_session`), so a
     // headless render does too — `LIGHTIFY_DATA_DIR=<empty dir> --shot-live` is what
     // a fresh install sees.
@@ -11783,9 +14989,7 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
         let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba, *w, *h);
         app.set_album_art(slint::Image::from_rgba8(buf));
         app.set_glow(*glow);
-        let solid = slint::Color::from_argb_u8(255, glow.red(), glow.green(), glow.blue());
-        app.set_mini_accent(solid);
-        app.global::<Pal>().set_accent(solid);
+        app.set_spotify_accent(slint::Color::from_argb_u8(255, glow.red(), glow.green(), glow.blue()));
     }
     if let Some((title, trks)) = &snap.drill {
         app.set_drilled(true);
@@ -11939,21 +15143,31 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
             // (Beatport is Cloudflare-blocked and the queue is usually empty), so the
             // rows are deterministic mocks — the selection marks, the group menus and
             // the action bars are the real code paths.
-            if kind == "search" || kind == "bp" || kind == "sidebar" {
+            // `search-album` / `search-playlist` / `search-artist` open that hit's own
+            // row menu over the same mock results instead of a selection menu.
+            if kind == "search" || kind.starts_with("search-") || kind == "bp" || kind == "sidebar" {
                 let n = 2;
                 let menu = match kind.as_str() {
-                    "search" => {
+                    k if k.starts_with("search") => {
                         app.set_tab(1);
                         let rows = vec![
                             SearchRow { name: "Midnight City".into(), sub: "Song \u{2022} M83".into(), kind: "track".into(), selected: false, art: Default::default(), meta: Default::default() },
                             SearchRow { name: "Outro".into(), sub: "Song \u{2022} M83".into(), kind: "track".into(), selected: false, art: Default::default(), meta: Default::default() },
                             SearchRow { name: "Hurry Up, We\u{2019}re Dreaming".into(), sub: "Album \u{2022} M83".into(), kind: "album".into(), selected: false, art: Default::default(), meta: Default::default() },
+                            SearchRow { name: "This Is M83".into(), sub: "Playlist \u{2022} 52 tracks".into(), kind: "playlist".into(), selected: false, art: Default::default(), meta: Default::default() },
                             SearchRow { name: "M83".into(), sub: "Artist".into(), kind: "artist".into(), selected: false, art: Default::default(), meta: Default::default() },
                         ];
                         let len = rows.len();
                         app.set_search_results(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
-                        apply_search_selection(app, &(0..len).map(|i| i < n).collect::<Vec<_>>());
-                        selection_menu(n)
+                        match k {
+                            "search-album" => search_album_menu(2),
+                            "search-playlist" => search_playlist_menu(3),
+                            "search-artist" => search_artist_menu(4),
+                            _ => {
+                                apply_search_selection(app, &(0..len).map(|i| i < n).collect::<Vec<_>>());
+                                selection_menu(n)
+                            }
+                        }
                     }
                     "bp" => {
                         app.set_tab(2);
@@ -11978,6 +15192,7 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
                                 time: slint::SharedString::new(),
                                 playing: i == 1,
                                 selected: false,
+                                pending: 0,
                             })
                             .collect();
                         let len = rows.len();
@@ -11990,7 +15205,12 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
                 app.set_ctx_items(slint::ModelRc::from(Rc::new(slint::VecModel::from(ctx_rows(&menu)))));
                 app.set_ctx_w(menu_width(&menu));
                 app.set_ctx_x(if kind == "sidebar" { 740.0 } else { 96.0 });
-                app.set_ctx_y(160.0);
+                app.set_ctx_y(match kind.as_str() {
+                    "search-album" => 230.0,
+                    "search-playlist" => 280.0,
+                    "search-artist" => 330.0,
+                    _ => 160.0,
+                });
                 app.set_ctx_open(true);
                 return;
             }
@@ -12061,19 +15281,10 @@ fn reduce_motion() -> bool {
     }
 }
 
-/// Windows 11's UI face ("Segoe UI Variable", optical size Text) when its font file
-/// is installed; Segoe UI otherwise (Windows 10). Checked by file rather than left to
-/// the font matcher, which would fall back to an arbitrary face if the family is absent.
+/// The UI face: Space Grotesk, bundled into the binary by the `import`s at the top of
+/// ui/app.slint, so it is the same on every machine with nothing installed.
 fn ui_font() -> &'static str {
-    let fonts = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
-        .join("Fonts");
-    if fonts.join("SegUIVar.ttf").is_file() {
-        "Segoe UI Variable Text"
-    } else {
-        "Segoe UI"
-    }
+    "Space Grotesk"
 }
 
 fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
@@ -12097,25 +15308,172 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_ui_font(ui_font().into());
     app.global::<Motion>().set_reduced(reduce_motion());
+    // One frame is all a shot gets: render the END of every slide, not its start.
+    app.global::<Motion>().set_slide(0);
     if let Some(snap) = snap.as_ref() {
         apply_snapshot(&app, snap);
     } else {
         // Sample data stands in for a signed-in session; the property's default
         // ("Connecting…") made every sample render look stuck.
-        app.set_status_text("Connected".into());
+        app.set_status_text("".into());
+    }
+    if SHOT_ART_FULL.load(std::sync::atomic::Ordering::Relaxed) {
+        app.set_art_full(true);
+    }
+    let up = SHOT_UPDATE.lock().map(|g| g.clone()).unwrap_or_default();
+    if !up.is_empty() {
+        let (state, closed) = up.split_once(':').map(|(s, _)| (s, true)).unwrap_or((up.as_str(), false));
+        app.set_update_state(state.into());
+        app.set_update_version("2.3.5".into());
+        app.set_update_progress(0.42);
+        app.set_settings_open(!closed);
+    }
+    let bq = SHOT_BP_QUEUE.load(std::sync::atomic::Ordering::Relaxed);
+    if bq > 0 {
+        let chart = [
+            ("Low Tide Theory", "Marlo Vance", 372_000), ("Cold Pressed", "Juno Ortega, KLM", 348_000),
+            ("Basement Hymn", "Tess Ardent", 390_000), ("Velvet Static", "Oren Pike", 422_000),
+            ("Night Bus Home", "Dara Quill", 355_000), ("No Signal", "Fen & Holloway", 381_000),
+            ("Paper Moons", "Ilsa Wren", 404_000), ("Glasshouse", "Remi Stroud", 339_000),
+            ("Off The Grid", "Cass Bellamy", 368_000), ("Undertow", "Niko Haas", 417_000),
+            ("Static Bloom", "Ada Merrow, Kito", 351_000), ("Soft Machines", "Lio Tanner", 375_000),
+            ("Late Checkout", "Bea Rossi", 362_000), ("Long Exposure", "Hal Okafor", 393_000),
+        ];
+        let lining = bq == 1;
+        let found_upto = if lining { 5 } else { chart.len() };
+        let tracks: Vec<Track> = chart[1..found_upto]
+            .iter()
+            .enumerate()
+            .map(|(k, (n, a, d))| Track {
+                id: format!("bp{k}"),
+                name: n.to_string(),
+                artists: a.to_string(),
+                artist_ids: vec![],
+                album: String::new(),
+                album_id: String::new(),
+                duration_ms: *d,
+                uri: format!("spotify:track:bp{k}"),
+                album_art: String::new(),
+                added_at: None,
+                is_playable: true,
+            })
+            .collect();
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let source: Vec<BeatportTrack> = chart
+            .iter()
+            .enumerate()
+            .map(|(k, (n, a, _))| BeatportTrack {
+                rank: k as u32 + 1,
+                name: n.to_string(),
+                artists: a.to_string(),
+                label: String::new(),
+                isrc: String::new(),
+            })
+            .collect();
+        set_bp_panel(Some(BpPanel {
+            seq_id: 1,
+            active,
+            title: "// beatport \u{00b7} top 100 \u{00b7} tech house".into(),
+            found: if lining { 23 } else { 96 },
+            total: 100,
+            waiting: if lining { bp_waiting(&source, found_upto) } else { Vec::new() },
+            next_index: found_upto,
+            start: 0,
+            done: !lining,
+            missed: if lining { 0 } else { 4 },
+        }));
+        let mut rows = build_side_rows(&tracks, "", false);
+        let (pending, strip, found, total, note) = bp_panel_rows();
+        rows.extend(pending);
+        app.set_sidebar_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+        app.set_bp_strip_title(strip.into());
+        app.set_bp_strip_found(found);
+        app.set_bp_strip_total(total);
+        app.set_bp_done_note(note.into());
+        app.set_track_name(chart[0].0.into());
+        app.set_track_artist(chart[0].1.into());
+        app.set_sidebar_mode(1);
+    }
+    // `<variant>@<seconds>` also draws the ASCII backdrop at that time.
+    let shot_local = SHOT_LOCAL.lock().ok().map(|g| g.clone()).filter(|v| !v.is_empty());
+    let shot_lava = SHOT_LAVA.lock().ok().map(|g| g.clone()).filter(|v| !v.is_empty());
+    let shot_bg_t = shot_local
+        .as_ref()
+        .or(shot_lava.as_ref())
+        .and_then(|v| v.split_once('@'))
+        .and_then(|(_, t)| t.parse::<f32>().ok());
+    if let Some(v) = shot_lava.as_ref().map(|v| v.split('@').next().unwrap_or("").to_string()) {
+        app.set_playing(true);
+        match v.as_str() {
+            "menu" => {
+                let items = vec![CtxItem::new("ASCII lava screensaver", Cmd::LavaSaver)];
+                app.set_ctx_items(slint::ModelRc::from(Rc::new(slint::VecModel::from(ctx_rows(&items)))));
+                app.set_ctx_w(menu_width(&items));
+                app.set_ctx_x(820.0);
+                app.set_ctx_y(250.0);
+                app.set_ctx_open(true);
+            }
+            "saver" => app.set_lava_saver(true),
+            "settings" => app.set_settings_open(true),
+            "off" => app.set_lava_on(false),
+            _ => {}
+        }
+    }
+    if let Some(v) = shot_local.as_ref().map(|v| v.split('@').next().unwrap_or("").to_string()) {
+        local_ui::shot(&app, &v);
+        // The cross-fade always animates (280 ms): start it, then let it finish.
+        slint::platform::update_timers_and_animations();
+        let _ = app.get_local_fade();
+        std::thread::sleep(Duration::from_millis(350));
+        slint::platform::update_timers_and_animations();
+        eprintln!("local-fade {}", app.get_local_fade());
+    }
+    let np = SHOT_NAME_PROMPT.load(std::sync::atomic::Ordering::Relaxed);
+    if np >= 0 {
+        app.set_name_prompt_side(np);
+        if np == 1 {
+            app.set_sidebar_mode(1);
+            app.set_name_prompt_note("9 tracks from your queue".into());
+        } else {
+            app.set_name_prompt_note("4 tracks selected".into());
+        }
+        app.set_name_prompt_open(true);
     }
     window.set_size(slint::PhysicalSize::new(w, h));
     slint::platform::update_timers_and_animations();
+    // With a backdrop, render once first (the backdrop needs its laid-out panel size);
+    // the real render below then repaints what changed into the same buffer.
+    let mut buffer = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+    if let Some(t) = shot_bg_t {
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut buffer, w as usize);
+        });
+        slint::platform::update_timers_and_animations();
+        local_backdrop::shot_frame(&app, t);
+    }
 
     // 8 bits per channel, like the real window (the winit backend presents 32-bit
     // pixels). This used to render RGB565, whose 32 red/blue levels drew visible
     // rings into every gradient — the now-playing glow above all — that the live
     // app never showed, so screenshots misreported the UI.
-    let mut buffer = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
     window.request_redraw();
     window.draw_if_needed(|renderer| {
         renderer.render(&mut buffer, w as usize);
     });
+    if let Some(t) = shot_bg_t {
+        // What a live backdrop frame costs: draw the next frame and repaint over it.
+        let mut work = buffer.clone();
+        let start = std::time::Instant::now();
+        for i in 1..=20 {
+            local_backdrop::shot_frame(&app, t + i as f32 * 0.066);
+            slint::platform::update_timers_and_animations();
+            window.draw_if_needed(|renderer| {
+                renderer.render(&mut work, w as usize);
+            });
+        }
+        eprintln!("backdrop frame + repaint: {:.2} ms avg", start.elapsed().as_secs_f64() * 1000.0 / 20.0);
+    }
 
     // The window background is opaque, so every pixel ends fully covered and the
     // premultiplied channels are the final colour.
@@ -12138,9 +15496,21 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn titlebar_double_press_needs_time_and_place() {
+        use super::is_double_press;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let lim = Duration::from_millis(500);
+        let first = Some((t0, 100.0, 10.0));
+        assert!(is_double_press(first, (t0 + Duration::from_millis(200), 101.0, 11.0), lim, 2.0));
+        assert!(!is_double_press(first, (t0 + Duration::from_millis(700), 100.0, 10.0), lim, 2.0), "too slow");
+        assert!(!is_double_press(first, (t0 + Duration::from_millis(200), 140.0, 10.0), lim, 2.0), "too far");
+        assert!(!is_double_press(None, (t0, 100.0, 10.0), lim, 2.0), "a first press is never a double");
+    }
     use super::{
         active_source, another_device_active, beatport_row_menu, beatport_selection_menu,
-        build_dl_rows, cmp_display_text, command_match_score, context_playlist_id, download_row_menu,
+        build_dl_rows, cmp_display_text, command_match_score, context_playlist_id, download_row_menu, Cmd,
         QueueMirror, PersistedQueue, queue_restore_point,
         downloader, is_subsequence, menu_width, next_sidebar_mode,
         now_playing_menu, parse_rfc3339_utc, rate_limit_backoff, scoped_selection_uris,
@@ -12148,6 +15518,7 @@ mod tests {
         selection_menu, sidebar_recent_selection_menu, sidebar_row_menu, sort_playlist_view,
         sort_track_view, SearchAction, SEL_BEATPORT, SEL_NONE, SEL_SEARCH, SEL_SEARCH_DRILL,
         SEL_SIDEBAR, SEL_TRACKS,
+        drag_row, drag_selection, search_row_tops, SearchRow, SEARCH_ROW_TOPS,
     };
     use lightify_core::{PlaybackState, Playlist, Track};
 
@@ -12372,10 +15743,14 @@ mod tests {
         assert_eq!(labels(&search_track_menu(0, "spotify:track:x", "", true)), ["Play", "Add to queue"]);
         assert_eq!(
             labels(&search_playlist_menu(0)),
-            ["Play", "Show tracks", "Save playlist", "Download"]
+            ["Play", "Add to queue", "Show tracks", "Save playlist", "Download"]
         );
-        assert_eq!(labels(&search_album_menu(0)), ["Play", "Show tracks", "Save album"]);
-        assert_eq!(labels(&search_artist_menu(0)), ["Show tracks"]);
+        assert_eq!(labels(&search_album_menu(0)), ["Play", "Add to queue", "Show tracks", "Save album"]);
+        assert_eq!(labels(&search_artist_menu(0)), ["Show tracks", "Add top songs to queue"]);
+        // Every "Add to queue" on a hit is the whole-hit command, not the track one.
+        for menu in [search_playlist_menu(4), search_album_menu(4), search_artist_menu(4)] {
+            assert!(menu.iter().any(|i| matches!(i.cmd, Cmd::QueueSearchHit(4))));
+        }
         // "Download" was the last dimmed row here; it runs for real now that the
         // OnTheSpot bridge is in the shell (`src/downloader.rs`).
         let menu = search_track_menu(0, "spotify:track:x", "x", false);
@@ -12584,11 +15959,44 @@ mod tests {
         assert!(!m.advance("spotify:track:zzz"));
     }
 
+    #[test]
+    fn queue_mirror_ignores_the_track_a_play_replaced() {
+        // Clicked "a" while "c" was playing; a poll still reporting "c" right after is
+        // stale. It must neither drop the mirror nor eat "b" by folding forward to "c".
+        let mut m = mirror(&["b", "c", "d"], "a").replacing("spotify:track:c");
+        assert!(m.advance("spotify:track:c"));
+        assert_eq!(m.upcoming.len(), 3);
+        // Same for a previous track that isn't in the list at all.
+        let mut m = mirror(&["b"], "a").replacing("spotify:track:zzz");
+        assert!(m.advance("spotify:track:zzz"));
+        // Real progress still folds.
+        assert!(m.advance("spotify:track:b"));
+        assert!(m.upcoming.is_empty());
+    }
+
+    #[test]
+    fn spotify_backed_mirror_refills_once_per_track_when_low() {
+        let ups: Vec<Track> = (0..8).map(|i| menu_trk(&format!("t{i}"), true)).collect();
+        let mut m = QueueMirror::from_spotify("spotify:track:now".into(), ups);
+        assert!(!m.wants_refill(), "8 left is plenty");
+        assert!(m.advance("spotify:track:t2"));
+        assert_eq!(m.upcoming.len(), 5);
+        assert!(m.wants_refill());
+        m.refill_for = m.current_uri.clone();
+        assert!(!m.wants_refill(), "only once per track");
+        assert!(m.advance("spotify:track:t3"));
+        assert!(m.wants_refill(), "asks again on the next track");
+        // A list the user played locally is complete; it never asks Spotify.
+        let local = mirror(&["b"], "a");
+        assert!(!local.wants_refill());
+    }
+
     // ── Queue persistence ───────────────────────────────────────────────────
     fn pq(current: &str, upcoming: &[&str]) -> PersistedQueue {
         PersistedQueue {
             current_uri: current.to_string(),
             upcoming: upcoming.iter().map(|s| s.to_string()).collect(),
+            queued: None,
         }
     }
 
@@ -12623,11 +16031,158 @@ mod tests {
     }
 
     #[test]
+    fn drag_row_maps_content_y_to_rows() {
+        // Uniform lists: row = y / height, clamped to the list.
+        assert_eq!(drag_row(SEL_TRACKS, 0.0, 10), 0);
+        assert_eq!(drag_row(SEL_TRACKS, 46.0 * 3.0 + 1.0, 10), 3);
+        assert_eq!(drag_row(SEL_TRACKS, -50.0, 10), 0);
+        assert_eq!(drag_row(SEL_TRACKS, 9999.0, 10), 9);
+        assert_eq!(drag_row(SEL_SIDEBAR, 48.0 * 2.0 + 5.0, 10), 2);
+        assert_eq!(drag_row(SEL_BEATPORT, 46.0 * 7.0, 10), 7);
+        // Search mixes heights: header 36, top 96, hits 52.
+        let mk = |kind: &str| SearchRow { name: "".into(), sub: "".into(), kind: kind.into(), selected: false, art: "".into(), meta: "".into() };
+        let rows = vec![mk("top"), mk("header"), mk("track"), mk("track"), mk("header"), mk("artist")];
+        let tops = search_row_tops(&rows);
+        assert_eq!(tops, vec![0.0, 96.0, 132.0, 184.0, 236.0, 272.0]);
+        *SEARCH_ROW_TOPS.lock().unwrap() = tops;
+        assert_eq!(drag_row(SEL_SEARCH, 140.0, rows.len()), 2);
+        assert_eq!(drag_row(SEL_SEARCH, 200.0, rows.len()), 3);
+        assert_eq!(drag_row(SEL_SEARCH, 1000.0, rows.len()), 5);
+    }
+
+    #[test]
+    fn drags_add_to_the_selection_and_skip_unpickable_rows() {
+        let view: Vec<usize> = (0..20).collect();
+        let none = std::collections::BTreeSet::new();
+        // First group 2..=4, dragged upward to prove order doesn't matter.
+        let first = drag_selection(SEL_TRACKS, &none, 4, 2, &view, |_| true);
+        assert_eq!(first.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4]);
+        // A second drag 8..=9 keeps the first group: gaps allowed.
+        let both = drag_selection(SEL_TRACKS, &first, 8, 9, &view, |_| true);
+        assert_eq!(both.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 8, 9]);
+        // A drag that shrinks back only ever re-derives from its own base.
+        let shrunk = drag_selection(SEL_TRACKS, &first, 8, 8, &view, |_| true);
+        assert_eq!(shrunk.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4, 8]);
+        // The sorted drilled list maps display rows to source indices.
+        let sorted = vec![5usize, 3, 9];
+        let s = drag_selection(SEL_TRACKS, &none, 0, 1, &sorted, |_| true);
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![3, 5]);
+        // Search: headers/artists in the range are never picked.
+        let s = drag_selection(SEL_SEARCH, &none, 0, 5, &view, |r| r == 2 || r == 3);
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    fn np_trk(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            name: format!("Song {id}"),
+            artists: "A".into(),
+            artist_ids: vec![],
+            album: String::new(),
+            album_id: String::new(),
+            duration_ms: 200_000,
+            uri: format!("spotify:track:{id}"),
+            album_art: String::new(),
+            added_at: None,
+            is_playable: true,
+        }
+    }
+
+    #[test]
+    fn selections_are_not_capped_at_50() {
+        let tracks: Vec<Track> = (0..200).map(|i| np_trk(&format!("t{i}"))).collect();
+        let view: Vec<usize> = (0..200).collect();
+        let sel: std::collections::BTreeSet<usize> = (0..200).collect();
+        assert_eq!(super::selection_uris(&sel, &view, &tracks, false).len(), 200);
+        let side_sel: std::collections::BTreeSet<usize> = (0..120).collect();
+        let n = super::scoped_selection_uris(SEL_SIDEBAR, &side_sel, &[], &[], &[], &tracks, &[], true).len();
+        assert_eq!(n, 120);
+    }
+
+    #[test]
+    fn chart_placeholders_follow_the_matcher_and_hide_once_abandoned() {
+        let src: Vec<lightify_core::beatport::BeatportTrack> = (0..10)
+            .map(|k| lightify_core::beatport::BeatportTrack {
+                rank: k + 1,
+                name: format!("Row {k}"),
+                artists: "X".into(),
+                label: String::new(),
+                isrc: String::new(),
+            })
+            .collect();
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(9));
+        super::set_bp_panel(Some(super::BpPanel {
+            seq_id: 9,
+            active: active.clone(),
+            title: "t".into(),
+            found: 1,
+            total: 10,
+            waiting: super::bp_waiting(&src, 1),
+            next_index: 1,
+            start: 0,
+            done: false,
+            missed: 0,
+        }));
+        let (rows, strip, found, total, note) = super::bp_panel_rows();
+        assert_eq!(rows.len(), 9);
+        assert_eq!((rows[0].pending, rows[1].pending), (1, 2));
+        assert_eq!((strip.as_str(), found, total, note.as_str()), ("t", 1, 10, ""));
+        // Rows 1..6 looked up, 4 of them found: placeholders move past them.
+        super::bp_panel_progress(9, 5, 6, false);
+        let (rows, _, found, _, _) = super::bp_panel_rows();
+        assert_eq!((rows.len(), rows[0].name.as_str(), found), (4, "Row 6", 5));
+        // To the end: no placeholders, one summary line counting the misses.
+        super::bp_panel_progress(9, 8, 10, true);
+        let (rows, strip, _, _, note) = super::bp_panel_rows();
+        assert!(rows.is_empty() && strip.is_empty());
+        assert!(note.starts_with("8 of 10") && note.contains("2 not on"), "{note}");
+        // The user played something else: nothing of the chart shows any more.
+        active.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (rows, strip, _, _, note) = super::bp_panel_rows();
+        assert!(rows.is_empty() && strip.is_empty() && note.is_empty());
+        super::set_bp_panel(None);
+    }
+
+    #[test]
+    fn a_lagging_read_of_our_device_keeps_the_engine_track() {
+        let pb = |id: &str, dev: &str| PlaybackState {
+            is_playing: true,
+            progress_ms: 90_000,
+            duration_ms: 200_000,
+            shuffle_state: false,
+            repeat_state: "off".into(),
+            volume_percent: 50,
+            device_name: "Lightify".into(),
+            device_id: dev.into(),
+            track: Some(np_trk(id)),
+            context_uri: None,
+        };
+        let mut new = np_trk("new");
+        new.duration_ms = 123_000;
+        super::set_engine_now("ours", Some(new));
+        let last = Some(PlaybackState { progress_ms: 4_000, ..pb("new", "ours") });
+        // Still the previous song per the Web API: replaced, position kept from `last`.
+        let mut stale = pb("old", "ours");
+        assert!(super::engine_now_override(&mut stale, &last));
+        assert_eq!(stale.track.as_ref().map(|t| t.id.as_str()), Some("new"));
+        assert_eq!((stale.duration_ms, stale.progress_ms), (123_000, 4_000));
+        // Caught up: untouched.
+        let mut fresh = pb("new", "ours");
+        assert!(!super::engine_now_override(&mut fresh, &last));
+        assert_eq!(fresh.progress_ms, 90_000);
+        // Another device is playing: the engine's track is not the truth there.
+        let mut elsewhere = pb("other", "phone");
+        assert!(!super::engine_now_override(&mut elsewhere, &last));
+        assert_eq!(elsewhere.track.as_ref().map(|t| t.id.as_str()), Some("other"));
+        super::set_engine_now("", None);
+    }
+
+    #[test]
     fn menu_is_at_least_the_css_min_width_and_grows() {
-        // `.ctx-menu { min-width: 156px }` — short menus sit exactly there…
-        assert_eq!(menu_width(&search_artist_menu(0)), 156.0);
+        // The menu's minimum (176px in the redesign) — short menus sit exactly there…
+        assert_eq!(menu_width(&search_album_menu(0)), 176.0);
         // …and a long label pushes past it rather than eliding.
-        assert!(menu_width(&selection_menu(3)) > 156.0);
+        assert!(menu_width(&selection_menu(3)) > 176.0);
     }
 
     // ── Playback-engine recovery ────────────────────────────────────────────
@@ -12867,7 +16422,10 @@ mod tests {
     // ── Shuffle / repeat ───────────────────────────────────────────────────
 
     mod options {
-        use super::super::{apply_options_hold, next_repeat_mode, release_options_hold, OptionsHold, OPTIONS_HOLD};
+        use super::super::{
+            accept_device_options, apply_options_hold, next_repeat_mode, release_options_hold, OptionsHold,
+            OPTIONS_HOLD,
+        };
         use lightify_core::PlaybackState;
 
         fn pb(shuffle: bool, repeat: &str) -> PlaybackState {
@@ -12900,6 +16458,8 @@ mod tests {
                 shuffle: Some(true),
                 repeat: Some("track".into()),
                 until: std::time::Instant::now() + std::time::Duration::from_secs(6),
+                shuffle_confirmed: false,
+                repeat_confirmed: false,
             });
             // The Web API still reports the old state: the held choice wins.
             let mut p = pb(false, "off");
@@ -12924,10 +16484,44 @@ mod tests {
                 shuffle: Some(true),
                 repeat: None,
                 until: std::time::Instant::now() - std::time::Duration::from_secs(1),
+                shuffle_confirmed: false,
+                repeat_confirmed: false,
             });
             let mut p = pb(false, "off");
             apply_options_hold(&mut p);
             assert!(!p.shuffle_state);
+            release_options_hold();
+
+            // ── Our engine's own reports (same global hold, so same test) ──
+            let hold = |repeat: &str| {
+                *OPTIONS_HOLD.lock().unwrap() = Some(OptionsHold {
+                    shuffle: None,
+                    repeat: Some(repeat.into()),
+                    until: std::time::Instant::now() + std::time::Duration::from_secs(6),
+                    shuffle_confirmed: false,
+                    repeat_confirmed: false,
+                });
+            };
+            // No hold: the device is the authority.
+            assert_eq!(accept_device_options(None, Some("context".into())), (None, Some("context".into())));
+            // Repeat-one → off: librespot reports "repeat-one off" (= repeat-all) on the
+            // way. That step must not flip the button back to repeat-all...
+            hold("off");
+            assert_eq!(accept_device_options(None, Some("context".into())), (None, None));
+            // ...the final report confirms the choice and is shown...
+            assert_eq!(accept_device_options(None, Some("off".into())), (None, Some("off".into())));
+            // ...and the hold survives it, so a lagging poll still can't undo it.
+            let mut p = pb(false, "track");
+            apply_options_hold(&mut p);
+            assert_eq!(p.repeat_state, "off");
+            // A different report after confirmation is a real change from elsewhere.
+            hold("track");
+            assert_eq!(accept_device_options(None, Some("track".into())), (None, Some("track".into())));
+            assert_eq!(accept_device_options(None, Some("context".into())), (None, Some("context".into())));
+            assert!(OPTIONS_HOLD.lock().unwrap().is_none());
+            // A held repeat doesn't swallow a shuffle report.
+            hold("context");
+            assert_eq!(accept_device_options(Some(true), None), (Some(true), None));
             release_options_hold();
         }
     }

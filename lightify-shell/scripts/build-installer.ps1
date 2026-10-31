@@ -7,8 +7,14 @@
 
       pwsh -File scripts\build-installer.ps1
 
-  Steps: cargo build --release (which embeds the icon + version resource via
-  build.rs), then ISCC over installer\lightify.iss.
+  Steps: cargo build --release of the shell (which embeds the icon + version
+  resource via build.rs), the downloader bridge, and lightify-installer (the themed
+  setup / updater / uninstaller stub and its lightify-pack tool); then lightify-pack
+  appends the zstd-compressed payload (Lightify.exe, bridge, ffmpeg, LICENSE.md) to
+  the stub, producing target\installer\Lightify-Setup-<version>.exe.
+
+  Inno Setup is no longer used (installer\lightify.iss is kept for reference only).
+  scripts\stage-release.ps1 signs the result (latest.json) for auto-update.
 
   Payload is opt-out, not opt-in: a release build is meant to work on someone
   else's machine, and the downloader is useless without its bridge and ffmpeg.
@@ -24,13 +30,14 @@ param(
     [switch]$NoDownloader,
     # Skip ffmpeg (~202 MB). The bridge falls back to an ffmpeg on PATH.
     [switch]$NoFfmpeg,
-    # Package whatever is already in target\release instead of rebuilding.
+    # Package whatever is already built (shell, bridge, installer stub) instead of rebuilding.
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
 $shell = Split-Path -Parent $PSScriptRoot
 $repo  = Split-Path -Parent $shell
+$installerCrate = Join-Path $repo 'lightify-installer'
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 
@@ -70,13 +77,31 @@ if (-not $SkipBuild) {
             if ($LASTEXITCODE -ne 0) { Fail 'cargo build failed for lightify-tauri\src-tauri (downloader bridge)' }
         } finally { Pop-Location }
     }
+
+    # The installer stub (Lightify-Setup.exe) and its packer. Its build.rs reads the
+    # version from lightify-shell/Cargo.toml, so the stub's file version matches.
+    Write-Host 'Building installer (lightify-installer)...' -ForegroundColor Cyan
+    Push-Location $installerCrate
+    try {
+        $savedCC = $env:CC
+        Remove-Item Env:\CC -ErrorAction SilentlyContinue
+        try { cargo build --release } finally { if ($savedCC) { $env:CC = $savedCC } }
+        if ($LASTEXITCODE -ne 0) { Fail 'cargo build failed for lightify-installer' }
+    } finally { Pop-Location }
 }
 
 $exe = Join-Path $shell 'target\release\Lightify.exe'
 if (-not (Test-Path $exe)) { Fail "Missing $exe - build it first (drop -SkipBuild)." }
+$stub = Join-Path $installerCrate 'target\release\Lightify-Setup.exe'
+$pack = Join-Path $installerCrate 'target\release\lightify-pack.exe'
+foreach ($p in $stub, $pack) {
+    if (-not (Test-Path $p)) { Fail "Missing $p - build lightify-installer first (drop -SkipBuild)." }
+}
+$license = Join-Path $repo 'LICENSE.md'
+if (-not (Test-Path $license)) { Fail "Missing $license" }
 
-# ── 2. Payload checks, before ISCC gets a chance to fail on a missing file ───
-$defs = @("/DAppVersion=$version")
+# ── 2. Payload checks, before packing ───────────────────────────────────────
+$payload = @($exe)
 
 if (-not $NoDownloader) {
     $bridge = Join-Path $repo 'lightify-tauri\src-tauri\target\pyinstaller\release\dist\lightify-onthespot.exe'
@@ -100,28 +125,23 @@ if (-not $NoDownloader) {
     $bridgeHash = (Get-FileHash $bridge -Algorithm SHA256).Hash.Substring(0, 12).ToLower()
     Write-Host "Downloader bridge: $bridge" -ForegroundColor DarkGray
     Write-Host "  built $bridgeTime, sha256 $bridgeHash..." -ForegroundColor DarkGray
-    $defs += '/DIncludeDownloader=1'
+    $payload += $bridge
 }
 if (-not $NoFfmpeg) {
     $ffmpeg = Join-Path $repo 'lightify-tauri\src-tauri\target\release\ffmpeg.exe'
-    if (Test-Path $ffmpeg) { $defs += '/DIncludeFfmpeg=1' }
+    if (Test-Path $ffmpeg) { $payload += $ffmpeg }
     else { Fail "ffmpeg not found at $ffmpeg. Provide it, or pass -NoFfmpeg." }
 }
+$payload += $license
 
-# ── 3. Compile the installer ────────────────────────────────────────────────
-$iscc = @(
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $iscc) { Fail 'ISCC.exe (Inno Setup 6) not found - install it from jrsoftware.org.' }
-
-$iss = Join-Path $shell 'installer\lightify.iss'
-Write-Host "Packaging with $iscc" -ForegroundColor Cyan
-& $iscc $defs $iss
-if ($LASTEXITCODE -ne 0) { Fail 'ISCC failed' }
-
-$out = Join-Path $shell "target\installer\Lightify-Setup-$version.exe"
-if (-not (Test-Path $out)) { Fail "ISCC reported success but $out is missing" }
+# ── 3. Pack: the stub + the compressed payload ──────────────────────────────
+# lightify-pack reads the result back the way the stub will before it reports success.
+$outDir = Join-Path $shell 'target\installer'
+$null = New-Item -ItemType Directory -Path $outDir -Force
+$out = Join-Path $outDir "Lightify-Setup-$version.exe"
+Write-Host "Packing with $pack" -ForegroundColor Cyan
+& $pack --stub $stub --out $out --version $version @payload
+if ($LASTEXITCODE -ne 0) { Fail 'lightify-pack failed' }
+if (-not (Test-Path $out)) { Fail "lightify-pack reported success but $out is missing" }
 $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
 Write-Host "`nInstaller ready: $out ($mb MB)" -ForegroundColor Green

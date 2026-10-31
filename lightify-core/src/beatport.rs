@@ -116,9 +116,16 @@ pub struct BeatportTrack {
     pub artists: String,
     #[serde(default)]
     pub label: String,
+    /// The recording's ISRC, when the chart came from the v4 API (track charts carry
+    /// it; release charts and the page scrape don't). Lets Spotify be asked for the
+    /// exact recording in one search instead of fuzzy name searches.
+    #[serde(default)]
+    pub isrc: String,
 }
 
 /// All supported Beatport genre slugs (name → slug). The empty slug is "Overall".
+/// Synced with `api.beatport.com/v4/catalog/genres/` (2026-10-24), minus "DJ Edits"
+/// (110), which has no Top 100 — Beatport's own chart page for it is empty too.
 pub fn genre_list() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Overall", ""),
@@ -135,7 +142,7 @@ pub fn genre_list() -> Vec<(&'static str, &'static str)> {
         ("Country", "country/104"),
         ("Dance / Pop", "dance-pop/39"),
         ("Deep House", "deep-house/12"),
-        ("DJ Tools", "dj-tools/16"),
+        ("DJ Tools / Acapellas", "dj-tools-acapellas/16"),
         ("Downtempo", "downtempo/63"),
         ("Drum & Bass", "drum-bass/1"),
         ("Dubstep", "dubstep/18"),
@@ -147,6 +154,7 @@ pub fn genre_list() -> Vec<(&'static str, &'static str)> {
         ("Hip-Hop", "hip-hop/105"),
         ("House", "house/5"),
         ("Indie Dance", "indie-dance/37"),
+        ("Indie Tech", "indie-tech/112"),
         ("Jackin House", "jackin-house/97"),
         ("Latin", "latin/106"),
         ("Latin Electronic", "latin-electronic/111"),
@@ -184,14 +192,164 @@ pub fn chart_url(genre_slug: &str, chart_kind: &str) -> Result<String, String> {
     }
 }
 
-/// Fetch and parse a Beatport chart for a genre slug + chart kind (tracks/hype/releases).
+// ── Catalog API (primary) ─────────────────────────────────────────────────────
+//
+// Beatport's own site renders every chart from `api.beatport.com/v4`, authorised by
+// an anonymous token (`scope: app:prostore user:anon`, 10-minute life) its front end
+// refreshes from `www.beatport.com/api/auth/refresh-anon-token`. So charts come from
+// the API, the way the site's own pages get them; the page scrape is the fallback.
+//
+// Which *client* gets through Cloudflare changed under us (2026-10): the Edge148
+// impersonation below is now managed-challenged on every www request, cookie or not,
+// and so is reqwest (schannel) — but a plain BoringSSL client that doesn't pretend to
+// be a browser and names itself in its User-Agent is answered normally, on the token
+// endpoint, the API and the chart pages alike. (A bare `Mozilla/5.0` UA is challenged
+// too: a browser claim the TLS fingerprint doesn't back up is what gets flagged.)
+
+const ANON_TOKEN_URL: &str = "https://www.beatport.com/api/auth/refresh-anon-token";
+const API_BASE: &str = "https://api.beatport.com/v4/";
+
+/// The non-impersonating client: wreq's own BoringSSL defaults, an honest
+/// User-Agent, and the same timeouts as [`beatport_client`].
+fn plain_client() -> &'static wreq::Client {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    static CLIENT: OnceLock<wreq::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        wreq::Client::builder()
+            .user_agent(concat!("Lightify/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("failed to build Beatport HTTP client")
+    })
+}
+
+/// The current anonymous token and when to stop using it.
+static ANON_TOKEN: tokio::sync::Mutex<Option<(String, std::time::Instant)>> = tokio::sync::Mutex::const_new(None);
+
+/// An anonymous API token, reused until a minute before it expires. Single-flight:
+/// concurrent chart loads (the autoplay refill, a genre switch) share one refresh.
+async fn anon_token(force_refresh: bool) -> Result<String, String> {
+    use std::time::{Duration, Instant};
+    let mut slot = ANON_TOKEN.lock().await;
+    if !force_refresh {
+        if let Some((token, until)) = slot.as_ref() {
+            if Instant::now() < *until {
+                return Ok(token.clone());
+            }
+        }
+    }
+    let resp = plain_client()
+        .post(ANON_TOKEN_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Beatport token error: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Beatport token: HTTP {}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| format!("Beatport token: {e}"))?;
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("Beatport token: {e}"))?;
+    let token = v["access_token"].as_str().filter(|t| !t.is_empty()).ok_or("Beatport token: none in response")?;
+    let life = v["expires_in"].as_u64().unwrap_or(600).saturating_sub(60).max(30);
+    *slot = Some((token.to_string(), Instant::now() + Duration::from_secs(life)));
+    Ok(token.to_string())
+}
+
+/// The API path behind a chart page — the same requests the site's own chart pages
+/// make (overall Top 100 / Hype 100 / Top 100 Releases, or a genre's).
+pub fn chart_api_path(genre_slug: &str, chart_kind: &str) -> Result<String, String> {
+    let genre_id = if genre_slug.is_empty() {
+        None
+    } else {
+        Some(
+            genre_slug
+                .rsplit('/')
+                .next()
+                .and_then(|id| id.parse::<u32>().ok())
+                .ok_or_else(|| format!("Unknown Beatport genre \u{201c}{genre_slug}\u{201d}"))?,
+        )
+    };
+    Ok(match (chart_kind, genre_id) {
+        ("" | "tracks", None) => "catalog/tracks/top/100/?per_page=100".to_string(),
+        ("" | "tracks", Some(id)) => format!("catalog/genres/{id}/top/100/?per_page=100"),
+        ("hype", None) => "catalog/tracks/top/100/?per_page=100&hype=true".to_string(),
+        ("hype", Some(id)) => format!("catalog/genres/{id}/top/100/?per_page=100&hype=true"),
+        ("releases", None) => "catalog/releases/top/100/?per_page=100".to_string(),
+        ("releases", Some(id)) => format!("catalog/genres/{id}/top/100/?top_type=release&per_page=100"),
+        _ => return Err("Unknown Beatport chart".to_string()),
+    })
+}
+
+/// A chart from the catalog API. A 401 means the cached token went stale early
+/// (Beatport can revoke before `expires_in`): refresh once and retry.
+async fn fetch_chart_api(genre_slug: &str, chart_kind: &str) -> Result<Vec<BeatportTrack>, String> {
+    let url = format!("{API_BASE}{}", chart_api_path(genre_slug, chart_kind)?);
+    let mut token = anon_token(false).await?;
+    for attempt in 0..2 {
+        let resp = plain_client()
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| format!("Beatport API error: {e}"))?;
+        let status = resp.status();
+        if status == wreq::StatusCode::UNAUTHORIZED && attempt == 0 {
+            token = anon_token(true).await?;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("Beatport API: HTTP {status}"));
+        }
+        let body = resp.text().await.map_err(|e| format!("Beatport API: {e}"))?;
+        let v: Value = serde_json::from_str(&body).map_err(|e| format!("Beatport API: {e}"))?;
+        let tracks = v["results"].as_array().map(|a| extract_track_array(a)).unwrap_or_default();
+        if tracks.is_empty() {
+            return Err("Beatport API returned an empty chart".into());
+        }
+        return Ok(tracks);
+    }
+    Err("Beatport API: still unauthorised after a token refresh".into())
+}
+
+/// Fetch and parse a Beatport chart for a genre slug + chart kind (tracks/hype/releases):
+/// from the catalog API, else the chart page as the plain client sees it, else the
+/// chart page through the Edge impersonation with the reused session cookies.
 pub async fn fetch_chart(
     genre_slug: &str,
     chart_kind: &str,
 ) -> Result<Vec<BeatportTrack>, String> {
+    let debug = std::env::var("LIGHTIFY_DEBUG_BEATPORT").is_ok();
+    let api_err = match fetch_chart_api(genre_slug, chart_kind).await {
+        Ok(tracks) => return Ok(tracks),
+        Err(e) => e,
+    };
+    if debug {
+        eprintln!("[beatport debug] API path failed ({api_err}); trying the chart page");
+    }
+    match fetch_chart_page(genre_slug, chart_kind, plain_client(), None).await {
+        Ok(tracks) => return Ok(tracks),
+        Err(e) if debug => eprintln!("[beatport debug] plain chart page failed ({e}); trying the impersonating client"),
+        Err(_) => {}
+    }
+    // Every route failed: the API's reason is the one worth showing (the page
+    // fallbacks' errors only say the page was challenged), with the last fallback's
+    // message — which still names the OPEN ↗ escape hatch — after it.
+    fetch_chart_page(genre_slug, chart_kind, beatport_client(), load_cookie_header())
+        .await
+        .map_err(|page_err| format!("{api_err}. {page_err}"))
+}
+
+/// The chart page scrape (the original path, kept as the fallback), through
+/// `client`, sending `reused_cookie` when there is one.
+async fn fetch_chart_page(
+    genre_slug: &str,
+    chart_kind: &str,
+    client: &wreq::Client,
+    reused_cookie: Option<String>,
+) -> Result<Vec<BeatportTrack>, String> {
     let url = chart_url(genre_slug, chart_kind)?;
-    let reused_cookie = load_cookie_header();
-    let mut req = beatport_client().get(&url);
+    let mut req = client.get(&url);
     if let Some(cookie) = reused_cookie.as_deref() {
         req = req.header("Cookie", cookie);
     }
@@ -293,6 +451,7 @@ fn parse_beatport_html(html: &str) -> Result<Vec<BeatportTrack>, String> {
                         name: name.to_string(),
                         artists: artist,
                         label: String::new(),
+                        isrc: String::new(),
                     });
                 }
             }
@@ -403,7 +562,8 @@ pub fn extract_track_array(arr: &[Value]) -> Vec<BeatportTrack> {
                 }
             })
             .unwrap_or_default();
-        tracks.push(BeatportTrack { rank: (i + 1) as u32, name, artists, label });
+        let isrc = obj.get("isrc").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        tracks.push(BeatportTrack { rank: (i + 1) as u32, name, artists, label, isrc });
     }
     if tracks.len() >= 5 {
         truncate(tracks)
@@ -630,6 +790,29 @@ mod tests {
     }
 
     #[test]
+    fn chart_api_paths_match_the_site() {
+        assert_eq!(chart_api_path("", "tracks").unwrap(), "catalog/tracks/top/100/?per_page=100");
+        // v4 track rows carry the recording's ISRC; it rides along for matching.
+        // (Five rows: fewer is treated as "not a chart".)
+        let rows: Vec<serde_json::Value> = (0..5)
+            .map(|k| serde_json::json!({ "name": format!("T{k}"), "artists": [{ "name": "Beave" }], "isrc": "GBLV62606472" }))
+            .collect();
+        assert_eq!(extract_track_array(&rows)[0].isrc, "GBLV62606472");
+        assert_eq!(chart_api_path("drum-bass/1", "hype").unwrap(), "catalog/genres/1/top/100/?per_page=100&hype=true");
+        assert_eq!(
+            chart_api_path("drum-bass/1", "releases").unwrap(),
+            "catalog/genres/1/top/100/?top_type=release&per_page=100"
+        );
+        assert_eq!(chart_api_path("", "releases").unwrap(), "catalog/releases/top/100/?per_page=100");
+        assert!(chart_api_path("drum-bass", "tracks").is_err());
+        assert!(chart_api_path("", "nope").is_err());
+        // Every listed genre resolves to an API path.
+        for (name, slug) in genre_list() {
+            assert!(chart_api_path(slug, "tracks").is_ok(), "{name}");
+        }
+    }
+
+    #[test]
     fn invalid_reused_cookies_are_rejected() {
         assert!(is_cookie_name("cf_clearance") && is_cookie_value("abc.DEF-123_x=="));
         assert!(!is_cookie_value("a\r\nInjected: 1"));
@@ -638,3 +821,4 @@ mod tests {
         assert!(!is_cookie_name("bad name") && !is_cookie_name("a=b") && !is_cookie_name(""));
     }
 }
+

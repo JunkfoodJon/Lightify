@@ -1,3 +1,8 @@
+; NO LONGER USED. Lightify ships its own themed installer now: lightify-installer/
+; (Lightify-Setup.exe, built and packed by scripts/build-installer.ps1). This file is
+; kept for reference only; its AppId is what the new installer looks for to migrate
+; (silently uninstall) an existing Inno Setup install.
+;
 ; Lightify installer (Inno Setup 6).
 ;
 ; Build with scripts/build-installer.ps1, which compiles the release binary first
