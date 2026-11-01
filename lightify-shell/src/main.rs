@@ -28,6 +28,7 @@ mod local_library;
 mod local_player;
 mod local_ui;
 mod engine;
+mod play_history;
 #[cfg(windows)]
 mod media_controls;
 #[cfg(windows)]
@@ -44,6 +45,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use lightify_core::{BeatportTrack, Device, PlaybackState, SearchResults, Session, Track};
+// Every string Rust shows goes through `tr!` (LANGUAGE-PLAN.md).
+use lightify_i18n::tr;
 // `Model` brings row_count/row_data/set_row_data/as_any onto the ModelRc handles —
 // how the presence marks are edited in place without replacing the model.
 use slint::Model;
@@ -258,6 +261,9 @@ enum Cmd {
     ListFilter(String),
     // ── Search: Enter in the box opens the top result ──
     SearchEnter,
+    /// Settings › language switched: say everything the worker put on screen again
+    /// in the new language (`switch_language`).
+    Relabel,
 }
 
 /// What clicking a search-result row should do (parallel to the displayed rows).
@@ -277,7 +283,16 @@ enum SearchAction {
 
 
 fn main() -> Result<(), slint::PlatformError> {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    // `--lang <code>`: this run's language over the saved one, for renders and testing
+    // (`--lang qps-ploc` in a LIGHTIFY_PSEUDO build); never saved. Taken out of `args`
+    // so the modes below see their own arguments where they expect them.
+    if let Some(pos) = args.iter().position(|a| a.eq_ignore_ascii_case("--lang")) {
+        let code = args.drain(pos..(pos + 2).min(args.len())).nth(1).unwrap_or_default();
+        // The Rust half straight away: a shot builds some of its text before the window.
+        lightify_i18n::select(LANGS, &code);
+        let _ = LANG_ARG.set(code);
+    }
     if let Some(pos) = args.iter().position(|a| a == "--shot") {
         // --shot <out.png> [WxH]
         // The optional size matters for anything whose position is derived from the
@@ -571,6 +586,11 @@ fn main() -> Result<(), slint::PlatformError> {
         selftest_menus();
         return Ok(());
     }
+    if let Some(pos) = args.iter().position(|a| a == "--selftest-language") {
+        // --selftest-language [code]: every bundled language, or just that one.
+        selftest_language(args.get(pos + 1).map(String::as_str));
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--selftest-lava") {
         selftest_lava();
         return Ok(());
@@ -597,20 +617,27 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--shot-update") {
-        // --shot-update <downloading|available|ready> <out.png> [closed]: Settings ›
+        // --shot-update <downloading|available|ready> <out.png> [closed] [WxH]: Settings ›
         // updates in that state (sample data); `closed` leaves Settings shut to show the
         // footer cog asking for attention instead.
         let state = args.get(pos + 1).cloned().unwrap_or_else(|| "downloading".into());
         let path = args.get(pos + 2).cloned().unwrap_or_else(|| "shot-update.png".into());
         let closed = args.get(pos + 3).map(|s| s.as_str()) == Some("closed");
+        // [WxH] last, after `closed` when both are given.
+        let (w, h) = args
+            .iter()
+            .skip(pos + 3)
+            .find_map(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .unwrap_or((980u32, 660u32));
         if let Ok(mut g) = SHOT_UPDATE.lock() {
             *g = if closed { format!("{state}:closed") } else { state };
         }
-        render_to_png(&path, 980, 660, None);
+        render_to_png(&path, w, h, None);
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--shot-lava") {
-        // --shot-lava <native|menu|saver|settings|off>[@secs] <out.png> [WxH]: the
+        // --shot-lava <native|menu|saver|settings|settings-lang|off>[@secs] <out.png> [WxH]: the
         // ASCII lava behind the Spotify now-playing pane (sample data), its right-click
         // menu, the screensaver, Settings › ascii lava, or switched off.
         let variant = args.get(pos + 1).cloned().unwrap_or_else(|| "native@4".into());
@@ -686,6 +713,10 @@ fn main() -> Result<(), slint::PlatformError> {
     };
 
     let app = MainWindow::new()?;
+    // The language, for Slint's strings and ours alike; Slint wants the window first.
+    apply_language(&language_in_use());
+    push_languages(&app, &language_in_use());
+    cjk_font_fallback();
     #[cfg(windows)]
     single_instance::listen(app.as_weak());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -925,6 +956,16 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let tx = tx.clone();
+        let weak = app.as_weak();
+        app.on_settings_select_language(move |i| {
+            let (Some(a), Some(setting)) = (weak.upgrade(), language_choices().get(i.max(0) as usize).cloned()) else {
+                return;
+            };
+            switch_language(&a, &setting, &tx);
+        });
+    }
+    {
+        let tx = tx.clone();
         app.on_toggle_like(move || {
             let _ = tx.send(Cmd::ToggleLike);
         });
@@ -966,6 +1007,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let tx = tx.clone();
         app.on_toggle_sidebar(move |m| {
             let _ = tx.send(Cmd::ToggleSidebar(m));
+            // Local mode's RECENT is its own list; bring its "5m ago" times up to date.
+            if m == 2 {
+                let _ = tx.send(Cmd::Local(local_ui::LocalCmd::RecentRefresh));
+            }
         });
     }
     {
@@ -1417,7 +1462,7 @@ async fn worker(
             p
         }
         Err(e) => {
-            set_status(&weak, format!("Playlists error — {e}"));
+            set_status(&weak, tr!("Playlists error — {}", e));
             // Offline or rate-limited: keep showing the cached library rather than
             // blanking the list the user can already see.
             cached_library.unwrap_or_default()
@@ -1607,7 +1652,7 @@ async fn worker(
     let mut last_bulk_queue_write: Option<tokio::time::Instant> = None;
     if let Some(secs) = refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await {
         backoff_until = Some(tokio::time::Instant::now() + Duration::from_secs(secs));
-        set_status(&weak, format!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
+        set_status(&weak, tr!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
     } else if last.is_none() {
         // Nothing is playing anywhere on the account: offer the last track, paused at
         // where it stopped (UI-PLAN D3). Only an offer — nothing plays until the user
@@ -1648,6 +1693,9 @@ async fn worker(
     // The track RECENT last saw playing; a change means the one before it just
     // finished and belongs at the top of the list.
     let mut recent_seen_track = String::new();
+    // Spotify's last recently-played answer (other devices' plays), kept to re-merge
+    // with Lightify's own history whenever a play of ours counts.
+    let mut recent_spotify: Vec<Track> = Vec::new();
     // Local progress clock — see `ProgressClock`.
     let mut clock = poll_interval(PROGRESS_CLOCK);
     clock.tick().await;
@@ -1703,7 +1751,7 @@ async fn worker(
                     let now = tokio::time::Instant::now();
                     if let Some(secs) = refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await {
                         backoff_until = Some(now + Duration::from_secs(secs));
-                        set_status(&weak, format!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
+                        set_status(&weak, tr!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
                     }
                     // Still the previous track per the Web API? Read again shortly —
                     // the cover, duration and liked state all come from this read.
@@ -1773,7 +1821,7 @@ async fn worker(
                         + playback_poll_every(Duration::from_millis(poll_ms), &last, owned);
                     if let Some(secs) = refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await {
                         backoff_until = Some(now + Duration::from_secs(secs));
-                        set_status(&weak, format!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
+                        set_status(&weak, tr!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
                     }
                 }
             }
@@ -1806,7 +1854,7 @@ async fn worker(
                 if let Some(until) = backoff_until {
                     if now < until {
                         let remaining = (until - now).as_secs() + 1;
-                        set_status(&weak, format!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
+                        set_status(&weak, tr!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
                     } else {
                         backoff_until = None;
                         set_status(&weak, String::new());
@@ -1834,7 +1882,7 @@ async fn worker(
                         if lightify_core::net::is_offline() {
                             // Unreachable: probe again later, backing off, and say so once.
                             next_playback_poll = now + net_probe;
-                            set_status(&weak, format!("Offline \u{2014} reconnecting (next try in {}s)", net_probe.as_secs()));
+                            set_status(&weak, tr!("Offline \u{2014} reconnecting (next try in {})", fmt_backoff(net_probe.as_secs())));
                             net_probe = (net_probe * 2).min(NET_PROBE_MAX);
                             was_offline = true;
                         } else if was_offline {
@@ -1849,7 +1897,7 @@ async fn worker(
                     match polled {
                         Some(secs) => {
                             backoff_until = Some(now + Duration::from_secs(secs));
-                            set_status(&weak, format!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
+                            set_status(&weak, tr!("Spotify rate limit \u{2014} pausing polling for {}", fmt_backoff(secs)));
                         }
                         None => {
                             // Recent re-marks locally (no network); the queue only needs a
@@ -1908,6 +1956,10 @@ async fn worker(
                             // recently-played with a short lag), so it shows up without
                             // closing and reopening the panel.
                             if sidebar_mode == 2 {
+                                // A play of ours just counted: it's in the list right away.
+                                if play_history::take_changed() {
+                                    sidebar_tracks = play_history::merged(&recent_spotify);
+                                }
                                 let cur = current_id(&last);
                                 if cur != recent_seen_track {
                                     if !recent_seen_track.is_empty() {
@@ -1934,7 +1986,7 @@ async fn worker(
                     // shared, already-limited quota (see the dev-mode quota note).
                     if let Some(until) = backoff_until.filter(|u| *u > tokio::time::Instant::now()) {
                         let remaining = (until - tokio::time::Instant::now()).as_secs() + 1;
-                        set_status(&weak, format!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
+                        set_status(&weak, tr!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
                         // Hold the query and run it the moment the limit lifts, rather
                         // than silently dropping what the user typed.
                         pending_query = Some(q);
@@ -1974,9 +2026,9 @@ async fn worker(
                             Err(e) => {
                                 if let Some(secs) = rate_limit_backoff(&e) {
                                     backoff_until = Some(tokio::time::Instant::now() + Duration::from_secs(secs));
-                                    set_status(&weak, format!("Spotify rate limit \u{2014} pausing for {}", fmt_backoff(secs)));
+                                    set_status(&weak, tr!("Spotify rate limit \u{2014} pausing for {}", fmt_backoff(secs)));
                                 } else {
-                                    set_status(&weak, format!("Search \u{2014} {e}"));
+                                    set_status(&weak, tr!("Search \u{2014} {}", e));
                                 }
                             }
                         }
@@ -2025,11 +2077,10 @@ async fn worker(
                             _ => !selected.is_empty(),
                         } =>
                     {
-                        let (side, n, what) = match &c {
-                            Cmd::SidebarCreatePlaylist => (1, sidebar_tracks.len(), "from your queue"),
-                            _ => (if sel_scope == SEL_SIDEBAR { 1 } else { 0 }, selected.len(), "selected"),
+                        let (side, note) = match &c {
+                            Cmd::SidebarCreatePlaylist => (1, name_note_queue(sidebar_tracks.len())),
+                            _ => (if sel_scope == SEL_SIDEBAR { 1 } else { 0 }, name_note_selected(selected.len())),
                         };
-                        let note = format!("{n} {} {what}", if n == 1 { "track" } else { "tracks" });
                         let _ = weak.upgrade_in_event_loop(move |a| {
                             a.set_name_prompt_side(side);
                             a.set_name_prompt_note(note.into());
@@ -2048,7 +2099,7 @@ async fn worker(
                             // Only spaces: keep the prompt up rather than closing it on
                             // nothing.
                             let _ = weak.upgrade_in_event_loop(|a| {
-                                a.set_name_prompt_note("Give the playlist a name".into());
+                                a.set_name_prompt_note(tr!("Give the playlist a name").into());
                                 a.set_name_prompt_open(true);
                             });
                             continue;
@@ -2080,7 +2131,69 @@ async fn worker(
                 match cmd {
                     Cmd::Stamped { .. } => unreachable!("unstamp opens every stamp"),
                     Cmd::StaleClick => {
-                        set_status(&weak, "That list just changed \u{2014} try again".to_string());
+                        set_status(&weak, tr!("That list just changed \u{2014} try again"));
+                    }
+                    Cmd::Relabel => {
+                        // The library list (Liked Songs, "N tracks"), and the open list's
+                        // title when it is Liked Songs.
+                        push_rows(&weak, build_rows(&playlists, &pl_view, &presence.source, presence.playing));
+                        if drilled && drill_src.as_deref() == Some(LIKED_SOURCE) {
+                            set_drill(&weak, true, tr!("Liked Songs"));
+                        }
+                        // Search: section heads, "See all", the result lines — rebuilt from
+                        // what is held. Only when the rebuild is the same rows (a page
+                        // still arriving would make it something else).
+                        let recents = matches!(search_actions.first(), Some(SearchAction::ClearRecents));
+                        let (rows, actions) = if recents {
+                            build_recents(&load_recent_searches())
+                        } else {
+                            build_search(&search_results, &search_filter, &last_query)
+                        };
+                        if !search_rows.is_empty() && rows.len() == search_rows.len() {
+                            drop_selection(&weak, SEL_SEARCH, &mut selected, &mut sel_anchor, &mut sel_scope);
+                            search_actions = actions;
+                            search_rows = rows.clone();
+                            push_search(&weak, rows);
+                        }
+                        // QUEUE / RECENT: the "5m" times and the empty-panel line.
+                        if sidebar_mode == 1 || sidebar_mode == 2 {
+                            drop_selection(&weak, SEL_SIDEBAR, &mut selected, &mut sel_anchor, &mut sel_scope);
+                            let empty = if sidebar_mode == 1 { tr!("No queued tracks") } else { tr!("No recent tracks yet") };
+                            let rows = build_side_rows(&sidebar_tracks, &current_id(&last), sidebar_mode == 2);
+                            set_sidebar(&weak, sidebar_mode, rows, empty);
+                        } else if sidebar_mode == 3 {
+                            spawn_downloads_refresh(&weak);
+                        }
+                        // Settings, open while the language changed: its Rust-made lines.
+                        if devices_open(&weak) {
+                            set_account(&weak, connected_status(&session));
+                            push_outputs(&weak);
+                            spawn_downloader_status(&weak);
+                            push_devices(&weak, build_device_rows(&devices));
+                        }
+                        relabel_settings_lines(&weak);
+                        // An open prompt: the name prompt's note, the delete confirmation.
+                        let note = match (&pending_create, &pending_sel) {
+                            (Some(Cmd::SidebarCreatePlaylist), _) => Some(name_note_queue(sidebar_tracks.len())),
+                            (Some(_), Some((_, sel, _))) => Some(name_note_selected(sel.len())),
+                            _ => None,
+                        };
+                        let confirm = match &pending_confirm {
+                            Some(Cmd::DeletePlaylist(_, name)) => {
+                                Some(tr!("Delete \u{201c}{}\u{201d} from your Spotify library?", name))
+                            }
+                            _ => None,
+                        };
+                        let _ = weak.upgrade_in_event_loop(move |a| {
+                            if let (Some(n), true) = (note, a.get_name_prompt_open()) {
+                                a.set_name_prompt_note(n.into());
+                            }
+                            if let (Some(m), true) = (confirm, a.get_confirm_open()) {
+                                a.set_confirm_title(tr!("DELETE PLAYLIST").into());
+                                a.set_confirm_message(m.into());
+                            }
+                        });
+                        local_ui::handle(&mut local, local_ui::LocalCmd::Relabel, &weak, &self_tx);
                     }
                     // Only meaningful on the sign-in page, before this loop starts.
                     Cmd::SignInAuthorise(_) | Cmd::SignInRetry(_) | Cmd::SignInOpenDashboard => {}
@@ -2088,9 +2201,9 @@ async fn worker(
                         // Play on the resume offer: that track, in its context, from
                         // where it stopped, on our own device.
                         if let Some(rp) = take_resume_offer() {
-                            set_status(&weak, format!("Resuming {}\u{2026}", rp.name));
+                            set_status(&weak, tr!("Resuming {}\u{2026}", rp.name));
                             if let Err(e) = session.play_at(rp.context_uri.as_deref(), &rp.track_uri, rp.position_ms).await {
-                                set_status(&weak, format!("Resume \u{2014} {e}"));
+                                set_status(&weak, tr!("Resume \u{2014} {}", e));
                             }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                         }
@@ -2109,7 +2222,7 @@ async fn worker(
                             engine::send(&serde_json::json!({ "cmd": cmd }).to_string());
                         } else {
                             let r = if playing { session.pause().await } else { session.play().await };
-                            if let Err(e) = r { set_status(&weak, format!("Playback — {e}")); }
+                            if let Err(e) = r { set_status(&weak, tr!("Playback — {}", e)); }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                         }
                     }
@@ -2143,7 +2256,7 @@ async fn worker(
                                     // advance itself; don't surface a raw 403 for that.
                                     engine::send(&serde_json::json!({ "cmd": "next" }).to_string());
                                 } else {
-                                    set_status(&weak, format!("Next \u{2014} {e}"));
+                                    set_status(&weak, tr!("Next \u{2014} {}", e));
                                 }
                             }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
@@ -2160,7 +2273,7 @@ async fn worker(
                                 if is_player_restriction(&e) {
                                     engine::send(&serde_json::json!({ "cmd": "prev" }).to_string());
                                 } else {
-                                    set_status(&weak, format!("Prev \u{2014} {e}"));
+                                    set_status(&weak, tr!("Prev \u{2014} {}", e));
                                 }
                             }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
@@ -2182,13 +2295,13 @@ async fn worker(
                             // Liked Songs (saved tracks, no context).
                             drilled = true;
                             drill_src = Some(LIKED_SOURCE.to_string());
-                            set_drill(&weak, true, "Liked Songs".to_string());
-                            set_status(&weak, "Loading Liked Songs\u{2026}".to_string());
+                            set_drill(&weak, true, tr!("Liked Songs"));
+                            set_status(&weak, tr!("Loading Liked Songs\u{2026}"));
                             push_tracks(&weak, &[], &[]);
                             push_sort(&weak, &trk_mode, &trk_dir);
                             tracks.clear();
                             context = None;
-                            pager = TrackPager::start(PagerSource::Liked, "Liked Songs");
+                            pager = TrackPager::start(PagerSource::Liked, &tr!("Liked Songs"));
                             load_next_track_page(
                                 &weak, &mut session, &mut pager, &mut tracks, &mut trk_view,
                                 &trk_mode, &trk_dir, &presence,
@@ -2201,7 +2314,7 @@ async fn worker(
                             drilled = true;
                             drill_src = Some(id.clone());
                             set_drill(&weak, true, name.clone());
-                            set_status(&weak, format!("Loading {name}\u{2026}"));
+                            set_status(&weak, tr!("Loading {}\u{2026}", name));
                             push_tracks(&weak, &[], &[]);
                             push_sort(&weak, &trk_mode, &trk_dir);
                             tracks.clear();
@@ -2230,7 +2343,7 @@ async fn worker(
                     }
                     Cmd::PlayTrack { row, uri } => 'play_track: {
                         let Some(i) = resolve_track_row(&trk_view, &tracks, row, &uri) else {
-                            set_status(&weak, "That track is no longer in the list".to_string());
+                            set_status(&weak, tr!("That track is no longer in the list"));
                             break 'play_track;
                         };
                         // With the seq id too: a refill task already in flight checks it
@@ -2314,13 +2427,13 @@ async fn worker(
                                         sidebar_tracks = m.upcoming.clone();
                                         set_sidebar(
                                             &weak, 1, build_side_rows(&sidebar_tracks, &t.id, false),
-                                            "No queued tracks".to_string(),
+                                            tr!("No queued tracks"),
                                         );
                                     }
                                 }
                             }
                             launched_src = drill_src.clone();
-                            if let Err(e) = r { set_status(&weak, format!("Play — {e}")); }
+                            if let Err(e) = r { set_status(&weak, tr!("Play — {}", e)); }
                             refresh_soon(&mut poll_soon);
                         }
                     }
@@ -2430,7 +2543,7 @@ async fn worker(
                                             search_station = Some((epoch, uri.clone()));
                                         }
                                         Ok(_) => {}
-                                        Err(e) => set_status(&weak, format!("Play \u{2014} {e}")),
+                                        Err(e) => set_status(&weak, tr!("Play \u{2014} {}", e)),
                                     }
                                     refresh_soon(&mut poll_soon);
                                 }
@@ -2460,7 +2573,7 @@ async fn worker(
                                             push_search_tracks(&weak, &s_tracks);
                                             set_status(&weak, String::new());
                                         }
-                                        Err(e) => set_status(&weak, format!("Album \u{2014} {e}")),
+                                        Err(e) => set_status(&weak, tr!("Album \u{2014} {}", e)),
                                     }
                                 }
                                 SearchAction::Artist { id, name } => {
@@ -2519,7 +2632,7 @@ async fn worker(
                                 release_options_hold();
                                 show_options(&weak, &mut last, Some(cur), None);
                                 release_options_hold();
-                                set_status(&weak, format!("Shuffle \u{2014} {e}"));
+                                set_status(&weak, tr!("Shuffle \u{2014} {}", e));
                             }
                         }
                     }
@@ -2547,7 +2660,7 @@ async fn worker(
                                 release_options_hold();
                                 show_options(&weak, &mut last, None, Some(cur));
                                 release_options_hold();
-                                set_status(&weak, format!("Repeat \u{2014} {e}"));
+                                set_status(&weak, tr!("Repeat \u{2014} {}", e));
                             }
                         }
                     }
@@ -2565,9 +2678,9 @@ async fn worker(
                                         m.enqueue(t);
                                     }
                                     persist_mirror(&queue_mirror);
-                                    set_status(&weak, "Added to queue".to_string());
+                                    set_status(&weak, tr!("Added to queue"));
                                 }
-                                Err(e) => set_status(&weak, format!("Queue — {e}")),
+                                Err(e) => set_status(&weak, tr!("Queue — {}", e)),
                             }
                             if sidebar_mode == 1 {
                                 refresh_sidebar(&weak, &self_tx, sidebar_mode, &mut sidebar_tracks, &last, &mut queue_mirror, &mut sidebar_generation).await;
@@ -2670,7 +2783,7 @@ async fn worker(
                             .map(|t| t.id.clone())
                             .unwrap_or_default();
                         if id.is_empty() {
-                            set_status(&weak, "No track playing".to_string());
+                            set_status(&weak, tr!("No track playing"));
                         } else {
                             let target = !liked.on;
                             push_liked(&weak, liked.on, true);
@@ -2681,13 +2794,12 @@ async fn worker(
                                     push_liked(&weak, target, false);
                                     set_status(
                                         &weak,
-                                        if target { "Saved to Liked Songs" } else { "Removed from Liked Songs" }
-                                            .to_string(),
+                                        if target { tr!("Saved to Liked Songs") } else { tr!("Removed from Liked Songs") },
                                     );
                                 }
                                 Err(e) => {
                                     push_liked(&weak, liked.on, false);
-                                    set_status(&weak, format!("Like — {e}"));
+                                    set_status(&weak, tr!("Like — {}", e));
                                 }
                             }
                         }
@@ -2708,7 +2820,7 @@ async fn worker(
                                 }
                             } else {
                                 if let Err(e) = session.seek(ms).await {
-                                    set_status(&weak, format!("Seek — {e}"));
+                                    set_status(&weak, tr!("Seek — {}", e));
                                 }
                                 settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                             }
@@ -2725,7 +2837,7 @@ async fn worker(
                                 &serde_json::json!({ "cmd": "volume", "percent": pct }).to_string(),
                             );
                         } else if let Err(e) = session.set_volume(pct).await {
-                            set_status(&weak, format!("Volume \u{2014} {e}"));
+                            set_status(&weak, tr!("Volume \u{2014} {}", e));
                         }
                         // Deliberately no `settle_refresh` here: re-reading playback
                         // right after the write is what fetched the pre-change level
@@ -2763,8 +2875,12 @@ async fn worker(
                                     .await;
                                 }
                                 2 => {
+                                    // Lightify's own plays show at once; Spotify's (other
+                                    // devices) merge in when they arrive.
                                     sidebar_generation += 1;
-                                    set_sidebar(&weak, 2, vec![], "Loading recent\u{2026}".to_string());
+                                    sidebar_tracks = play_history::merged(&recent_spotify);
+                                    let pid = current_id(&last);
+                                    set_sidebar(&weak, 2, build_side_rows(&sidebar_tracks, &pid, true), tr!("Loading recent\u{2026}"));
                                     spawn_sidebar_fetch(&self_tx, 2, sidebar_generation);
                                 }
                                 _ => {
@@ -2772,7 +2888,7 @@ async fn worker(
                                     // this pushes an empty track model and fills the separate
                                     // `sidebar-dl-rows` asynchronously.
                                     sidebar_tracks.clear();
-                                    set_sidebar(&weak, 3, vec![], "Loading downloads\u{2026}".to_string());
+                                    set_sidebar(&weak, 3, vec![], tr!("Loading downloads\u{2026}"));
                                     spawn_downloads_refresh(&weak);
                                 }
                             }
@@ -2792,7 +2908,7 @@ async fn worker(
                         // every other row is a playlist, indexed through the sort view
                         // exactly like `FollowPlaylist` does.
                         let target = if row == 0 {
-                            downloader::spotify_url("liked", "").ok().map(|u| (u, "Liked Songs".to_string()))
+                            downloader::spotify_url("liked", "").ok().map(|u| (u, tr!("Liked Songs")))
                         } else {
                             pl_view
                                 .get(row.wrapping_sub(1))
@@ -2805,7 +2921,7 @@ async fn worker(
                         };
                         match target {
                             Some((url, label)) => spawn_enqueue_download(&weak, &self_tx, url, label),
-                            None => set_status(&weak, "Nothing to download on that row".to_string()),
+                            None => set_status(&weak, tr!("Nothing to download on that row")),
                         }
                     }
                     Cmd::DownloadSearchItem(row) => {
@@ -2821,21 +2937,21 @@ async fn worker(
                         };
                         match target {
                             Some((url, label)) => spawn_enqueue_download(&weak, &self_tx, url, label),
-                            None => set_status(&weak, "Nothing to download on that row".to_string()),
+                            None => set_status(&weak, tr!("Nothing to download on that row")),
                         }
                     }
                     Cmd::DownloadBeatportRow(row) => {
                         // A Beatport row is a Beatport track: resolve it to a Spotify
                         // track first, the same scored match `BpPlay`/`BpQueue` use.
                         if let Some(bt) = bp_tracks.get(row).cloned() {
-                            set_status(&weak, format!("Matching \u{201c}{}\u{201d} on Spotify\u{2026}", bt.name));
+                            set_status(&weak, tr!("Matching \u{201c}{}\u{201d} on Spotify\u{2026}", bt.name));
                             match session.beatport_match(&bt.name, &bt.artists).await {
                                 Ok(Some(t)) => match downloader::spotify_url("track", &t.id) {
                                     Ok(url) => spawn_enqueue_download(&weak, &self_tx, url, t.name.clone()),
                                     Err(e) => set_status(&weak, e),
                                 },
-                                Ok(None) => set_status(&weak, format!("No Spotify match to download for {}", bt.name)),
-                                Err(e) => set_status(&weak, format!("Beatport \u{2014} {e}")),
+                                Ok(None) => set_status(&weak, tr!("No Spotify match to download for {}", bt.name)),
+                                Err(e) => set_status(&weak, tr!("Beatport \u{2014} {}", e)),
                             }
                         }
                     }
@@ -2845,7 +2961,7 @@ async fn worker(
                         if sidebar_mode != 3 {
                             sidebar_mode = 3;
                             sidebar_tracks.clear();
-                            set_sidebar(&weak, 3, vec![], "Loading downloads\u{2026}".to_string());
+                            set_sidebar(&weak, 3, vec![], tr!("Loading downloads\u{2026}"));
                         }
                         spawn_downloads_refresh(&weak);
                     }
@@ -2866,7 +2982,7 @@ async fn worker(
                                 async move { downloader::retry(&id).await },
                             );
                         } else {
-                            set_status(&weak, "That download is no longer listed".to_string());
+                            set_status(&weak, tr!("That download is no longer listed"));
                         }
                     }
                     Cmd::DownloadCancel(id) => {
@@ -2878,7 +2994,7 @@ async fn worker(
                                 async move { downloader::cancel(&id).await },
                             );
                         } else {
-                            set_status(&weak, "That download is no longer listed".to_string());
+                            set_status(&weak, tr!("That download is no longer listed"));
                         }
                     }
                     Cmd::DownloadDelete(id) => {
@@ -2890,7 +3006,7 @@ async fn worker(
                                 async move { downloader::delete(&id).await },
                             );
                         } else {
-                            set_status(&weak, "That download is no longer listed".to_string());
+                            set_status(&weak, tr!("That download is no longer listed"));
                         }
                     }
                     Cmd::DownloadOpenFolder(path) => {
@@ -2901,7 +3017,7 @@ async fn worker(
                         }
                     }
                     Cmd::DownloaderLogin => {
-                        push_downloader_status(&weak, "Waiting\u{2026}".to_string(), false, true);
+                        push_downloader_status(&weak, tr!("Waiting\u{2026}"), false, true);
                         let weak2 = weak.clone();
                         let tx2 = self_tx.clone();
                         tokio::spawn(async move {
@@ -2916,18 +3032,17 @@ async fn worker(
                                     if !st.spotify_ready {
                                         set_status(
                                             &weak2,
-                                            "Downloader sign-in started \u{2014} open Spotify and pick \
+                                            tr!("Downloader sign-in started \u{2014} open Spotify and pick \
                                              OnTheSpot in the device list. If Windows asked about the \
                                              firewall, make sure both Private and Public networks are \
-                                             allowed \u{2014} it only checks Private by default."
-                                                .to_string(),
+                                             allowed \u{2014} it only checks Private by default."),
                                         );
                                     }
                                     st.login_in_progress
                                 }
                                 Err(e) => {
                                     push_downloader_status(&weak2, e.clone(), false, false);
-                                    set_status(&weak2, format!("Downloader setup failed \u{2014} {e}"));
+                                    set_status(&weak2, tr!("Downloader setup failed \u{2014} {}", e));
                                     false
                                 }
                             };
@@ -2985,9 +3100,9 @@ async fn worker(
                                     let _ = weak2.upgrade_in_event_loop(move |app| {
                                         app.set_settings_download_path(shown.into());
                                     });
-                                    set_status(&weak2, "Download path saved".to_string());
+                                    set_status(&weak2, tr!("Download path saved"));
                                 }
-                                Err(e) => set_status(&weak2, format!("Failed to set download path \u{2014} {e}")),
+                                Err(e) => set_status(&weak2, tr!("Failed to set download path \u{2014} {}", e)),
                             }
                         });
                     }
@@ -3006,9 +3121,8 @@ async fn worker(
                         if !engine_owns_playback(&last, &engine_device_id) {
                             set_status(
                                 &weak,
-                                "Lightify isn\u{2019}t the active Spotify player right now \u{2014} \
-                                 Settings \u{2192} Restart, then try again."
-                                    .to_string(),
+                                tr!("Lightify isn\u{2019}t the active Spotify player right now \u{2014} \
+                                 Settings \u{2192} Restart, then try again."),
                             );
                         } else if last_is_stale(&last, &engine_track_name) {
                             // `clearqueue` reloads `last`'s track at `last`'s position; if
@@ -3037,7 +3151,7 @@ async fn worker(
                             // resets the device queue and reloads the current song where it
                             // was (see the engine's `ClearQueue` for why the reset matters).
                             let playing_uri = last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()).unwrap_or_default();
-                            set_status(&weak, "Clearing the queue\u{2026}".to_string());
+                            set_status(&weak, tr!("Clearing the queue\u{2026}"));
                             clear_device_queue(&mut session, &last).await;
                             // Only forget what we queued once the queue has been read back
                             // and shows it gone. Forgetting first is what let a station's
@@ -3053,22 +3167,26 @@ async fn worker(
                                     bp_queued.retain(|u| left.contains(u));
                                     if left.is_empty() {
                                         station_active = false;
-                                        set_status(&weak, "Cleared queue".to_string());
+                                        set_status(&weak, tr!("Cleared queue"));
                                     } else {
                                         // Still tracked, so the next play or station retries.
-                                        set_status(&weak, format!("Cleared the queue, but {} queued tracks are still there", left.len()));
+                                        set_status(&weak, lightify_i18n::trn!(
+                                            "Cleared the queue, but {n} queued tracks are still there",
+                                            "Cleared the queue, but {n} queued tracks are still there",
+                                            left.len()
+                                        ));
                                     }
                                     if sidebar_mode == 1 {
                                         let pid = current_id(&last);
                                         sidebar_tracks = t;
                                         set_sidebar(&weak, 1,
                                             build_side_rows(&sidebar_tracks, &pid, false),
-                                            "No queued tracks".to_string());
+                                            tr!("No queued tracks"));
                                     }
                                 }
                                 None => {
                                     // Never heard back: keep the bookkeeping rather than guess.
-                                    set_status(&weak, "Couldn\u{2019}t confirm the queue was cleared \u{2014} try again".to_string());
+                                    set_status(&weak, tr!("Couldn\u{2019}t confirm the queue was cleared \u{2014} try again"));
                                 }
                             }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
@@ -3155,8 +3273,15 @@ async fn worker(
                                             persist_mirror(&queue_mirror);
                                         }
                                     }
-                                    sidebar_tracks = t;
-                                    let empty = if mode == 1 { "No queued tracks" } else { "No recent tracks yet" };
+                                    // RECENT: Spotify's list only has other devices' plays
+                                    // (play_history.rs) — shown merged with Lightify's own.
+                                    sidebar_tracks = if mode == 2 {
+                                        recent_spotify = t;
+                                        play_history::merged(&recent_spotify)
+                                    } else {
+                                        t
+                                    };
+                                    let empty = if mode == 1 { tr!("No queued tracks") } else { tr!("No recent tracks yet") };
                                     set_sidebar(&weak, mode, build_side_rows(&sidebar_tracks, &pid, mode == 2), empty.to_string());
                                 }
                                 // This used to be swallowed outright for the ticker's own
@@ -3167,10 +3292,17 @@ async fn worker(
                                 // call 404s once that remembered device is no longer the
                                 // active one (see `engine_owns_playback`'s doc comment),
                                 // which is exactly what silently not-updating looked like.
+                                // RECENT still has Lightify's own plays when Spotify's
+                                // list won't load: show those, and say what failed.
+                                Err(e) if mode == 2 && !play_history::merged(&[]).is_empty() => {
+                                    sidebar_tracks = play_history::merged(&[]);
+                                    set_sidebar(&weak, 2, build_side_rows(&sidebar_tracks, &pid, true), tr!("No recent tracks yet"));
+                                    set_status(&weak, tr!("Recent \u{2014} other devices\u{2019} plays didn\u{2019}t load: {}", e));
+                                }
                                 Err(e) => {
                                     sidebar_tracks.clear();
-                                    let label = if mode == 1 { "Queue" } else { "Recent" };
-                                    set_sidebar(&weak, mode, vec![], format!("{label} \u{2014} {e}"));
+                                    let what = if mode == 1 { tr!("Queue \u{2014} {}", e) } else { tr!("Recent \u{2014} {}", e) };
+                                    set_sidebar(&weak, mode, vec![], what);
                                 }
                             }
                         }
@@ -3194,9 +3326,8 @@ async fn worker(
                             // the track was removed.
                             set_status(
                                 &weak,
-                                "Lightify isn\u{2019}t the active Spotify player right now \u{2014} \
-                                 Settings \u{2192} Restart, then try again."
-                                    .to_string(),
+                                tr!("Lightify isn\u{2019}t the active Spotify player right now \u{2014} \
+                                 Settings \u{2192} Restart, then try again."),
                             );
                         } else if sidebar_mode == 1 && last_is_stale(&last, &engine_track_name) {
                             set_status(&weak, STALE_TRACK_NOTE.to_string());
@@ -3233,9 +3364,9 @@ async fn worker(
                                 sidebar_generation += 1;
                                 persist_mirror(&queue_mirror);
                                 let pid = current_id(&last);
-                                set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
+                                set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), tr!("No queued tracks"));
                                 spawn_delayed_queue_refresh(&self_tx);
-                                set_status(&weak, format!("Removed \u{201c}{}\u{201d} from the queue", removed.name));
+                                set_status(&weak, tr!("Removed \u{201c}{}\u{201d} from the queue", removed.name));
                             }
                         }
                     }
@@ -3342,7 +3473,7 @@ async fn worker(
                                     }
                                 }
                                 if let Err(e) = r {
-                                    set_status(&weak, format!("Play — {e}"));
+                                    set_status(&weak, tr!("Play — {}", e));
                                 }
                                 settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                                 refresh_sidebar(&weak, &self_tx, sidebar_mode, &mut sidebar_tracks, &last, &mut queue_mirror, &mut sidebar_generation).await;
@@ -3387,7 +3518,7 @@ async fn worker(
                         bp_active_seq.store(0, std::sync::atomic::Ordering::SeqCst);
                         if i < bp_tracks.len() {
                             let label = bp_tracks[i].name.clone();
-                            set_bp_status(&weak, format!("Matching \u{201c}{label}\u{201d} on Spotify\u{2026}"));
+                            set_bp_status(&weak, tr!("Matching \u{201c}{}\u{201d} on Spotify\u{2026}", label));
 
                             // Only the first couple of rows are matched before playback
                             // starts - that wait is the one the user actually feels.
@@ -3436,7 +3567,7 @@ async fn worker(
                                     }
                                     Ok((None, _)) => continue,
                                     Err(e) => {
-                                        set_bp_status(&weak, format!("Match \u{2014} {e}"));
+                                        set_bp_status(&weak, tr!("Match \u{2014} {}", e));
                                         break;
                                     }
                                 }
@@ -3445,7 +3576,7 @@ async fn worker(
                             if first.is_empty() {
                                 set_bp_status(
                                     &weak,
-                                    format!("No Spotify match for \u{201c}{label}\u{201d}"),
+                                    tr!("No Spotify match for \u{201c}{}\u{201d}", label),
                                 );
                             } else if engine::running() && !engine_device_id.is_empty() {
                                 // The whole chart as ONE list on our own engine: the first
@@ -3468,22 +3599,29 @@ async fn worker(
                                 sidebar_generation += 1;
                                 persist_mirror(&queue_mirror);
                                 match play_track_list(&mut session, &first, 0, 0, &last, &engine_device_id).await {
-                                    Err(e) => set_bp_status(&weak, format!("Play \u{2014} {e}")),
+                                    Err(e) => set_bp_status(&weak, tr!("Play \u{2014} {}", e)),
                                     Ok(_) => {
                                         let left = seq.source.len().saturating_sub(seq.next_index);
-                                        let prefix = if clicked_matched {
-                                            String::new()
-                                        } else {
-                                            format!(
-                                                "\u{201c}{label}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{first_name}\u{201d} instead. "
-                                            )
-                                        };
+                                        // Whole sentences, with and without the note that
+                                        // the clicked row was swapped for the next one.
                                         set_bp_status(
                                             &weak,
-                                            if left > 0 {
-                                                format!("{prefix}Playing \u{2014} lining up the rest of the chart ({left} to go)")
-                                            } else {
-                                                format!("{prefix}Playing {first_name} \u{2014} {first_artists}")
+                                            match (clicked_matched, left > 0) {
+                                                (true, true) => lightify_i18n::trn!(
+                                                    "Playing \u{2014} lining up the rest of the chart ({n} to go)",
+                                                    "Playing \u{2014} lining up the rest of the chart ({n} to go)",
+                                                    left
+                                                ),
+                                                (true, false) => tr!("Playing {} \u{2014} {}", first_name, first_artists),
+                                                (false, true) => lightify_i18n::trn!(
+                                                    "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} lining up the rest of the chart ({n} to go)",
+                                                    "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} lining up the rest of the chart ({n} to go)",
+                                                    left, label, first_name
+                                                ),
+                                                (false, false) => tr!(
+                                                    "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing {1} \u{2014} {2}",
+                                                    label, first_name, first_artists
+                                                ),
                                             },
                                         );
                                         bp_active_seq.store(seq.id, std::sync::atomic::Ordering::SeqCst);
@@ -3511,7 +3649,7 @@ async fn worker(
                                             if let Some(m) = queue_mirror.as_ref() {
                                                 sidebar_tracks = m.upcoming.clone();
                                                 let pid = first_tracks[0].id.clone();
-                                                set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
+                                                set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), tr!("No queued tracks"));
                                             }
                                         }
                                         if left > 0 {
@@ -3527,11 +3665,11 @@ async fn worker(
                             } else {
                                 launched_src = None;
                                 if let Err(e) = session.play_uris(&first).await {
-                                    set_bp_status(&weak, format!("Play \u{2014} {e}"));
+                                    set_bp_status(&weak, tr!("Play \u{2014} {}", e));
                                 } else {
                                     set_bp_status(
                                         &weak,
-                                        format!("Playing {first_name} \u{2014} {first_artists}"),
+                                        tr!("Playing {} \u{2014} {}", first_name, first_artists),
                                     );
                                     settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                                     // One refill now so the queue isn't empty the moment
@@ -3548,21 +3686,27 @@ async fn worker(
                                     // since this is the one the user actually ends up
                                     // reading (the "queued, left to match" update lands
                                     // moments later and would otherwise erase it).
-                                    let prefix = if clicked_matched {
-                                        String::new()
-                                    } else {
-                                        format!(
-                                            "\u{201c}{label}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{first_name}\u{201d} instead. "
-                                        )
-                                    };
                                     set_bp_status(
                                         &weak,
-                                        if left > 0 {
-                                            format!(
-                                                "{prefix}Playing \u{2014} {ahead} queued, {left} left to match"
-                                            )
-                                        } else {
-                                            format!("{prefix}Playing \u{2014} {ahead} queued")
+                                        // The count that picks the plural form: what is
+                                        // left to match, else what was queued.
+                                        match (clicked_matched, left > 0) {
+                                            (true, true) => lightify_i18n::trn!(
+                                                "Playing \u{2014} {0} queued, {n} left to match",
+                                                "Playing \u{2014} {0} queued, {n} left to match",
+                                                left, ahead
+                                            ),
+                                            (true, false) => lightify_i18n::trn!("Playing \u{2014} {n} queued", "Playing \u{2014} {n} queued", ahead),
+                                            (false, true) => lightify_i18n::trn!(
+                                                "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} {2} queued, {n} left to match",
+                                                "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} {2} queued, {n} left to match",
+                                                left, label, first_name, ahead
+                                            ),
+                                            (false, false) => lightify_i18n::trn!(
+                                                "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} {n} queued",
+                                                "\u{201c}{0}\u{201d} isn\u{2019}t on Spotify \u{2014} playing \u{201c}{1}\u{201d} instead. Playing \u{2014} {n} queued",
+                                                ahead, label, first_name
+                                            ),
                                         },
                                     );
                                     last_bulk_queue_write = Some(tokio::time::Instant::now());
@@ -3579,9 +3723,9 @@ async fn worker(
                         match lightify_core::beatport::chart_url(&slug, &bp_kind) {
                             Ok(url) => {
                                 if open_url(&url) {
-                                    set_bp_status(&weak, "Opened the chart in your browser".to_string());
+                                    set_bp_status(&weak, tr!("Opened the chart in your browser"));
                                 } else {
-                                    set_bp_status(&weak, format!("Open this in your browser: {url}"));
+                                    set_bp_status(&weak, tr!("Open this in your browser: {}", url));
                                 }
                             }
                             Err(e) => set_bp_status(&weak, e),
@@ -3613,16 +3757,23 @@ async fn worker(
                                     sidebar_tracks = m.upcoming.clone();
                                     persist_mirror(&queue_mirror);
                                     let pid = current_id(&last);
-                                    set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), "No queued tracks".to_string());
+                                    set_sidebar(&weak, 1, build_side_rows(&sidebar_tracks, &pid, false), tr!("No queued tracks"));
                                 }
                             }
                             match (&error, done) {
                                 (_, true) => {
-                                    set_bp_status(&weak, format!("Playing the chart \u{2014} {n} of {total} tracks found on Spotify"));
+                                    set_bp_status(
+                                        &weak,
+                                        lightify_i18n::trn!(
+                                            "Playing the chart \u{2014} {} of {n} tracks found on Spotify",
+                                            "Playing the chart \u{2014} {} of {n} tracks found on Spotify",
+                                            total, n
+                                        ),
+                                    );
                                     bp_list = None;
                                 }
-                                (Some(e), false) => set_bp_status(&weak, format!("Lining up the chart \u{2014} {n} so far; retrying ({e})")),
-                                (None, false) => set_bp_status(&weak, format!("Playing the chart \u{2014} {n} lined up\u{2026}")),
+                                (Some(e), false) => set_bp_status(&weak, tr!("Lining up the chart \u{2014} {} so far; retrying ({})", n, e)),
+                                (None, false) => set_bp_status(&weak, tr!("Playing the chart \u{2014} {} lined up\u{2026}", n)),
                             }
                         }
                     }
@@ -3650,7 +3801,7 @@ async fn worker(
                                     }
                                 }
                                 if let Some(e) = error {
-                                    set_status(&weak, format!("Beatport queue refill \u{2014} {e}"));
+                                    set_status(&weak, tr!("Beatport queue refill \u{2014} {}", e));
                                 }
                             }
                             // else: this result is for a sequence that's since been
@@ -3673,7 +3824,7 @@ async fn worker(
                         // Re-read the live process state rather than trusting the last
                         // event: an engine that died silently must not still read "Running".
                         if !engine::running() {
-                            push_engine_status(&weak, "Not running".to_string(), false);
+                            push_engine_status(&weak, || tr!("Not running"), false);
                         }
                         push_outputs(&weak);
                         // Downloader: the path comes straight off the shared config
@@ -3684,21 +3835,22 @@ async fn worker(
                         let _ = weak.upgrade_in_event_loop(move |app| {
                             app.set_settings_download_path(dl_path.into());
                         });
-                        push_downloader_status(&weak, "Checking\u{2026}".to_string(), false, false);
+                        push_downloader_status(&weak, tr!("Checking\u{2026}"), false, false);
                         spawn_downloader_status(&weak);
-                        set_device_status(&weak, "Loading\u{2026}".to_string());
+                        set_device_status(&weak, || tr!("Loading\u{2026}"));
                         push_devices(&weak, vec![]);
                         match session.devices().await {
                             Ok(d) => {
                                 if d.is_empty() {
-                                    set_device_status(&weak, "No devices yet \u{2014} Lightify\u{2019}s own player is still starting.".to_string());
+                                    set_device_status(&weak, || tr!("No devices yet \u{2014} Lightify\u{2019}s own player is still starting."));
                                 }
                                 push_devices(&weak, build_device_rows(&d));
                                 devices = d;
                             }
                             Err(e) => {
                                 devices.clear();
-                                set_device_status(&weak, format!("Devices — {e}"));
+                                let e2 = e.clone();
+                                set_device_status(&weak, move || tr!("Devices \u{2014} {}", e2));
                                 push_devices(&weak, vec![]);
                             }
                         }
@@ -3708,12 +3860,12 @@ async fn worker(
                             let playing = last.as_ref().map(|p| p.is_playing).unwrap_or(false);
                             match session.transfer_playback(&d.id, playing).await {
                                 Ok(()) => {
-                                    set_status(&weak, format!("Playing on {}", d.name));
+                                    set_status(&weak, tr!("Playing on {}", d.name));
                                     note_settings_open(false);
                                     let _ = weak.upgrade_in_event_loop(|app| app.set_settings_open(false));
                                     settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                                 }
-                                Err(e) => set_status(&weak, format!("Transfer — {e}")),
+                                Err(e) => set_status(&weak, tr!("Transfer — {}", e)),
                             }
                         }
                     }
@@ -3812,7 +3964,7 @@ async fn worker(
                             8 => local_ui::row_menu(&local, index),
                             9 => local_ui::node_menu(&local, index),
                             10 => local_ui::queue_menu(&local, index),
-                            11 => vec![CtxItem::new("ASCII lava screensaver", Cmd::LavaSaver)],
+                            11 => vec![CtxItem::new(tr!("ASCII lava screensaver"), Cmd::LavaSaver)],
                             _ => Vec::new(),
                         };
                         // Menu actions run later (after `RunContext` re-queues them), so
@@ -3845,7 +3997,7 @@ async fn worker(
                                     if sidebar_mode == 1 {
                                         let _ = self_tx.send(Cmd::RefreshQueueSidebar);
                                     }
-                                    set_status(&weak, "Added to queue".to_string());
+                                    set_status(&weak, tr!("Added to queue"));
                                 }
                                 Err(e) => set_status(&weak, e),
                             }
@@ -3854,7 +4006,7 @@ async fn worker(
                     Cmd::LikeSearchTrack(i) => {
                         if let Some(SearchAction::Track { id, .. }) = search_actions.get(i) {
                             match session.set_track_saved(id, true).await {
-                                Ok(()) => set_status(&weak, "Saved to Liked Songs".to_string()),
+                                Ok(()) => set_status(&weak, tr!("Saved to Liked Songs")),
                                 Err(e) => set_status(&weak, e),
                             }
                         }
@@ -3877,27 +4029,27 @@ async fn worker(
                             _ => String::new(),
                         };
                         if uri.is_empty() {
-                            set_status(&weak, "Nothing to play here".to_string());
+                            set_status(&weak, tr!("Nothing to play here"));
                         } else {
                             launched_src = None;
                             if let Err(e) = session.play_context_start(&uri).await {
-                                set_status(&weak, format!("Play \u{2014} {e}"));
+                                set_status(&weak, tr!("Play \u{2014} {}", e));
                             }
                             refresh_soon(&mut poll_soon);
                         }
                     }
                     Cmd::QueueSearchHit(i) => 'queue_hit: {
                         let Some(action) = search_actions.get(i).cloned() else { break 'queue_hit };
-                        set_status(&weak, "Getting tracks\u{2026}".to_string());
+                        set_status(&weak, tr!("Getting tracks\u{2026}"));
                         let (name, picked, total) = match search_hit_tracks(&mut session, &action).await {
                             Ok(r) => r,
                             Err(e) => {
-                                set_status(&weak, format!("Add to queue \u{2014} {e}"));
+                                set_status(&weak, tr!("Add to queue \u{2014} {}", e));
                                 break 'queue_hit;
                             }
                         };
                         if picked.is_empty() {
-                            set_status(&weak, format!("Nothing playable in \u{201c}{name}\u{201d}"));
+                            set_status(&weak, tr!("Nothing playable in \u{201c}{}\u{201d}", name));
                             break 'queue_hit;
                         }
                         // Appended after anything already queued, in the hit's own order:
@@ -3911,7 +4063,7 @@ async fn worker(
                                 Ok(()) => {
                                     queued += 1;
                                     if queued % 5 == 0 && queued < uris.len() {
-                                        set_status(&weak, format!("Adding to queue\u{2026} {queued}/{}", uris.len()));
+                                        set_status(&weak, tr!("Adding to queue\u{2026} {}/{}", queued, uris.len()));
                                     }
                                 }
                                 Err(e) => {
@@ -3925,30 +4077,47 @@ async fn worker(
                             last_bulk_queue_write = Some(tokio::time::Instant::now());
                             spawn_delayed_queue_refresh(&self_tx);
                         }
-                        let what = if queued == 1 { "1 track".to_string() } else { format!("{queued} tracks") };
                         match failed {
-                            Some(e) if queued == 0 => set_status(&weak, format!("Add to queue \u{2014} {e}")),
-                            Some(e) => set_status(&weak, format!("Added {what} to queue, then stopped \u{2014} {e}")),
+                            Some(e) if queued == 0 => set_status(&weak, tr!("Add to queue \u{2014} {}", e)),
+                            Some(e) => set_status(
+                                &weak,
+                                lightify_i18n::trn!(
+                                    "Added {n} track to queue, then stopped \u{2014} {0}",
+                                    "Added {n} tracks to queue, then stopped \u{2014} {0}",
+                                    queued, e
+                                ),
+                            ),
                             None if total > queued && queued == QUEUE_HIT_MAX => set_status(
                                 &weak,
-                                format!("Added the first {queued} of {total} tracks from \u{201c}{name}\u{201d} to queue"),
+                                lightify_i18n::trn!(
+                                    "Added the first {0} of {n} tracks from \u{201c}{1}\u{201d} to queue",
+                                    "Added the first {0} of {n} tracks from \u{201c}{1}\u{201d} to queue",
+                                    total, queued, name
+                                ),
                             ),
-                            None => set_status(&weak, format!("Added {what} from \u{201c}{name}\u{201d} to queue")),
+                            None => set_status(
+                                &weak,
+                                lightify_i18n::trn!(
+                                    "Added {n} track from \u{201c}{0}\u{201d} to queue",
+                                    "Added {n} tracks from \u{201c}{0}\u{201d} to queue",
+                                    queued, name
+                                ),
+                            ),
                         }
                     }
                     Cmd::SaveSearchItem(i) => {
                         let r = match search_actions.get(i) {
                             Some(SearchAction::Playlist { id, .. }) => {
-                                Some((session.follow_playlist(id).await, "Playlist saved"))
+                                Some((session.follow_playlist(id).await, tr!("Playlist saved")))
                             }
                             Some(SearchAction::Album { id, .. }) => {
-                                Some((session.save_album(id).await, "Album saved"))
+                                Some((session.save_album(id).await, tr!("Album saved")))
                             }
                             _ => None,
                         };
                         if let Some((res, ok)) = r {
                             match res {
-                                Ok(()) => set_status(&weak, ok.to_string()),
+                                Ok(()) => set_status(&weak, ok),
                                 Err(e) => set_status(&weak, e),
                             }
                         }
@@ -3959,7 +4128,7 @@ async fn worker(
                             match session.beatport_match(&bt.name, &bt.artists).await {
                                 Ok(Some(t)) => match queue_one(&mut session, &t.uri, engine_owns_playback(&last, &engine_device_id)).await {
                                     Ok(()) => {
-                                        set_status(&weak, format!("Added to queue: {}", t.name));
+                                        set_status(&weak, tr!("Added to queue: {}", t.name));
                                         let uri = t.uri.clone();
                                         mirror_queued(&mut queue_mirror, &mut sidebar_generation, &[uri], &[std::slice::from_ref(&t)]);
                                         if sidebar_mode == 1 {
@@ -3968,8 +4137,8 @@ async fn worker(
                                     }
                                     Err(e) => set_status(&weak, e),
                                 },
-                                Ok(None) => set_status(&weak, format!("No Spotify match for {}", bt.name)),
-                                Err(e) => set_status(&weak, format!("Beatport \u{2014} {e}")),
+                                Ok(None) => set_status(&weak, tr!("No Spotify match for {}", bt.name)),
+                                Err(e) => set_status(&weak, tr!("Beatport \u{2014} {}", e)),
                             }
                         }
                     }
@@ -3999,7 +4168,7 @@ async fn worker(
                         // The toolbar button is enabled by the global selection count,
                         // so it can fire while the selection belongs to another list —
                         // whose indices would then be read as Beatport row numbers.
-                        set_status(&weak, "No Beatport tracks selected".to_string());
+                        set_status(&weak, tr!("No Beatport tracks selected"));
                     }
                     Cmd::BpPlaySelection | Cmd::BpQueueSelection | Cmd::BpCreatePlaylist => {
                         // A selection is its own fixed list, not the running chart —
@@ -4017,9 +4186,9 @@ async fn worker(
                             .map(|(_, t)| t.clone())
                             .collect();
                         if picked.is_empty() {
-                            set_status(&weak, "No Beatport tracks selected".to_string());
+                            set_status(&weak, tr!("No Beatport tracks selected"));
                         } else {
-                            set_status(&weak, format!("Matching {} Beatport tracks\u{2026}", picked.len()));
+                            set_status(&weak, lightify_i18n::trn!("Matching {n} Beatport tracks\u{2026}", "Matching {n} Beatport tracks\u{2026}", picked.len()));
                             let mut uris = Vec::new();
                             let mut bp_matched: Vec<Track> = Vec::new();
                             let mut missed = 0usize;
@@ -4033,9 +4202,9 @@ async fn worker(
                                 }
                             }
                             if uris.is_empty() {
-                                set_status(&weak, "No Spotify matches for the selection".to_string());
+                                set_status(&weak, tr!("No Spotify matches for the selection"));
                             } else {
-                                let tail = if missed > 0 { format!(" ({missed} unmatched)") } else { String::new() };
+                                // Each message whole, with and without the unmatched count.
                                 match cmd {
                                     Cmd::BpPlaySelection => {
                                         end_autoplay_authority(
@@ -4047,9 +4216,20 @@ async fn worker(
                                         launched_src = None;
                                         let n = uris.len();
                                         if let Err(e) = session.play_uris(&uris).await {
-                                            set_status(&weak, format!("Play \u{2014} {e}"));
+                                            set_status(&weak, tr!("Play \u{2014} {}", e));
                                         } else {
-                                            set_status(&weak, format!("Playing {n} selected{tail}"));
+                                            set_status(
+                                                &weak,
+                                                if missed > 0 {
+                                                    lightify_i18n::trn!(
+                                                        "Playing {n} selected ({} unmatched)",
+                                                        "Playing {n} selected ({} unmatched)",
+                                                        n, missed
+                                                    )
+                                                } else {
+                                                    lightify_i18n::trn!("Playing {n} selected", "Playing {n} selected", n)
+                                                },
+                                            );
                                         }
                                         settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                                     }
@@ -4069,15 +4249,41 @@ async fn worker(
                                         }
                                         match failed {
                                             Some(e) if queued == 0 => set_status(&weak, e),
-                                            Some(e) => set_status(&weak, format!("Added {queued} to queue, then stopped \u{2014} {e}")),
-                                            None => set_status(&weak, format!("Added {queued} to queue{tail}")),
+                                            Some(e) => set_status(
+                                                &weak,
+                                                lightify_i18n::trn!(
+                                                    "Added {n} to queue, then stopped \u{2014} {}",
+                                                    "Added {n} to queue, then stopped \u{2014} {}",
+                                                    queued, e
+                                                ),
+                                            ),
+                                            None if missed > 0 => set_status(
+                                                &weak,
+                                                lightify_i18n::trn!(
+                                                    "Added {n} to queue ({} unmatched)",
+                                                    "Added {n} to queue ({} unmatched)",
+                                                    queued, missed
+                                                ),
+                                            ),
+                                            None => set_status(&weak, lightify_i18n::trn!("Added {n} to queue", "Added {n} to queue", queued)),
                                         }
                                     }
                                     _ => {
-                                        let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("BP Selection"));
+                                        let name = named.clone().unwrap_or_else(|| timestamped_playlist_name(&tr!("BP Selection")));
                                         match session.create_playlist(&name, &uris).await {
                                             Ok(pl) => {
-                                                set_status(&weak, format!("Created: {}{tail}", pl.name));
+                                                set_status(
+                                                    &weak,
+                                                    if missed > 0 {
+                                                        lightify_i18n::trn!(
+                                                            "Created: {} ({n} unmatched)",
+                                                            "Created: {} ({n} unmatched)",
+                                                            missed, pl.name
+                                                        )
+                                                    } else {
+                                                        tr!("Created: {}", pl.name)
+                                                    },
+                                                );
                                                 if let Ok(p) = session.playlists().await {
                                                     playlists = p;
                                                     remember_library(&playlists);
@@ -4086,7 +4292,7 @@ async fn worker(
                                                     push_rows(&weak, build_rows(&playlists, &pl_view, &presence.source, presence.playing));
                                                 }
                                             }
-                                            Err(e) => set_status(&weak, format!("Create playlist \u{2014} {e}")),
+                                            Err(e) => set_status(&weak, tr!("Create playlist \u{2014} {}", e)),
                                         }
                                     }
                                 }
@@ -4103,7 +4309,7 @@ async fn worker(
                                     if sidebar_mode == 1 {
                                         let _ = self_tx.send(Cmd::RefreshQueueSidebar);
                                     }
-                                    set_status(&weak, "Added to queue".to_string());
+                                    set_status(&weak, tr!("Added to queue"));
                                 }
                                 Err(e) => set_status(&weak, e),
                             }
@@ -4124,12 +4330,12 @@ async fn worker(
                             .map(|t| t.uri.clone())
                             .collect();
                         if uris.is_empty() {
-                            set_status(&weak, "Queue is empty".to_string());
+                            set_status(&weak, tr!("Queue is empty"));
                         } else {
-                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("Queue"));
+                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name(&tr!("Queue")));
                             match session.create_playlist(&name, &uris).await {
                                 Ok(pl) => {
-                                    set_status(&weak, format!("Created: {}", pl.name));
+                                    set_status(&weak, tr!("Created: {}", pl.name));
                                     if let Ok(p) = session.playlists().await {
                                         playlists = p;
                                         remember_library(&playlists);
@@ -4138,7 +4344,7 @@ async fn worker(
                                         push_rows(&weak, build_rows(&playlists, &pl_view, &presence.source, presence.playing));
                                     }
                                 }
-                                Err(e) => set_status(&weak, format!("Failed: {e}")),
+                                Err(e) => set_status(&weak, tr!("Failed: {}", e)),
                             }
                         }
                     }
@@ -4158,11 +4364,11 @@ async fn worker(
                             Some(uri) if !uri.is_empty() => {
                                 launched_src = None;
                                 if let Err(e) = session.play_uris(&[uri]).await {
-                                    set_status(&weak, format!("Play \u{2014} {e}"));
+                                    set_status(&weak, tr!("Play \u{2014} {}", e));
                                 }
                                 settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                             }
-                            _ => set_status(&weak, "Nothing selected".to_string()),
+                            _ => set_status(&weak, tr!("Nothing selected")),
                         }
                     }
                     Cmd::SearchBack => {
@@ -4203,7 +4409,7 @@ async fn worker(
                                 }
                                 Err(e) => {
                                     sp_done = true;
-                                    set_status(&weak, format!("Search \u{2014} {e}"));
+                                    set_status(&weak, tr!("Search \u{2014} {}", e));
                                 }
                             }
                             let more = !sp_done;
@@ -4235,7 +4441,7 @@ async fn worker(
                             // A search hit isn't a library row, so nothing to highlight.
                             launched_src = None;
                             if let Err(e) = r {
-                                set_status(&weak, format!("Play \u{2014} {e}"));
+                                set_status(&weak, tr!("Play \u{2014} {}", e));
                             }
                             refresh_soon(&mut poll_soon);
                         }
@@ -4248,7 +4454,7 @@ async fn worker(
                                     if sidebar_mode == 1 {
                                         let _ = self_tx.send(Cmd::RefreshQueueSidebar);
                                     }
-                                    set_status(&weak, "Added to queue".to_string());
+                                    set_status(&weak, tr!("Added to queue"));
                                 }
                                 Err(e) => set_status(&weak, e),
                             }
@@ -4279,7 +4485,7 @@ async fn worker(
                             // The original plays it as a bare uri, with no context.
                             launched_src = None;
                             if let Err(e) = session.play_uris(&[uri]).await {
-                                set_status(&weak, format!("Play \u{2014} {e}"));
+                                set_status(&weak, tr!("Play \u{2014} {}", e));
                             }
                             settle_refresh(&weak, &mut session, &mut last, &mut last_art, &mut liked).await;
                         }
@@ -4442,16 +4648,20 @@ async fn worker(
                             sel_scope, &selected, &trk_view, &tracks, &search_actions, &sidebar_tracks, &s_tracks, true,
                         );
                         if uris.is_empty() {
-                            set_status(&weak, "Selection has no playable tracks".to_string());
+                            set_status(&weak, tr!("Selection has no playable tracks"));
                         } else {
                             let n = uris.len();
                             match play_track_list(&mut session, &uris, 0, 0, &last, &engine_device_id).await {
-                                Err(e) => set_status(&weak, format!("Play \u{2014} {e}")),
+                                Err(e) => set_status(&weak, tr!("Play \u{2014} {}", e)),
                                 Ok(false) if n > WEB_API_URIS_MAX => set_status(
                                     &weak,
-                                    format!("Playing the first {WEB_API_URIS_MAX} of {n} selected"),
+                                    lightify_i18n::trn!(
+                                        "Playing the first {0} of {n} selected",
+                                        "Playing the first {0} of {n} selected",
+                                        n, WEB_API_URIS_MAX
+                                    ),
                                 ),
-                                Ok(_) => set_status(&weak, format!("Playing {n} selected")),
+                                Ok(_) => set_status(&weak, lightify_i18n::trn!("Playing {n} selected", "Playing {n} selected", n)),
                             }
                             launched_src = None;
                             refresh_soon(&mut poll_soon);
@@ -4462,7 +4672,7 @@ async fn worker(
                             sel_scope, &selected, &trk_view, &tracks, &search_actions, &sidebar_tracks, &s_tracks, true,
                         );
                         if uris.is_empty() {
-                            set_status(&weak, "Selection has no playable tracks".to_string());
+                            set_status(&weak, tr!("Selection has no playable tracks"));
                         } else {
                             let mut queued = 0usize;
                             let mut failed: Option<String> = None;
@@ -4488,8 +4698,15 @@ async fn worker(
                                 // Report what actually landed: one POST per track, so a
                                 // mid-run rate limit must not read as a clean success.
                                 Some(e) if queued == 0 => set_status(&weak, e),
-                                Some(e) => set_status(&weak, format!("Added {queued} to queue, then stopped \u{2014} {e}")),
-                                None => set_status(&weak, format!("Added {queued} to queue")),
+                                Some(e) => set_status(
+                                    &weak,
+                                    lightify_i18n::trn!(
+                                        "Added {n} to queue, then stopped \u{2014} {}",
+                                        "Added {n} to queue, then stopped \u{2014} {}",
+                                        queued, e
+                                    ),
+                                ),
+                                None => set_status(&weak, lightify_i18n::trn!("Added {n} to queue", "Added {n} to queue", queued)),
                             }
                         }
                     }
@@ -4503,12 +4720,12 @@ async fn worker(
                             )
                         });
                         if uris.is_empty() {
-                            set_status(&weak, "Selection has no playlist tracks".to_string());
+                            set_status(&weak, tr!("Selection has no playlist tracks"));
                         } else {
-                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name("Selection"));
+                            let name = named.clone().unwrap_or_else(|| timestamped_playlist_name(&tr!("Selection")));
                             match session.create_playlist(&name, &uris).await {
                                 Ok(pl) => {
-                                    set_status(&weak, format!("Created: {}", pl.name));
+                                    set_status(&weak, tr!("Created: {}", pl.name));
                                     // The host reloads the library so the new row shows.
                                     if let Ok(p) = session.playlists().await {
                                         playlists = p;
@@ -4521,7 +4738,7 @@ async fn worker(
                                         );
                                     }
                                 }
-                                Err(e) => set_status(&weak, format!("Create playlist \u{2014} {e}")),
+                                Err(e) => set_status(&weak, tr!("Create playlist \u{2014} {}", e)),
                             }
                         }
                     }
@@ -4544,11 +4761,11 @@ async fn worker(
                             .map(|p| (p.id.clone(), p.uri.clone()))
                         {
                             if uri.is_empty() {
-                                set_status(&weak, "Play \u{2014} playlist has no URI".to_string());
+                                set_status(&weak, tr!("Play \u{2014} playlist has no URI"));
                             } else {
                                 launched_src = Some(id);
                                 if let Err(e) = session.play_context_start(&uri).await {
-                                    set_status(&weak, format!("Play \u{2014} {e}"));
+                                    set_status(&weak, tr!("Play \u{2014} {}", e));
                                 }
                                 refresh_soon(&mut poll_soon);
                             }
@@ -4561,7 +4778,7 @@ async fn worker(
                             .map(|p| p.id.clone())
                         {
                             match session.follow_playlist(&id).await {
-                                Ok(()) => set_status(&weak, "Playlist saved to library".to_string()),
+                                Ok(()) => set_status(&weak, tr!("Playlist saved to library")),
                                 Err(e) => set_status(&weak, e),
                             }
                         }
@@ -4578,9 +4795,9 @@ async fn worker(
                                 .map(|p| p.id.clone())
                                 .unwrap_or_default();
                             pending_confirm = Some(Cmd::DeletePlaylist(id, name.clone()));
-                            let msg = format!("Delete \u{201c}{name}\u{201d} from your Spotify library?");
+                            let msg = tr!("Delete \u{201c}{}\u{201d} from your Spotify library?", name);
                             let _ = weak.upgrade_in_event_loop(move |app| {
-                                app.set_confirm_title("DELETE PLAYLIST".into());
+                                app.set_confirm_title(tr!("DELETE PLAYLIST").into());
                                 app.set_confirm_message(msg.into());
                                 app.set_confirm_open(true);
                             });
@@ -4608,11 +4825,11 @@ async fn worker(
                                                 build_rows(&playlists, &pl_view, &presence.source, presence.playing),
                                             );
                                         }
-                                        Err(e) => set_status(&weak, format!("Playlists \u{2014} {e}")),
+                                        Err(e) => set_status(&weak, tr!("Playlists \u{2014} {}", e)),
                                     }
-                                    set_status(&weak, format!("Deleted playlist: {name}"));
+                                    set_status(&weak, tr!("Deleted playlist: {}", name));
                                 }
-                                Err(e) => set_status(&weak, format!("Failed to delete playlist: {e}")),
+                                Err(e) => set_status(&weak, tr!("Failed to delete playlist: {}", e)),
                             }
                         }
                     }
@@ -4625,7 +4842,7 @@ async fn worker(
                                         m.enqueue(t);
                                     }
                                     persist_mirror(&queue_mirror);
-                                    set_status(&weak, "Added to queue".to_string());
+                                    set_status(&weak, tr!("Added to queue"));
                                 }
                                 Err(e) => set_status(&weak, e),
                             }
@@ -4648,7 +4865,7 @@ async fn worker(
                         let _ = weak.upgrade_in_event_loop(move |app| app.set_search_text(qq.into()));
                         if let Some(until) = backoff_until {
                             let remaining = (until - tokio::time::Instant::now()).as_secs() + 1;
-                            set_status(&weak, format!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
+                            set_status(&weak, tr!("Spotify rate limit \u{2014} resuming in {}", fmt_backoff(remaining)));
                         } else {
                             let searched = session.search(&q).await;
                             set_search_loading(&weak, false);
@@ -4672,9 +4889,9 @@ async fn worker(
                                 Err(e) => {
                                     if let Some(secs) = rate_limit_backoff(&e) {
                                         backoff_until = Some(tokio::time::Instant::now() + Duration::from_secs(secs));
-                                        set_status(&weak, format!("Spotify rate limit \u{2014} pausing for {}", fmt_backoff(secs)));
+                                        set_status(&weak, tr!("Spotify rate limit \u{2014} pausing for {}", fmt_backoff(secs)));
                                     } else {
-                                        set_status(&weak, format!("Search \u{2014} {e}"));
+                                        set_status(&weak, tr!("Search \u{2014} {}", e));
                                     }
                                 }
                             }
@@ -4685,14 +4902,14 @@ async fn worker(
                             // Only announce actual moves, not the first open at startup -
                             // "Audio output -> Speakers" on every launch is noise.
                             if !system_default_device.is_empty() && system_default_device != device {
-                                set_status(&weak, format!("Audio output \u{2192} {device}"));
+                                set_status(&weak, tr!("Audio output \u{2192} {}", device));
                             }
                             system_default_device = device;
                             push_outputs(&weak);
                         }
                         engine::Event::Ready { device_id } => {
                             engine_watchdog.note_healthy();
-                            push_engine_status(&weak, "Running \u{00B7} Lightify".to_string(), true);
+                            push_engine_status(&weak, || tr!("Running \u{00B7} Lightify"), true);
                             // Record it regardless of whether the adoption call below
                             // succeeds — the id is valid the moment spirc reports it,
                             // and `engine_owns_playback` needs it to recognise OUR
@@ -4705,7 +4922,7 @@ async fn worker(
                             // lands here rather than 404-ing for want of a device.
                             match adopt_engine_device(&mut session, &device_id).await {
                                 Ok(name) => {
-                                    set_status(&weak, format!("Playing through {name}"));
+                                    set_status(&weak, tr!("Playing through {}", name));
                                     if let Some(secs) =
                                         refresh_playback(&weak, &mut session, &mut last, &mut last_art, &mut liked).await
                                     {
@@ -4733,8 +4950,8 @@ async fn worker(
                                             }
                                         };
                                         match r {
-                                            Ok(()) => set_status(&weak, "Playback engine restarted \u{2014} resumed".to_string()),
-                                            Err(e) => set_status(&weak, format!("Resume \u{2014} {e}")),
+                                            Ok(()) => set_status(&weak, tr!("Playback engine restarted \u{2014} resumed")),
+                                            Err(e) => set_status(&weak, tr!("Resume \u{2014} {}", e)),
                                         }
                                         refresh_soon(&mut poll_soon);
                                     } else if !queue_restored {
@@ -4742,7 +4959,7 @@ async fn worker(
                                         restore_queue(&weak, &mut session, &last, &mut queue_mirror).await;
                                     }
                                 }
-                                Err(e) => set_status(&weak, format!("Playback device \u{2014} {e}")),
+                                Err(e) => set_status(&weak, tr!("Playback device \u{2014} {}", e)),
                             }
                             if devices_open(&weak) {
                                 if let Ok(d) = session.devices().await {
@@ -4754,6 +4971,9 @@ async fn worker(
                         // The engine knows about play/pause and seeks the instant they
                         // happen; trusting it beats waiting up to a poll interval.
                         engine::Event::Playing { playing } => {
+                            // A song loaded paused (a resume offer) goes into RECENT now.
+                            play_history::engine_playing(playing);
+                            show_new_plays(&weak, sidebar_mode, &mut sidebar_tracks, &recent_spotify, &current_id(&last));
                             if playing {
                                 local_ui::spotify_started(&mut local, &weak);
                             }
@@ -4853,6 +5073,12 @@ async fn worker(
                                 is_playable: true,
                             });
                             set_engine_now(&engine_device_id, engine_track.clone());
+                            // RECENT: the track before this one is over — counted here,
+                            // from our engine's own events (play_history.rs).
+                            if let Some(t) = engine_track.clone() {
+                                play_history::engine_track(t);
+                                show_new_plays(&weak, sidebar_mode, &mut sidebar_tracks, &recent_spotify, &id);
+                            }
                             let engine_loaded = take_engine_load();
                             let owned = engine_owns_playback(&last, &engine_device_id);
                             if let (true, false, Some(t), Some(mut pb)) = (owned, loaded, engine_track, last.clone()) {
@@ -4888,6 +5114,8 @@ async fn worker(
                             // Another device took over: the engine's track is no longer
                             // the truth, and the screen should follow the new device.
                             set_engine_now("", None);
+                            play_history::engine_stopped();
+                            show_new_plays(&weak, sidebar_mode, &mut sidebar_tracks, &recent_spotify, "");
                             poll_soon = Some(tokio::time::Instant::now() + Duration::from_millis(1500));
                         }
                         engine::Event::NeedAuth { msg } => {
@@ -4899,14 +5127,17 @@ async fn worker(
                             set_status(&weak, msg);
                         }
                         engine::Event::Failed { msg } => {
-                            push_engine_status(&weak, format!("Error \u{2014} {msg}"), false);
-                            set_status(&weak, format!("Playback engine \u{2014} {msg}"));
+                            play_history::engine_stopped();
+                            show_new_plays(&weak, sidebar_mode, &mut sidebar_tracks, &recent_spotify, "");
+                            let m = msg.clone();
+                            push_engine_status(&weak, move || tr!("Error \u{2014} {}", m), false);
+                            set_status(&weak, tr!("Playback engine \u{2014} {}", msg));
                         }
                         // An answer to a station the user has since abandoned (see
                         // `STATION_EPOCH`): queueing it now would put the OLD station's
                         // tracks in front of whatever they moved on to.
                         engine::Event::StationTracks { seq, .. } if !station_epoch_is_current(seq) => {
-                            set_status(&weak, "Ignored a station that was no longer wanted".to_string());
+                            set_status(&weak, tr!("Ignored a station that was no longer wanted"));
                         }
                         engine::Event::StationTracks { uris, seq }
                             if search_station.as_ref().is_some_and(|(s, _)| *s == seq) =>
@@ -4922,7 +5153,14 @@ async fn worker(
                                 engine::send(
                                     &serde_json::json!({ "cmd": "appendtracks", "anchor": anchor, "uris": picked }).to_string(),
                                 );
-                                set_status(&weak, format!("Station \u{2014} {n} similar tracks after this one"));
+                                set_status(
+                                    &weak,
+                                    lightify_i18n::trn!(
+                                        "Station \u{2014} {n} similar tracks after this one",
+                                        "Station \u{2014} {n} similar tracks after this one",
+                                        n
+                                    ),
+                                );
                                 if sidebar_mode == 1 {
                                     queue_mirror = None;
                                     spawn_delayed_queue_refresh(&self_tx);
@@ -4931,8 +5169,8 @@ async fn worker(
                         }
                         engine::Event::StationTracks { uris, .. } => {
                             // Drop the seed itself and anything already queued-worthy
-                            // duplicate, then either queue behind the current song or —
-                            // if nothing is playing — start the station outright.
+                            // duplicate, then either make the station what follows the
+                            // current song or — if nothing is playing — start it outright.
                             let current = last
                                 .as_ref()
                                 .and_then(|p| p.track.as_ref())
@@ -4943,74 +5181,81 @@ async fn worker(
                                 .into_iter()
                                 .filter(|u| *u != current)
                                 .filter(|u| seen.insert(u.clone()))
-                                .take(STATION_QUEUE_MAX)
                                 .collect();
                             if picked.is_empty() {
-                                set_status(&weak, "Station had no tracks to queue".to_string());
+                                set_status(&weak, tr!("Station had no tracks to queue"));
                             } else if last.as_ref().is_some_and(|p| p.is_playing) {
                                 // The station now owns the queue lane.
                                 station_active = true;
                                 engine::send(&serde_json::json!({ "cmd": "autoplay", "enabled": true }).to_string());
-                                // Added to, never replaced: anything an earlier station
-                                // left that couldn't be cleared yet must stay tracked so a
-                                // later cleanup still finds it.
-                                station_queued.extend(picked.iter().cloned());
-                                let mut queued = 0usize;
-                                let mut failed: Option<String> = None;
-                                for uri in &picked {
-                                    match queue_one(&mut session, uri, engine_owns_playback(&last, &engine_device_id)).await {
-                                        Ok(()) => queued += 1,
-                                        Err(e) => { failed = Some(e); break; }
+                                // The station REPLACES what follows the song, the way playing
+                                // a playlist replaces it. It used to be put in the user
+                                // queue instead, which plays ahead of the old list but
+                                // leaves all of it behind: the queue read as the station's
+                                // first track or so, then the rest of whatever played before.
+                                // Hand-queued songs stay ahead of it, as on any play.
+                                let result = if engine_owns_playback(&last, &engine_device_id) {
+                                    // Local, and the song keeps playing untouched.
+                                    engine::send(&serde_json::json!({ "cmd": "replacenext", "uris": picked }).to_string());
+                                    Ok(())
+                                } else {
+                                    // Another device: the Web API has no "replace what's
+                                    // next", so the song is played again as the head of the
+                                    // station's list, from where it was.
+                                    let position_ms = last.as_ref().map(|p| p.progress_ms).unwrap_or(0);
+                                    let list: Vec<String> = std::iter::once(current.clone())
+                                        .filter(|u| !u.is_empty())
+                                        .chain(picked.iter().cloned())
+                                        .take(WEB_API_URIS_MAX)
+                                        .collect();
+                                    match session.play_uris(&list).await {
+                                        Ok(()) if position_ms > 0 => session.seek(position_ms).await,
+                                        other => other,
                                     }
-                                }
-                                if queued > 0 {
-                                    last_bulk_queue_write = Some(tokio::time::Instant::now());
-                                    spawn_delayed_queue_refresh(&self_tx);
-                                    // Capture + persist the resulting queue regardless of
-                                    // whether the panel is open — this is the "start a
-                                    // station" bug report's own scenario, and it shouldn't
-                                    // depend on the QUEUE sidebar happening to be visible.
-                                    if let Ok(t) = session.queue().await {
-                                        if !t.is_empty() {
-                                            queue_mirror = Some(QueueMirror::new(current.clone(), t));
-                                            persist_mirror(&queue_mirror);
+                                };
+                                match result {
+                                    Err(e) => set_status(&weak, tr!("Station \u{2014} {}", e)),
+                                    Ok(()) => {
+                                        launched_src = None;
+                                        set_status(
+                                            &weak,
+                                            lightify_i18n::trn!(
+                                                "Station queued \u{2014} {n} tracks after this one",
+                                                "Station queued \u{2014} {n} tracks after this one",
+                                                picked.len()
+                                            ),
+                                        );
+                                        // The old mirror is the list the station replaced. No
+                                        // `Track`s for the station yet (the resolve only
+                                        // returns uris), so the panel reads Spotify's queue
+                                        // once the device has published it.
+                                        let hand: Vec<String> = queue_mirror
+                                            .as_ref()
+                                            .map(|m| m.upcoming[..m.queued.min(m.upcoming.len())].iter().map(|t| t.uri.clone()).collect())
+                                            .unwrap_or_default();
+                                        let upcoming: Vec<String> = hand.iter().chain(picked.iter()).cloned().collect();
+                                        save_queue_marked(&current, &upcoming, Some(hand.len()));
+                                        queue_mirror = None;
+                                        sidebar_generation += 1;
+                                        if sidebar_mode == 1 {
+                                            sidebar_tracks.clear();
+                                            set_sidebar(&weak, 1, vec![], tr!("Loading queue\u{2026}"));
                                         }
+                                        spawn_delayed_queue_refresh(&self_tx);
                                     }
-                                }
-                                match failed {
-                                    Some(e) if queued == 0 => {
-                                        set_status(&weak, format!("Station \u{2014} {e}"))
-                                    }
-                                    Some(e) => set_status(
-                                        &weak,
-                                        format!("Queued {queued} station tracks, then stopped \u{2014} {e}"),
-                                    ),
-                                    None => set_status(
-                                        &weak,
-                                        format!("Station queued \u{2014} {queued} tracks after this one"),
-                                    ),
-                                }
-                                // If the queue sidebar is open, show the new tracks.
-                                if sidebar_mode == 1 {
-                                    refresh_sidebar(
-                                        &weak, &self_tx, sidebar_mode, &mut sidebar_tracks,
-                                        &last, &mut queue_mirror, &mut sidebar_generation,
-                                    )
-                                    .await;
                                 }
                             } else {
                                 // Nothing playing: this is the one case where a station
                                 // should take over, because there is nothing to disturb.
                                 station_active = true;
                                 engine::send(&serde_json::json!({ "cmd": "autoplay", "enabled": true }).to_string());
-                                station_queued.extend(picked.iter().cloned());
                                 launched_src = None;
-                                if let Err(e) = session.play_uris(&picked).await {
-                                    set_status(&weak, format!("Station \u{2014} {e}"));
+                                if let Err(e) = play_track_list(&mut session, &picked, 0, 0, &last, &engine_device_id).await {
+                                    set_status(&weak, tr!("Station \u{2014} {}", e));
                                 } else {
                                     set_status(
                                         &weak,
-                                        format!("Station started \u{2014} {} tracks", picked.len()),
+                                        lightify_i18n::trn!("Station started \u{2014} {n} tracks", "Station started \u{2014} {n} tracks", picked.len()),
                                     );
                                     // No Track metadata for `picked[1..]` yet (station
                                     // resolve only returns uris); `refresh_sidebar`'s
@@ -5026,7 +5271,7 @@ async fn worker(
                             }
                         }
                         engine::Event::Exited => {
-                            push_engine_status(&weak, "Not running".to_string(), false);
+                            push_engine_status(&weak, || tr!("Not running"), false);
                             set_engine_now("", None);
                             // What our device was playing, before marking it stopped.
                             let playing_here = last
@@ -5050,8 +5295,7 @@ async fn worker(
                             if moved {
                                 set_status(
                                     &weak,
-                                    "Playback moved to another Spotify device \u{2014} Lightify\u{2019}s player stopped. Settings \u{2192} Restart to play here again."
-                                        .to_string(),
+                                    tr!("Playback moved to another Spotify device \u{2014} Lightify\u{2019}s player stopped. Settings \u{2192} Restart to play here again."),
                                 );
                             } else if engine_watchdog.should_restart(std::time::Instant::now()) {
                                 // Our device was playing: carry on where it was once the
@@ -5059,10 +5303,9 @@ async fn worker(
                                 resume_after_restart = playing_here.or(resume_after_restart.take());
                                 set_status(
                                     &weak,
-                                    "Playback engine stopped (audio device lost?) \u{2014} restarting\u{2026}"
-                                        .to_string(),
+                                    tr!("Playback engine stopped (audio device lost?) \u{2014} restarting\u{2026}"),
                                 );
-                                push_engine_status(&weak, "Restarting\u{2026}".to_string(), false);
+                                push_engine_status(&weak, || tr!("Restarting\u{2026}"), false);
                                 // A beat, so a hard-failing engine cannot spin, and the
                                 // OS has a moment to settle its new default device.
                                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -5070,8 +5313,7 @@ async fn worker(
                             } else {
                                 set_status(
                                     &weak,
-                                    "Playback engine keeps stopping \u{2014} check the audio output in Settings, then Restart"
-                                        .to_string(),
+                                    tr!("Playback engine keeps stopping \u{2014} check the audio output in Settings, then Restart"),
                                 );
                             }
                         }
@@ -5087,7 +5329,7 @@ async fn worker(
                         } else {
                             // Not a row of the list on screen: say so and redraw it,
                             // rather than silently saving "System default".
-                            set_status(&weak, "That output list changed \u{2014} pick again".to_string());
+                            set_status(&weak, tr!("That output list changed \u{2014} pick again"));
                             push_outputs(&weak);
                             continue;
                         };
@@ -5095,7 +5337,7 @@ async fn worker(
                         match lightify_core::config::update_config(&dir, |cfg| cfg.audio_output = chosen.clone()) {
                             Ok(()) => {
                                 let label = if chosen.is_empty() { "the system default".to_string() } else { chosen.clone() };
-                                set_status(&weak, format!("Audio output \u{2192} {label}"));
+                                set_status(&weak, tr!("Audio output \u{2192} {}", label));
                                 // Live, no restart: the engine's output thread moves to it
                                 // on its next pass. An engine that is not running picks
                                 // the saved choice up when it next starts.
@@ -5111,11 +5353,11 @@ async fn worker(
                                 }
                                 push_outputs(&weak);
                             }
-                            Err(e) => set_status(&weak, format!("Settings \u{2014} {e}")),
+                            Err(e) => set_status(&weak, tr!("Settings \u{2014} {}", e)),
                         }
                     }
                     Cmd::RestartEngine => {
-                        push_engine_status(&weak, "Restarting\u{2026}".to_string(), false);
+                        push_engine_status(&weak, || tr!("Restarting\u{2026}"), false);
                         engine::shutdown();
                         start_engine(&weak, &session, &self_tx);
                     }
@@ -5132,8 +5374,8 @@ async fn worker(
                             // A beat for the handoff to finish settling server-side
                             // before trying to re-adopt.
                             tokio::time::sleep(Duration::from_millis(1500)).await;
-                            set_status(&weak, "Reclaiming playback after downloader sign-in\u{2026}".to_string());
-                            push_engine_status(&weak, "Restarting\u{2026}".to_string(), false);
+                            set_status(&weak, tr!("Reclaiming playback after downloader sign-in\u{2026}"));
+                            push_engine_status(&weak, || tr!("Restarting\u{2026}"), false);
                             start_engine(&weak, &session, &self_tx);
                         }
                     }
@@ -5635,8 +5877,8 @@ async fn selftest_long_lists() {
 }
 
 /// A Beatport chart plays as one list that keeps growing in chart order (it used to
-/// stop after the first 4–5), and a song played from search gets its station appended
-/// behind it. Real chart (Overall top 100, first 15 rows), real account; same
+/// stop after the first 4–5), a song played from search gets its station appended
+/// behind it, and a station started mid-list replaces the rest of it. Real chart (Overall top 100, first 15 rows), real account; same
 /// conditions as `--selftest-long-lists`.
 async fn selftest_bp_chart() {
     println!("beatport chart + search station: lists that grow while they play");
@@ -5721,8 +5963,18 @@ async fn selftest_bp_chart() {
     println!("  matched {} more of the {} chart rows after the first", appended.len(), chart.len() - first_at);
     check(appended.len() >= 6, "well past the old 4–5 tracks");
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let q = queue_uris(&mut session).await;
+    let q = queue_uris_settled(&mut session).await;
     let want: Vec<String> = appended.iter().take(q.len()).cloned().collect();
+    if q.is_empty() || q != want {
+        let pb = session.playback().await.ok().flatten();
+        println!(
+            "      web api sees: device={:?} track={:?} (first match {})",
+            pb.as_ref().map(|p| p.device_id == device),
+            pb.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()),
+            first.uri
+        );
+        println!("      up-next ({}): {:?}\n      chart  ({}): {:?}", q.len(), q, appended.len(), appended);
+    }
     check(!q.is_empty() && q == want, "up-next is the rest of the chart, in chart order");
     // Abandoning the chart stops the matcher.
     active.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -5748,18 +6000,52 @@ async fn selftest_bp_chart() {
         pb.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.uri == seed),
         "the song keeps playing while its station is added",
     );
-    let q = queue_uris(&mut session).await;
+    let q = queue_uris_settled(&mut session).await;
+    if q.len() < 10 || q[..10] != picked[..10.min(picked.len())] {
+        println!("      up-next ({}): {:?}\n      station ({}): {:?}", q.len(), &q[..q.len().min(12)], picked.len(), &picked[..picked.len().min(12)]);
+    }
     check(
         q.len() >= 10 && q[..10] == picked[..10.min(picked.len())],
         "the station follows the song, in order",
     );
+
+    // 4. Start station in the middle of a list: the station replaces the rest of the
+    // list (it used to be queued ahead of it, leaving the whole old list behind), the
+    // song keeps playing, and a hand-queued song stays first.
+    let list: Vec<String> = appended.iter().take(8).cloned().collect();
+    if list.len() < 2 {
+        return println!("  need a list of 2+ matched chart tracks\nFAIL");
+    }
+    let _ = play_track_list(&mut session, &list, 0, 0, &none, &device).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let hand = seed.clone();
+    engine::send(&serde_json::json!({ "cmd": "addtoqueue", "uris": [hand] }).to_string());
+    let station: Vec<String> = resolve_station(&rx, &list[0])
+        .into_iter()
+        .filter(|u| *u != list[0] && *u != hand)
+        .collect();
+    let before = session.playback().await.ok().flatten();
+    engine::send(&serde_json::json!({ "cmd": "replacenext", "uris": station }).to_string());
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let after = session.playback().await.ok().flatten();
+    check(
+        after.as_ref().and_then(|p| p.track.as_ref()).is_some_and(|t| t.uri == list[0])
+            && after.as_ref().map(|p| p.progress_ms) >= before.as_ref().map(|p| p.progress_ms),
+        "the song keeps playing, not restarted, while its station replaces the list",
+    );
+    let q = queue_uris_settled(&mut session).await;
+    let old_left = list[1..].iter().filter(|u| !station.contains(u) && q.contains(u)).count();
+    check(old_left == 0, &format!("none of the old list is left after the station ({old_left} left)"));
+    check(q.first() == Some(&hand), "the hand-queued song still plays first");
+    let n = 8.min(station.len());
+    check(q.len() > n && q[1..=n] == station[..n], "then the station, in order");
 
     let _ = session.pause().await;
     if let Some(v) = volume_before {
         let _ = session.set_volume(v).await;
     }
     if fails.is_empty() {
-        println!("PASS: charts and search songs keep playing");
+        println!("PASS: charts, search songs and stations keep playing");
     } else {
         println!("FAIL ({}): {}", fails.len(), fails.join(" | "));
     }
@@ -5768,6 +6054,20 @@ async fn selftest_bp_chart() {
 /// Every uri in the device's up-next, in order.
 async fn queue_uris(session: &mut Session) -> Vec<String> {
     session.queue().await.unwrap_or_default().into_iter().map(|t| t.uri).collect()
+}
+
+/// `queue_uris` for an up-next that should NOT be empty: Spotify publishes the engine's
+/// new list a few seconds late, and an early read answers with an empty queue (seen
+/// live 2026-10-31, at random on either check of `--selftest-bp-chart`).
+async fn queue_uris_settled(session: &mut Session) -> Vec<String> {
+    for _ in 0..8 {
+        let q = queue_uris(session).await;
+        if !q.is_empty() {
+            return q;
+        }
+        tokio::time::sleep(Duration::from_millis(750)).await;
+    }
+    Vec::new()
 }
 
 /// Ask the engine for a seed's radio and wait for it.
@@ -6930,7 +7230,7 @@ async fn selftest_paging_live(fails: &mut Vec<String>) {
             return;
         }
     };
-    let mut pager = TrackPager::start(PagerSource::Liked, "Liked Songs");
+    let mut pager = TrackPager::start(PagerSource::Liked, &tr!("Liked Songs"));
     let mut tracks: Vec<Track> = Vec::new();
     let mut view: Vec<usize> = Vec::new();
     let weak = slint::Weak::<MainWindow>::default();
@@ -7108,7 +7408,7 @@ fn selftest_paging() {
     let rows: Vec<Trk> = (0..80).map(mk).collect();
     app.set_tracks(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
     app.set_drilled(true);
-    app.set_drill_title("Liked Songs".into());
+    app.set_drill_title(tr!("Liked Songs").into());
     app.set_tracks_more(true);
 
     let asks = Rc::new(Cell::new(0u32));
@@ -8137,6 +8437,92 @@ fn double_click_limits(scale: f32) -> (Duration, f32) {
     }
 }
 
+/// `--selftest-language [code]`: a live language switch, headless, for each bundled
+/// language (or just `code`). It switches the way Settings › language does (without
+/// saving the choice) and checks that a Slint string, a Rust status message, a library
+/// row and a row menu built in Rust, and a tray item all changed, that the open menu
+/// and the status line were cleared and the worker was asked to re-say its models —
+/// then switches back to English and checks every one of them is English again.
+fn selftest_language(only: Option<&str>) {
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::platform::{Platform, WindowAdapter};
+    struct P(Rc<MinimalSoftwareWindow>);
+    impl Platform for P {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+    let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+    if slint::platform::set_platform(Box::new(P(window.clone()))).is_err() {
+        println!("FAIL: could not install the headless platform");
+        return;
+    }
+    let app = match MainWindow::new() {
+        Ok(a) => a,
+        Err(e) => {
+            println!("WINDOW ERROR: {e}");
+            return;
+        }
+    };
+    let codes: Vec<&str> = LANGS.iter().map(|l| l.code).filter(|c| only.is_none_or(|o| o.eq_ignore_ascii_case(c))).collect();
+    if codes.is_empty() {
+        println!("SKIP: no bundled language{}", only.map(|o| format!(" called {o}")).unwrap_or_default());
+        return;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
+    // What each check reads, in whatever language is active.
+    let sample = |app: &MainWindow| -> Vec<(&'static str, String)> {
+        #[cfg(windows)]
+        let tray = tray::labels().join(" / ");
+        #[cfg(not(windows))]
+        let tray = String::from("(no tray)");
+        vec![
+            ("Slint string (Beatport hint)", app.get_bp_status().to_string()),
+            ("Slint string (engine line)", app.get_engine_status().to_string()),
+            ("Rust status message", tr!("That list just changed \u{2014} try again")),
+            ("Rust library row", build_rows(&[], &[], "", false)[0].name.to_string()),
+            ("Rust menu label", liked_row_menu().last().map(|i| i.label.clone()).unwrap_or_default()),
+            ("Settings › language row", app.get_settings_languages().row_data(0).map(|r| r.name.to_string()).unwrap_or_default()),
+            ("tray menu", tray),
+        ]
+    };
+    let mut fails: Vec<String> = Vec::new();
+    let mut check = |cond: bool, what: String| {
+        println!("  {} {what}", if cond { "ok  " } else { "FAIL" });
+        if !cond {
+            fails.push(what);
+        }
+    };
+    apply_switch(&app, lightify_i18n::ENGLISH, &tx);
+    let english = sample(&app);
+    while rx.try_recv().is_ok() {}
+    for code in codes {
+        println!("{code} ({}):", lightify_i18n::native_name(code));
+        app.set_ctx_open(true);
+        app.set_status_text("a notice".into());
+        apply_switch(&app, code, &tx);
+        check(lightify_i18n::current() == code, format!("{code}: the Rust half is now {code} (it is {})", lightify_i18n::current()));
+        for ((what, en), (_, now)) in english.iter().zip(sample(&app)) {
+            check(*en != now, format!("{code}: {what} changed (\u{201c}{en}\u{201d} \u{2192} \u{201c}{now}\u{201d}){}",
+                if *en == now { " — untranslated in this catalog?" } else { "" }));
+        }
+        check(!app.get_ctx_open(), format!("{code}: the open menu was closed"));
+        check(app.get_status_text().is_empty(), format!("{code}: the status line was cleared"));
+        check(matches!(rx.try_recv(), Ok(Cmd::Relabel)), format!("{code}: the worker was asked to re-say its models"));
+        apply_switch(&app, lightify_i18n::ENGLISH, &tx);
+        while rx.try_recv().is_ok() {}
+        let back = sample(&app);
+        for ((what, en), (_, now)) in english.iter().zip(back) {
+            check(*en == now, format!("{code} → en: {what} is English again (\u{201c}{now}\u{201d})"));
+        }
+    }
+    if fails.is_empty() {
+        println!("PASS: every language switches live and back");
+    } else {
+        println!("FAIL ({}): {}", fails.len(), fails.join(" | "));
+    }
+}
+
 fn selftest_menus() {
     use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
     use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
@@ -8374,7 +8760,7 @@ fn selftest_menus() {
     // 4. right-click a drilled track row
     app.set_ctx_open(false);
     app.set_drilled(true);
-    app.set_drill_title("Liked Songs".into());
+    app.set_drill_title(tr!("Liked Songs").into());
     window.request_redraw();
     window.draw_if_needed(|r| { r.render(&mut buffer, W as usize); });
     win.dispatch_event(WindowEvent::PointerMoved { position: at(TRACK0_Y) });
@@ -9076,7 +9462,7 @@ async fn refresh_playback(
             if lightify_core::net::is_offline_error(&e) {
                 return None;
             }
-            set_status(weak, format!("Playback error \u{2014} {e}"));
+            set_status(weak, tr!("Playback error \u{2014} {}", e));
             None
         }
     }
@@ -9384,7 +9770,7 @@ async fn end_autoplay_authority_inner(
     }
     station_queued.clear();
     bp_queued.clear();
-    set_status(weak, "Cleared the queued-ahead tracks".to_string());
+    set_status(weak, tr!("Cleared the queued-ahead tracks"));
     let reloaded_uri = if keep_current {
         last.as_ref().and_then(|p| p.track.as_ref()).map(|t| t.uri.clone()).unwrap_or_default()
     } else {
@@ -9405,9 +9791,6 @@ async fn end_autoplay_authority_inner(
     }
 }
 
-/// How many station tracks to put in the queue. Each one is a separate
-/// `POST me/player/queue`, so this is a balance between a station worth listening to
-/// and a burst of calls against the shared dev-mode quota.
 /// Beatport chart autoplay — the shell's port of `state.beatportAutoplay`
 /// (`app.js:3868 playBeatportSequenceFromIndex` + `app.js:3800 pumpBeatportAutoplay`).
 ///
@@ -9456,8 +9839,6 @@ const BP_QUEUE_AHEAD: usize = 6;
 /// and refilling on each poll tick keeps the queue just as far ahead without the
 /// freeze — the one deliberate difference from `nextBeatportQueueBatchSize`.
 const BP_REFILL_CHUNK: usize = 4;
-
-const STATION_QUEUE_MAX: usize = 20;
 
 /// How long to give Spotify's own queue ordering to settle after a batch
 /// `me/player/queue` write before trusting `me/player/next` to advance by exactly
@@ -9631,9 +10012,10 @@ fn start_engine(
     tx: &tokio::sync::mpsc::UnboundedSender<Cmd>,
 ) {
     let Some(bin) = engine::find_binary() else {
-        let msg = "Playback engine not found \u{2014} build it with `cargo build --release` in lightify-audio";
-        push_engine_status(weak, "Not found".to_string(), false);
-        set_status(weak, msg.to_string());
+        // Only a developer build can lack the engine: English, not for translators.
+        let msg = "Playback engine not found \u{2014} build it with `cargo build --release` in lightify-audio".to_string();
+        push_engine_status(weak, || tr!("Not found"), false);
+        set_status(weak, msg);
         return;
     };
     // Never pass a device name we haven't just confirmed exists (see resolve_output).
@@ -9662,19 +10044,24 @@ fn start_engine(
         let _ = tx.send(Cmd::Engine(ev));
     }) {
         Ok(()) => {
-            let msg = if let Some(missing) = stale {
-                format!("Audio output \u{201c}{missing}\u{201d} isn\u{2019}t available \u{2014} playing on the system default")
-            } else if engine::has_cached_login() {
-                "Starting Lightify playback\u{2026}".to_string()
-            } else {
-                "One-time Spotify streaming sign-in \u{2014} finish it in your browser".to_string()
+            let cached = engine::has_cached_login();
+            let say = move || {
+                if let Some(missing) = &stale {
+                    tr!("Audio output \u{201c}{}\u{201d} isn\u{2019}t available \u{2014} playing on the system default", missing)
+                } else if cached {
+                    tr!("Starting Lightify playback\u{2026}")
+                } else {
+                    tr!("One-time Spotify streaming sign-in \u{2014} finish it in your browser")
+                }
             };
-            push_engine_status(weak, msg.clone(), false);
+            let msg = say();
+            push_engine_status(weak, say, false);
             set_status(weak, msg);
         }
         Err(e) => {
-            push_engine_status(weak, format!("Failed \u{2014} {e}"), false);
-            set_status(weak, format!("Playback engine \u{2014} {e}"));
+            let e2 = e.clone();
+            push_engine_status(weak, move || tr!("Failed \u{2014} {}", e2), false);
+            set_status(weak, tr!("Playback engine \u{2014} {}", e));
         }
     }
 }
@@ -9701,12 +10088,12 @@ fn push_outputs(weak: &slint::Weak<MainWindow>) {
     let default_active = want.is_empty() || want.eq_ignore_ascii_case("default") || missing;
 
     let mut rows: Vec<DeviceRow> = Vec::with_capacity(outputs.len() + 1);
-    rows.push(DeviceRow { name: "System default".into(), active: default_active });
+    rows.push(DeviceRow { name: tr!("System default").into(), active: default_active });
     for name in &outputs {
         rows.push(DeviceRow { name: name.clone().into(), active: !default_active && name == want });
     }
     let note = if missing {
-        format!("Configured output \u{201c}{want}\u{201d} isn\u{2019}t connected \u{2014} playing on the system default.")
+        tr!("Configured output \u{201c}{}\u{201d} isn\u{2019}t connected \u{2014} playing on the system default.", want)
     } else {
         String::new()
     };
@@ -9716,10 +10103,37 @@ fn push_outputs(weak: &slint::Weak<MainWindow>) {
     });
 }
 
-fn push_engine_status(weak: &slint::Weak<MainWindow>, text: String, ok: bool) {
+/// A line Rust shows in Settings, kept as how to say it rather than what it said, so a
+/// language switch can say it again (`relabel_settings_lines`).
+type Say = Box<dyn Fn() -> String + Send>;
+
+static ENGINE_LINE: std::sync::Mutex<Option<(Say, bool)>> = std::sync::Mutex::new(None);
+static DEVICE_LINE: std::sync::Mutex<Option<Say>> = std::sync::Mutex::new(None);
+
+/// Settings › playback engine's status line: `say` builds it (`|| tr!("Not running")`).
+fn push_engine_status(weak: &slint::Weak<MainWindow>, say: impl Fn() -> String + Send + 'static, ok: bool) {
+    let text = say();
+    if let Ok(mut g) = ENGINE_LINE.lock() {
+        *g = Some((Box::new(say), ok));
+    }
     let _ = weak.upgrade_in_event_loop(move |app| {
         app.set_engine_status(text.into());
         app.set_engine_ok(ok);
+    });
+}
+
+/// After a language switch: the engine and device lines in the new language.
+fn relabel_settings_lines(weak: &slint::Weak<MainWindow>) {
+    let engine = ENGINE_LINE.lock().ok().and_then(|g| g.as_ref().map(|(say, ok)| (say(), *ok)));
+    let device = DEVICE_LINE.lock().ok().and_then(|g| g.as_ref().map(|say| say()));
+    let _ = weak.upgrade_in_event_loop(move |app| {
+        if let Some((text, ok)) = engine {
+            app.set_engine_status(text.into());
+            app.set_engine_ok(ok);
+        }
+        if let Some(text) = device {
+            app.set_settings_device_status(text.into());
+        }
     });
 }
 
@@ -9814,9 +10228,9 @@ fn rate_limit_backoff(e: &str) -> Option<u64> {
 /// Human-readable backoff duration — minutes for long (quota) waits, seconds for short spikes.
 fn fmt_backoff(secs: u64) -> String {
     if secs >= 90 {
-        format!("{}m", (secs + 59) / 60)
+        tr!("{}m", (secs + 59) / 60)
     } else {
-        format!("{secs}s")
+        tr!("{}s", secs)
     }
 }
 
@@ -9857,24 +10271,25 @@ fn build_rows(
     let liked_active = active_id == LIKED_SOURCE;
     rows.push(Row {
         id: LIKED_SOURCE.into(),
-        name: "Liked Songs".into(),
-        sub: "Your saved Spotify tracks".into(),
+        name: tr!("Liked Songs").into(),
+        sub: tr!("Your saved Spotify tracks").into(),
         active: liked_active,
         playing: liked_active && playing,
         liked: true,
     });
     for &idx in order {
         let Some(p) = pls.get(idx) else { continue };
-        let owner = if p.owner.is_empty() {
-            String::new()
+        let n = group_thousands(p.tracks);
+        let sub = if p.owner.is_empty() {
+            lightify_i18n::trn!("{} tracks", "{} tracks", p.tracks, n)
         } else {
-            format!(" \u{2022} {}", p.owner)
+            lightify_i18n::trn!("{} tracks \u{2022} {}", "{} tracks \u{2022} {}", p.tracks, n, p.owner)
         };
         let active = !active_id.is_empty() && p.id == active_id;
         rows.push(Row {
             id: p.id.clone().into(),
             name: p.name.clone().into(),
-            sub: format!("{} tracks{}", group_thousands(p.tracks), owner).into(),
+            sub: sub.into(),
             active,
             playing: active && playing,
             liked: false,
@@ -10472,7 +10887,7 @@ async fn restore_repeat_after_load(
 fn push_idle(weak: &slint::Weak<MainWindow>) {
     let _ = weak.upgrade_in_event_loop(|app| {
         app.set_track_name("\u{2014}".into());
-        app.set_track_artist("Nothing playing".into());
+        app.set_track_artist(tr!("Nothing playing").into());
         app.set_progress(0.0);
         app.set_elapsed("0:00".into());
         app.set_duration("0:00".into());
@@ -10745,7 +11160,7 @@ fn cache_search(q: &str, r: &SearchResults) {
 
 fn connected_status(session: &Session) -> String {
     let n = session.display_name();
-    if n.is_empty() { "Connected".to_string() } else { format!("Connected as {n}") }
+    if n.is_empty() { tr!("Connected") } else { tr!("Connected as {}", n) }
 }
 
 fn set_drill(weak: &slint::Weak<MainWindow>, drilled: bool, title: String) {
@@ -10826,9 +11241,9 @@ fn search_track_row(r: &SearchResults, t: &Track) -> (SearchRow, SearchAction) {
 
 fn search_artist_row(a: &lightify_core::Artist) -> (SearchRow, SearchAction) {
     let sub = if a.followers > 0 {
-        format!("Artist \u{2022} {} followers", compact_count(a.followers))
+        lightify_i18n::trn!("Artist \u{2022} {} followers", "Artist \u{2022} {} followers", a.followers, compact_count(a.followers))
     } else {
-        "Artist".to_string()
+        tr!("Artist")
     };
     (
         SearchRow {
@@ -10847,7 +11262,7 @@ fn search_album_row(a: &lightify_core::Album) -> (SearchRow, SearchAction) {
     (
         SearchRow {
             name: a.name.clone().into(),
-            sub: format!("Album \u{2022} {}", a.artists).into(),
+            sub: tr!("Album \u{2022} {}", a.artists).into(),
             kind: "album".into(),
             selected: false,
             art: a.thumb.clone().into(),
@@ -10858,11 +11273,16 @@ fn search_album_row(a: &lightify_core::Album) -> (SearchRow, SearchAction) {
 }
 
 fn search_playlist_row(p: &lightify_core::Playlist) -> (SearchRow, SearchAction) {
-    let by = if p.owner.is_empty() { String::new() } else { format!(" \u{2022} {}", p.owner) };
+    let n = group_thousands(p.tracks);
+    let sub = if p.owner.is_empty() {
+        lightify_i18n::trn!("Playlist \u{2022} {} tracks", "Playlist \u{2022} {} tracks", p.tracks, n)
+    } else {
+        lightify_i18n::trn!("Playlist \u{2022} {} tracks \u{2022} {}", "Playlist \u{2022} {} tracks \u{2022} {}", p.tracks, n, p.owner)
+    };
     (
         SearchRow {
             name: p.name.clone().into(),
-            sub: format!("Playlist \u{2022} {} tracks{by}", group_thousands(p.tracks)).into(),
+            sub: sub.into(),
             kind: "playlist".into(),
             selected: false,
             art: p.image.clone().into(),
@@ -11031,7 +11451,7 @@ fn build_search(r: &SearchResults, filter: &str, q: &str) -> (Vec<SearchRow>, Ve
                     kind: "header".into(),
                     selected: false,
                     art: Default::default(),
-                    meta: "See all".into(),
+                    meta: tr!("See all").into(),
                 });
                 actions.push(SearchAction::Header { see_all: see_all.to_string() });
                 for (row, action) in items.into_iter().take(SEARCH_SECTION_ROWS) {
@@ -11040,13 +11460,13 @@ fn build_search(r: &SearchResults, filter: &str, q: &str) -> (Vec<SearchRow>, Ve
                 }
             };
             let songs = tracks.iter().enumerate().filter(|(i, _)| !skip("track", *i)).map(|(_, t)| search_track_row(r, t)).collect();
-            section("Songs", "tracks", songs, &mut rows);
+            section(&tr!("Songs"), "tracks", songs, &mut rows);
             let artists = artist_order.iter().filter(|&&i| !skip("artist", i)).map(|&i| search_artist_row(&r.artists[i])).collect();
-            section("Artists", "artists", artists, &mut rows);
+            section(&tr!("Artists"), "artists", artists, &mut rows);
             let albs = albums.iter().enumerate().filter(|(i, _)| !skip("album", *i)).map(|(_, a)| search_album_row(a)).collect();
-            section("Albums", "albums", albs, &mut rows);
+            section(&tr!("Albums"), "albums", albs, &mut rows);
             let pls = r.playlists.iter().enumerate().filter(|(i, _)| !skip("playlist", *i)).map(|(_, p)| search_playlist_row(p)).collect();
-            section("Playlists", "playlists", pls, &mut rows);
+            section(&tr!("Playlists"), "playlists", pls, &mut rows);
         }
     }
     (rows, actions)
@@ -11095,12 +11515,12 @@ fn build_recents(list: &[String]) -> (Vec<SearchRow>, Vec<SearchAction>) {
         return (rows, actions);
     }
     rows.push(SearchRow {
-        name: "Recent searches".into(),
+        name: tr!("Recent searches").into(),
         sub: Default::default(),
         kind: "header".into(),
         selected: false,
         art: Default::default(),
-        meta: "Clear".into(),
+        meta: tr!("Clear").into(),
     });
     actions.push(SearchAction::ClearRecents);
     for q in list {
@@ -11262,11 +11682,15 @@ fn bp_panel_rows() -> (Vec<SideRow>, String, i32, i32, String) {
     };
     if p.done {
         let note = if p.missed == 0 {
-            format!("All {} found on Spotify", p.found)
+            lightify_i18n::trn!("All {n} found on Spotify", "All {n} found on Spotify", p.found)
         } else {
             // Short enough for the 300 px drawer in the bundled font (the longer
             // "… · 4 aren't on Spotify" was cut off).
-            format!("{} of {} found \u{00b7} {} not on Spotify", p.found, p.total, p.missed)
+            lightify_i18n::trn!(
+                "{} of {} found \u{00b7} {n} not on Spotify",
+                "{} of {} found \u{00b7} {n} not on Spotify",
+                p.missed, p.found, p.total
+            )
         };
         return (Vec::new(), String::new(), 0, 0, note);
     }
@@ -11301,6 +11725,14 @@ fn bp_chart_title(genres: &[(String, String)], idx: usize, kind: &str) -> String
 
 /// Push the sidebar mode + rows to the UI. `empty` (when non-blank) sets the
 /// no-rows placeholder text; a blank `empty` leaves the current text untouched.
+/// A play of ours just counted (play_history.rs): if RECENT is open, show it now.
+fn show_new_plays(weak: &slint::Weak<MainWindow>, sidebar_mode: i32, sidebar_tracks: &mut Vec<Track>, recent_spotify: &[Track], playing_id: &str) {
+    if play_history::take_changed() && sidebar_mode == 2 {
+        *sidebar_tracks = play_history::merged(recent_spotify);
+        set_sidebar(weak, 2, build_side_rows(sidebar_tracks, playing_id, true), tr!("No recent tracks yet"));
+    }
+}
+
 fn set_sidebar(weak: &slint::Weak<MainWindow>, mode: i32, rows: Vec<SideRow>, empty: String) {
     // Identity is the track, not its relative "5m ago" time, which ticks on its own.
     let keys: Vec<String> = rows.iter().map(|r| format!("{mode}\u{1f}{}\u{1f}{}", r.name, r.artist)).collect();
@@ -11320,6 +11752,10 @@ fn set_sidebar(weak: &slint::Weak<MainWindow>, mode: i32, rows: Vec<SideRow>, em
         app.set_bp_done_note(done_note.into());
         app.set_sidebar_mode(mode);
         if !empty.is_empty() {
+            // The plain "nothing here" messages get a hint under them; an error or
+            // "Loading…" doesn't. Decided here, in the active language — not by the
+            // UI comparing the message against English.
+            app.set_sidebar_empty_plain(empty == tr!("No queued tracks") || empty == tr!("No recent tracks yet"));
             app.set_sidebar_empty(empty.into());
         }
         if let Some(m) = patch_model(&app.get_sidebar_rows(), rows) {
@@ -11378,7 +11814,7 @@ async fn refresh_sidebar(
                 if m.advance(&playing_uri) {
                     *tracks = m.upcoming.clone();
                     persist_mirror(mirror);
-                    set_sidebar(weak, 1, build_side_rows(tracks, &pid, false), "No queued tracks".to_string());
+                    set_sidebar(weak, 1, build_side_rows(tracks, &pid, false), tr!("No queued tracks"));
                     return;
                 }
                 *mirror = None;
@@ -11393,12 +11829,12 @@ async fn refresh_sidebar(
             // refresh read as the queue being cleared).
             *generation += 1;
             if tracks.is_empty() {
-                set_sidebar(weak, 1, vec![], "Loading queue\u{2026}".to_string());
+                set_sidebar(weak, 1, vec![], tr!("Loading queue\u{2026}"));
             }
             spawn_sidebar_fetch(self_tx, 1, *generation);
         }
         2 => {
-            set_sidebar(weak, 2, build_side_rows(tracks, &pid, true), "No recent tracks yet".to_string());
+            set_sidebar(weak, 2, build_side_rows(tracks, &pid, true), tr!("No recent tracks yet"));
         }
         _ => {}
     }
@@ -11466,7 +11902,7 @@ fn tick_queue_sidebar(
                 *tracks = m.upcoming.clone();
                 persist_mirror(mirror);
                 let pid = current_id(last);
-                set_sidebar(weak, 1, build_side_rows(tracks, &pid, false), "No queued tracks".to_string());
+                set_sidebar(weak, 1, build_side_rows(tracks, &pid, false), tr!("No queued tracks"));
             }
             return;
         }
@@ -11705,7 +12141,7 @@ fn spawn_downloads_refresh(weak: &slint::Weak<MainWindow>) {
                     set_dl_rows(
                         &weak,
                         build_dl_rows(&items),
-                        "No downloads queued".to_string(),
+                        tr!("No downloads queued"),
                         clearable,
                     );
                 }
@@ -11747,11 +12183,11 @@ fn spawn_enqueue_download(
 ) {
     let weak = weak.clone();
     let tx = self_tx.clone();
-    set_status(&weak, format!("Queueing download: {label}\u{2026}"));
+    set_status(&weak, tr!("Queueing download: {}\u{2026}", label));
     tokio::spawn(async move {
         match downloader::enqueue(&url).await {
             Ok(_) => {
-                set_status(&weak, format!("Download queued: {label}"));
+                set_status(&weak, tr!("Download queued: {}", label));
                 let _ = tx.send(Cmd::RefreshDownloads);
             }
             Err(e) => set_status(&weak, e),
@@ -11803,7 +12239,7 @@ async fn bp_refill(
             Err(e) => {
                 // A rate limit here must not spin: stop this pass and let the next
                 // tick retry, exactly like the original's refill error path bailing.
-                set_status(weak, format!("Beatport queue refill \u{2014} {e}"));
+                set_status(weak, tr!("Beatport queue refill \u{2014} {}", e));
                 break;
             }
         };
@@ -11811,7 +12247,7 @@ async fn bp_refill(
             continue;
         }
         if let Err(e) = queue_one(session, &matched.uri, engine_owns_now()).await {
-            set_status(weak, format!("Beatport queue refill \u{2014} {e}"));
+            set_status(weak, tr!("Beatport queue refill \u{2014} {}", e));
             break;
         }
         // Tracked so `end_autoplay_authority` can tell whether this chart's own
@@ -12084,13 +12520,13 @@ fn rel_time(iso: &str) -> String {
         .unwrap_or(0);
     let d = now - then;
     if d < 45 {
-        "just now".to_string()
+        tr!("just now")
     } else if d < 3600 {
-        format!("{}m", (d + 30) / 60)
+        tr!("{}m", (d + 30) / 60)
     } else if d < 86400 {
-        format!("{}h", d / 3600)
+        tr!("{}h", d / 3600)
     } else {
-        format!("{}d", d / 86400)
+        tr!("{}d", d / 86400)
     }
 }
 
@@ -12191,13 +12627,13 @@ async fn bp_fetch(
     };
     let chart = bp_chart_label(kind);
     push_bp_rows(weak, vec![]);
-    set_bp_status(weak, format!("Fetching {chart} \u{2014} {label}\u{2026}"));
+    set_bp_status(weak, tr!("Fetching {} \u{2014} {}\u{2026}", chart, label));
     match session.beatport_chart(&slug, kind).await {
         Ok(t) => {
             push_bp_rows(weak, build_bp_rows(&t));
             let n = t.len();
             *out = t;
-            set_bp_status(weak, format!("{n} tracks \u{2014} {label} {chart}"));
+            set_bp_status(weak, lightify_i18n::trn!("{n} tracks \u{2014} {} {}", "{n} tracks \u{2014} {} {}", n, label, chart));
         }
         Err(e) => {
             out.clear();
@@ -12264,7 +12700,7 @@ async fn obtain_session(
                 }
                 Err(e) => {
                     notice = Some((
-                        format!("Your Spotify sign-in has expired or was revoked \u{2014} authorise again. ({e})"),
+                        tr!("Your Spotify sign-in has expired or was revoked \u{2014} authorise again. ({})", e),
                         SignInTone::Error,
                     ));
                 }
@@ -12278,7 +12714,7 @@ async fn obtain_session(
         });
         let (msg, tone) = notice.take().unwrap_or((String::new(), SignInTone::Info));
         push_signin(weak, true, msg, tone, false);
-        set_status(weak, "Sign in to Spotify to start".to_string());
+        set_status(weak, tr!("Sign in to Spotify to start"));
 
         // Wait for the user to authorise. Everything else is ignored until then —
         // there's nothing it could act on without a session.
@@ -12293,7 +12729,7 @@ async fn obtain_session(
             };
             match sign_in(weak, rx, &raw).await {
                 Ok(Some(name)) => {
-                    push_signin(weak, true, format!("Signed in as {name}"), SignInTone::Ok, false);
+                    push_signin(weak, true, tr!("Signed in as {}", name), SignInTone::Ok, false);
                     break; // back to the top: load the session that was just saved
                 }
                 Ok(None) => return None, // closing
@@ -12319,7 +12755,7 @@ async fn sign_in(
     if !open_url(&url) {
         return Err("Couldn't open your web browser to sign in.".to_string());
     }
-    push_signin(weak, true, "Opening browser \u{2014} complete the login\u{2026}".to_string(), SignInTone::Info, true);
+    push_signin(weak, true, tr!("Opening browser \u{2014} complete the login\u{2026}"), SignInTone::Info, true);
     let finish = pkce.finish(callback);
     tokio::pin!(finish);
     let deadline = tokio::time::sleep(SIGNIN_TIMEOUT);
@@ -12334,7 +12770,7 @@ async fn sign_in(
                 None => return Ok(None),
                 Some(Cmd::SignInRetry(_)) => {
                     open_url(&url);
-                    push_signin(weak, true, "Re-opening browser \u{2014} complete the login\u{2026}".to_string(), SignInTone::Info, true);
+                    push_signin(weak, true, tr!("Re-opening browser \u{2014} complete the login\u{2026}"), SignInTone::Info, true);
                 }
                 Some(Cmd::SignInOpenDashboard) => {
                     open_url(auth::DASHBOARD_URL);
@@ -12528,6 +12964,129 @@ fn save_mini_mode(mode: &str) {
 // what the footer pill and Settings › updates show, and handing over to the installer's
 // `--update` mode on Restart. Nothing installs without the user pressing Restart.
 
+// ── Language (LANGUAGE-PLAN.md) ──────────────────────────────────────────────
+
+// The bundled languages, generated by build.rs from translations/ (empty while English is
+// the only one).
+include!(concat!(env!("OUT_DIR"), "/languages.rs"));
+
+/// Settings › language: `auto` (Windows' display language) unless a language was picked,
+/// here or in the installer.
+fn language_setting_path() -> std::path::PathBuf {
+    lightify_core::config::data_dir().join("lightify_shell_lang.txt")
+}
+
+/// `--lang <code>` from the command line, when given (see `main`).
+static LANG_ARG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn load_language_setting() -> String {
+    std::fs::read_to_string(language_setting_path()).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// Makes `setting` the language of Slint's strings and the Rust side's alike, and returns
+/// the code chosen. The app resolves `auto` itself and tells Slint explicitly, so the two
+/// never disagree about which language Windows asked for. Must run after the first
+/// window exists.
+fn apply_language(setting: &str) -> String {
+    let available: Vec<&str> = LANGS.iter().map(|l| l.code).collect();
+    let code = lightify_i18n::resolve(setting, &available, &lightify_i18n::system_languages());
+    let code = lightify_i18n::select(LANGS, &code);
+    if !LANGS.is_empty() {
+        let _ = slint::select_bundled_translation(if code == lightify_i18n::ENGLISH { "" } else { &code });
+    }
+    code
+}
+
+/// What each row of Settings › language saves: `auto`, English, then every bundled
+/// language (by code, as build.rs lists them). Empty while English is the only one.
+fn language_choices() -> Vec<String> {
+    if LANGS.is_empty() {
+        return Vec::new();
+    }
+    let mut v = vec!["auto".to_string(), lightify_i18n::ENGLISH.to_string()];
+    v.extend(LANGS.iter().map(|l| l.code.to_string()));
+    v
+}
+
+/// Settings › language's rows for the saved `setting`: Automatic first, then each
+/// language in its own name — "(preview)" after a machine draft no native speaker has
+/// read yet (`lightify_i18n::PREVIEW`).
+fn language_rows(setting: &str) -> Vec<DeviceRow> {
+    let s = setting.trim();
+    let auto = s.is_empty() || s.eq_ignore_ascii_case("auto");
+    language_choices()
+        .iter()
+        .map(|c| {
+            let name = if c == "auto" {
+                tr!("Automatic (Windows language)")
+            } else if lightify_i18n::is_preview(c) {
+                tr!("{} (preview)", lightify_i18n::native_name(c))
+            } else {
+                lightify_i18n::native_name(c)
+            };
+            let active = if c == "auto" { auto } else { !auto && c.eq_ignore_ascii_case(s) };
+            DeviceRow { name: name.into(), active }
+        })
+        .collect()
+}
+
+/// The language this run shows: `--lang` when given, else the saved choice.
+fn language_in_use() -> String {
+    LANG_ARG.get().cloned().unwrap_or_else(load_language_setting)
+}
+
+fn push_languages(app: &MainWindow, setting: &str) {
+    let rows = language_rows(setting);
+    // On the button: the row that is ticked (an unbundled saved code ticks none: English).
+    let current = rows.iter().find(|r| r.active).map(|r| r.name.clone());
+    app.set_settings_language_current(current.unwrap_or_else(|| lightify_i18n::native_name(lightify_i18n::ENGLISH).into()));
+    app.set_settings_languages(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+}
+
+/// Settings › language picked (`setting` = `auto` or a code): save it and switch live.
+/// Slint re-says its own strings by itself (`select_bundled_translation` marks them
+/// dirty); what Rust put on screen is said again here — the UI thread's part — and by
+/// the worker (`Cmd::Relabel`: library rows, search, the sidebar, Local, prompts).
+fn switch_language(app: &MainWindow, setting: &str, tx: &tokio::sync::mpsc::UnboundedSender<Cmd>) {
+    let _ = std::fs::write(language_setting_path(), setting);
+    apply_switch(app, setting, tx);
+}
+
+/// The switch itself, without saving (`--selftest-language` never touches the setting).
+fn apply_switch(app: &MainWindow, setting: &str, tx: &tokio::sync::mpsc::UnboundedSender<Cmd>) {
+    apply_language(setting);
+    relabel_ui(app, setting);
+    let _ = tx.send(Cmd::Relabel);
+}
+
+/// The UI thread's half of a language switch: the language list itself, the tray menu,
+/// and no menu, palette or status line left over in the old language.
+fn relabel_ui(app: &MainWindow, setting: &str) {
+    push_languages(app, setting);
+    app.set_ctx_open(false);
+    app.set_palette_open(false);
+    app.set_status_text("".into());
+    #[cfg(windows)]
+    tray::relabel();
+}
+
+/// Chinese text: Slint's fallback list for Han characters (fontique's Windows default)
+/// lacks glyphs some common ones need — 设 and 队 drew blank in the Phase 4 font test.
+/// Microsoft YaHei UI (on every Windows since 7) goes after that list, so whatever it
+/// already finds is unchanged. The list is process-wide; once, after the first window.
+fn cjk_font_fallback() {
+    use slint::fontique_010::fontique::{FallbackKey, Script};
+    let mut c = slint::fontique_010::shared_collection();
+    let hani = FallbackKey::new(Script::from_str_unchecked("Hani"), None);
+    let Some(yahei) = c.family_id("Microsoft YaHei UI") else { return };
+    let current: Vec<_> = c.fallback_families(hani).collect();
+    if current.contains(&yahei) {
+        return;
+    }
+    // `append_fallbacks` replaced the default list in testing; set the whole list.
+    c.set_fallbacks(hani, current.into_iter().chain(std::iter::once(yahei)));
+}
+
 /// "Install updates automatically" (Settings › updates), on unless switched off.
 fn update_auto_path() -> std::path::PathBuf {
     lightify_core::config::data_dir().join("lightify_shell_autoupdate.txt")
@@ -12603,7 +13162,7 @@ fn install_updater(app: &MainWindow) {
                 let Some((_, installer)) = lightify_core::update::pending(env!("CARGO_PKG_VERSION")) else {
                     let _ = weak.upgrade_in_event_loop(|a| {
                         a.set_update_state("error".into());
-                        a.set_update_note("The downloaded update is gone \u{2014} check again".into());
+                        a.set_update_note(tr!("The downloaded update is gone \u{2014} check again").into());
                     });
                     return;
                 };
@@ -12618,7 +13177,7 @@ fn install_updater(app: &MainWindow) {
                     Err(e) => {
                         let _ = weak.upgrade_in_event_loop(move |a| {
                             a.set_update_state("error".into());
-                            a.set_update_note(format!("Couldn't start the update: {e}").into());
+                            a.set_update_note(tr!("Couldn't start the update: {}", e).into());
                         });
                     }
                 }
@@ -12857,7 +13416,7 @@ async fn restore_queue(
     }
     if let Ok(t) = session.queue().await {
         if !t.is_empty() {
-            set_status(weak, format!("Restored queue \u{2014} {} track{}", t.len(), if t.len() == 1 { "" } else { "s" }));
+            set_status(weak, lightify_i18n::trn!("Restored queue \u{2014} {n} track", "Restored queue \u{2014} {n} tracks", t.len()));
             *mirror = Some(QueueMirror::new(playing_uri, t));
         }
     }
@@ -12869,7 +13428,13 @@ fn set_account(weak: &slint::Weak<MainWindow>, text: String) {
     let _ = weak.upgrade_in_event_loop(move |app| app.set_account(text.into()));
 }
 
-fn set_device_status(weak: &slint::Weak<MainWindow>, text: String) {
+/// Settings › playback device's note while the list is empty; `say` builds it, like
+/// `push_engine_status`.
+fn set_device_status(weak: &slint::Weak<MainWindow>, say: impl Fn() -> String + Send + 'static) {
+    let text = say();
+    if let Ok(mut g) = DEVICE_LINE.lock() {
+        *g = Some(Box::new(say));
+    }
     let _ = weak.upgrade_in_event_loop(move |app| app.set_settings_device_status(text.into()));
 }
 
@@ -12910,21 +13475,30 @@ fn build_palette_base(
     order: &[usize],
     playing: bool,
 ) -> Vec<PaletteCmd> {
+    // Shown in the active language; searched in it and in English (the English title
+    // joins the English keywords), so a query typed either way finds the command.
+    // (In English the title is already searched, so nothing is added.)
+    let pc = |title: &'static str, hint: &'static str, keywords: &str, cmd: Cmd| {
+        let shown = lightify_i18n::translate(title);
+        let keywords = if shown == title { keywords.to_string() } else { format!("{} {keywords}", title.to_lowercase()) };
+        PaletteCmd { title: shown, hint: lightify_i18n::translate(hint), keywords, cmd }
+    };
+    // `tr_noop!` puts each English title and hint in the template; `pc` translates it.
     let mut v = vec![
-        PaletteCmd { title: if playing { "Pause" } else { "Play" }.into(), hint: "Playback".into(), keywords: "toggle playback resume".into(), cmd: Cmd::TogglePlay },
-        PaletteCmd { title: "Next track".into(), hint: "Playback".into(), keywords: "skip forward".into(), cmd: Cmd::Next },
-        PaletteCmd { title: "Previous track".into(), hint: "Playback".into(), keywords: "back rewind".into(), cmd: Cmd::Prev },
-        PaletteCmd { title: "Toggle shuffle".into(), hint: "Playback".into(), keywords: "random".into(), cmd: Cmd::ToggleShuffle },
-        PaletteCmd { title: "Cycle repeat".into(), hint: "Playback".into(), keywords: "loop".into(), cmd: Cmd::CycleRepeat },
-        PaletteCmd { title: "Open settings".into(), hint: "App".into(), keywords: "preferences config devices poll rate".into(), cmd: Cmd::OpenSettings },
-        PaletteCmd { title: "Show queue".into(), hint: "Panel".into(), keywords: "up next sidebar".into(), cmd: Cmd::ToggleSidebar(1) },
-        PaletteCmd { title: "Show recent".into(), hint: "Panel".into(), keywords: "history sidebar".into(), cmd: Cmd::ToggleSidebar(2) },
-        PaletteCmd { title: "Collapse left panel".into(), hint: "Window".into(), keywords: "hide library toggle".into(), cmd: Cmd::CollapseLeft },
-        PaletteCmd { title: "Mini player: square".into(), hint: "Window".into(), keywords: "compact miniplayer cover".into(), cmd: Cmd::SetMiniMode("square".into()) },
-        PaletteCmd { title: "Mini player: bar".into(), hint: "Window".into(), keywords: "compact miniplayer strip".into(), cmd: Cmd::SetMiniMode("bar".into()) },
-        PaletteCmd { title: "Mini player: nano (cover only)".into(), hint: "Window".into(), keywords: "compact miniplayer cover tiny".into(), cmd: Cmd::SetMiniMode("nano".into()) },
-        PaletteCmd { title: "Exit mini player".into(), hint: "Window".into(), keywords: "full restore miniplayer off".into(), cmd: Cmd::SetMiniMode("off".into()) },
-        PaletteCmd { title: "Liked Songs".into(), hint: "Library".into(), keywords: "favorites hearts saved".into(), cmd: Cmd::Drill(0) },
+        pc(if playing { lightify_i18n::tr_noop!("Pause") } else { lightify_i18n::tr_noop!("Play") }, lightify_i18n::tr_noop!("Playback"), "toggle playback resume", Cmd::TogglePlay),
+        pc(lightify_i18n::tr_noop!("Next track"), lightify_i18n::tr_noop!("Playback"), "skip forward", Cmd::Next),
+        pc(lightify_i18n::tr_noop!("Previous track"), lightify_i18n::tr_noop!("Playback"), "back rewind", Cmd::Prev),
+        pc(lightify_i18n::tr_noop!("Toggle shuffle"), lightify_i18n::tr_noop!("Playback"), "random", Cmd::ToggleShuffle),
+        pc(lightify_i18n::tr_noop!("Cycle repeat"), lightify_i18n::tr_noop!("Playback"), "loop", Cmd::CycleRepeat),
+        pc(lightify_i18n::tr_noop!("Open settings"), lightify_i18n::tr_noop!("App"), "preferences config devices poll rate", Cmd::OpenSettings),
+        pc(lightify_i18n::tr_noop!("Show queue"), lightify_i18n::tr_noop!("Panel"), "up next sidebar", Cmd::ToggleSidebar(1)),
+        pc(lightify_i18n::tr_noop!("Show recent"), lightify_i18n::tr_noop!("Panel"), "history sidebar", Cmd::ToggleSidebar(2)),
+        pc(lightify_i18n::tr_noop!("Collapse left panel"), lightify_i18n::tr_noop!("Window"), "hide library toggle", Cmd::CollapseLeft),
+        pc(lightify_i18n::tr_noop!("Mini player: square"), lightify_i18n::tr_noop!("Window"), "compact miniplayer cover", Cmd::SetMiniMode("square".into())),
+        pc(lightify_i18n::tr_noop!("Mini player: bar"), lightify_i18n::tr_noop!("Window"), "compact miniplayer strip", Cmd::SetMiniMode("bar".into())),
+        pc(lightify_i18n::tr_noop!("Mini player: nano (cover only)"), lightify_i18n::tr_noop!("Window"), "compact miniplayer cover tiny", Cmd::SetMiniMode("nano".into())),
+        pc(lightify_i18n::tr_noop!("Exit mini player"), lightify_i18n::tr_noop!("Window"), "full restore miniplayer off", Cmd::SetMiniMode("off".into())),
+        pc(lightify_i18n::tr_noop!("Liked Songs"), lightify_i18n::tr_noop!("Library"), "favorites hearts saved", Cmd::Drill(0)),
     ];
     // Playlists map to Drill(row+1) — Drill takes the *display* row index (0 = Liked),
     // so walk the same sorted order the library list is showing.
@@ -12932,7 +13506,7 @@ fn build_palette_base(
         let Some(p) = playlists.get(idx) else { continue };
         v.push(PaletteCmd {
             title: p.name.clone(),
-            hint: "Playlist".into(),
+            hint: tr!("Playlist"),
             keywords: format!("playlist {}", p.owner),
             cmd: Cmd::Drill(row + 1),
         });
@@ -13020,8 +13594,8 @@ fn apply_palette_filter(
         source.insert(
             0,
             PaletteCmd {
-                title: format!("Search for \u{201c}{q}\u{201d}"),
-                hint: "Search".into(),
+                title: tr!("Search for \u{201c}{}\u{201d}", q),
+                hint: tr!("Search"),
                 keywords: format!("find spotify {q}"),
                 cmd: Cmd::PaletteSearch(q.to_string()),
             },
@@ -13387,33 +13961,42 @@ async fn load_next_search_page(
             if loaded == 0 && !pager.done {
                 // Nothing credited to the artist in these releases; the list's own
                 // near-the-end check asks for the next page straight away.
-                set_status(weak, format!("Loading \u{201c}{}\u{201d}\u{2026}", pager.name));
+                set_status(weak, tr!("Loading \u{201c}{}\u{201d}\u{2026}", pager.name));
             } else if loaded == 0 {
-                set_status(weak, "No tracks to show".to_string());
+                set_status(weak, tr!("No tracks to show"));
             } else if pager.done && pager.partial {
                 set_status(
                     weak,
-                    format!(
-                        "Loaded {loaded} tracks from \u{201c}{}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
-                        pager.name
+                    lightify_i18n::trn!(
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        loaded, pager.name
                     ),
                 );
             } else if pager.done {
-                set_status(weak, format!("Loaded {loaded} tracks from \u{201c}{}\u{201d}", pager.name));
+                set_status(weak, lightify_i18n::trn!("Loaded {n} tracks from \u{201c}{0}\u{201d}", "Loaded {n} tracks from \u{201c}{0}\u{201d}", loaded, pager.name));
             } else {
                 set_status(
                     weak,
-                    format!("Loaded {loaded} tracks from \u{201c}{}\u{201d}\u{2026}", pager.name),
+                    lightify_i18n::trn!(
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d}\u{2026}",
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d}\u{2026}",
+                        loaded, pager.name
+                    ),
                 );
             }
         }
         Err(e) => {
             if tracks.is_empty() {
-                set_status(weak, format!("\u{201c}{}\u{201d} failed: {e}", pager.name));
+                set_status(weak, tr!("\u{201c}{}\u{201d} failed: {}", pager.name, e));
             } else {
                 set_status(
                     weak,
-                    format!("\u{201c}{}\u{201d} stopped after {} tracks: {e}", pager.name, tracks.len()),
+                    lightify_i18n::trn!(
+                        "\u{201c}{}\u{201d} stopped after {n} tracks: {}",
+                        "\u{201c}{}\u{201d} stopped after {n} tracks: {}",
+                        tracks.len(), pager.name, e
+                    ),
                 );
             }
             pager.done = true;
@@ -13450,7 +14033,7 @@ async fn load_next_track_page(
     pager.loading = true;
     set_tracks_more(weak, false);
     if pager.offset == 0 {
-        set_status(weak, format!("Loading \u{201c}{}\u{201d}\u{2026}", pager.name));
+        set_status(weak, tr!("Loading \u{201c}{}\u{201d}\u{2026}", pager.name));
     }
 
     let limit = pager.page_size();
@@ -13498,33 +14081,34 @@ async fn load_next_track_page(
 
             let loaded = tracks.len();
             if loaded == 0 {
-                set_status(weak, "No tracks to show".to_string());
+                set_status(weak, tr!("No tracks to show"));
             } else if pager.done && pager.partial {
                 // Non-owned playlists can only be read from the public embed page,
                 // which stops at ~100 tracks. Say so rather than letting a 460-track
                 // playlist quietly look like a 100-track one.
                 set_status(
                     weak,
-                    format!(
-                        "Loaded {loaded} tracks from \u{201c}{}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
-                        pager.name
+                    lightify_i18n::trn!(
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        loaded, pager.name
                     ),
                 );
             } else if pager.done {
-                set_status(weak, format!("Loaded {loaded} tracks from \u{201c}{}\u{201d}", pager.name));
+                set_status(weak, lightify_i18n::trn!("Loaded {n} tracks from \u{201c}{0}\u{201d}", "Loaded {n} tracks from \u{201c}{0}\u{201d}", loaded, pager.name));
             } else {
-                let total_text = if pager.total > 0 {
-                    format!(" / {}", group_thousands(pager.total))
-                } else {
-                    String::new()
-                };
+                let done = group_thousands(loaded as u32);
                 set_status(
                     weak,
-                    format!(
-                        "Loaded {}{total_text} tracks from \u{201c}{}\u{201d}",
-                        group_thousands(loaded as u32),
-                        pager.name
-                    ),
+                    if pager.total > 0 {
+                        lightify_i18n::trn!(
+                            "Loaded {0} / {1} tracks from \u{201c}{2}\u{201d}",
+                            "Loaded {0} / {1} tracks from \u{201c}{2}\u{201d}",
+                            pager.total, done, group_thousands(pager.total), pager.name
+                        )
+                    } else {
+                        lightify_i18n::trn!("Loaded {0} tracks from \u{201c}{1}\u{201d}", "Loaded {0} tracks from \u{201c}{1}\u{201d}", loaded, done, pager.name)
+                    },
                 );
             }
         }
@@ -13532,11 +14116,15 @@ async fn load_next_track_page(
             // Whatever already arrived stays on screen; the original does the same and
             // just stops paging rather than blanking the list.
             if tracks.is_empty() {
-                set_status(weak, format!("\u{201c}{}\u{201d} failed: {e}", pager.name));
+                set_status(weak, tr!("\u{201c}{}\u{201d} failed: {}", pager.name, e));
             } else {
                 set_status(
                     weak,
-                    format!("\u{201c}{}\u{201d} stopped after {} tracks: {e}", pager.name, tracks.len()),
+                    lightify_i18n::trn!(
+                        "\u{201c}{}\u{201d} stopped after {n} tracks: {}",
+                        "\u{201c}{}\u{201d} stopped after {n} tracks: {}",
+                        tracks.len(), pager.name, e
+                    ),
                 );
             }
             pager.done = true;
@@ -13994,14 +14582,13 @@ async fn queue_after_clear(session: &mut Session, playing_uri: &str) -> Option<V
 
 async fn start_station(weak: &slint::Weak<MainWindow>, seed_uri: &str) {
     if !seed_uri.starts_with("spotify:track:") {
-        set_status(weak, "Start station needs a Spotify track".to_string());
+        set_status(weak, tr!("Start station needs a Spotify track"));
         return;
     }
     if !engine::running() {
         set_status(
             weak,
-            "Start station needs Lightify\u{2019}s own player \u{2014} Settings \u{2192} Restart"
-                .to_string(),
+            tr!("Start station needs Lightify\u{2019}s own player \u{2014} Settings \u{2192} Restart"),
         );
         return;
     }
@@ -14021,15 +14608,15 @@ async fn start_station(weak: &slint::Weak<MainWindow>, seed_uri: &str) {
         })
         .to_string(),
     );
-    set_status(weak, "Building station\u{2026}".to_string());
+    set_status(weak, tr!("Building station\u{2026}"));
 }
 
 // ── Row context menus (the native `.ctx-menu`) ───────────────────────────────
 
 /// Honest notes for menu rows the shipped app has but this shell can't run yet.
 /// The rows stay visible (dimmed) rather than vanishing — see PARITY.md.
-const FOLLOW_ARTIST_NOTE: &str =
-    "Follow artist needs the user-follow-modify scope, which this token doesn\u{2019}t carry";
+const FOLLOW_ARTIST_NOTE: &str = lightify_i18n::tr_noop!(
+    "Follow artist needs the user-follow-modify scope, which this token doesn\u{2019}t carry");
 
 /// One built menu row: what it says, how it reads, and what it runs.
 struct CtxItem {
@@ -14049,7 +14636,7 @@ impl CtxItem {
     /// A row the shipped app performs but this build can't — dimmed, and clicking
     /// it explains why in the status bar.
     fn muted(label: impl Into<String>, note: &'static str) -> Self {
-        Self { label: label.into(), danger: false, muted: true, cmd: Cmd::Note(note.to_string()) }
+        Self { label: label.into(), danger: false, muted: true, cmd: Cmd::Note(lightify_i18n::translate(note)) }
     }
 }
 
@@ -14057,17 +14644,17 @@ impl CtxItem {
 /// selection — ports `buildSpotifySelectionMenu` (`app.js:1253`).
 fn selection_menu(count: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new(format!("Play {count} selected"), Cmd::PlaySelection),
-        CtxItem::new(format!("Add {count} to queue"), Cmd::QueueSelection),
-        CtxItem::new("Create playlist from selection", Cmd::CreatePlaylistFromSelection),
+        CtxItem::new(lightify_i18n::trn!("Play {n} selected", "Play {n} selected", count), Cmd::PlaySelection),
+        CtxItem::new(lightify_i18n::trn!("Add {n} to queue", "Add {n} to queue", count), Cmd::QueueSelection),
+        CtxItem::new(tr!("Create playlist from selection"), Cmd::CreatePlaylistFromSelection),
     ]
 }
 
 /// The Liked Songs row menu — ports `app.js:1894`.
 fn liked_row_menu() -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Open", Cmd::Drill(0)),
-        CtxItem::new("Download liked songs", Cmd::DownloadLibraryRow(0)),
+        CtxItem::new(tr!("Open"), Cmd::Drill(0)),
+        CtxItem::new(tr!("Download liked songs"), Cmd::DownloadLibraryRow(0)),
     ]
 }
 
@@ -14075,10 +14662,10 @@ fn liked_row_menu() -> Vec<CtxItem> {
 /// (row 0 is Liked Songs, so a playlist is always >= 1).
 fn playlist_row_menu(row: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Play", Cmd::PlayRow(row)),
-        CtxItem::new("Save to library", Cmd::FollowPlaylist(row)),
-        CtxItem::new("Download", Cmd::DownloadLibraryRow(row)),
-        CtxItem::danger("Delete", Cmd::ConfirmDeletePlaylist(row)),
+        CtxItem::new(tr!("Play"), Cmd::PlayRow(row)),
+        CtxItem::new(tr!("Save to library"), Cmd::FollowPlaylist(row)),
+        CtxItem::new(tr!("Download"), Cmd::DownloadLibraryRow(row)),
+        CtxItem::danger(tr!("Delete"), Cmd::ConfirmDeletePlaylist(row)),
     ]
 }
 
@@ -14098,17 +14685,17 @@ fn resolve_track_row(view: &[usize], tracks: &[Track], row: usize, uri: &str) ->
 /// The optional "Like" row is deliberately absent: the original only adds it in
 /// *search* containers (`buildSearchTrackMenu`), not in the library list.
 fn track_row_menu(row: usize, t: &Track) -> Vec<CtxItem> {
-    let mut items = vec![CtxItem::new("Play", Cmd::PlayTrack { row, uri: t.uri.clone() })];
+    let mut items = vec![CtxItem::new(tr!("Play"), Cmd::PlayTrack { row, uri: t.uri.clone() })];
     if !t.uri.is_empty() {
-        items.push(CtxItem::new("Add to queue", Cmd::QueueTrack { row, uri: t.uri.clone() }));
+        items.push(CtxItem::new(tr!("Add to queue"), Cmd::QueueTrack { row, uri: t.uri.clone() }));
     }
     if !t.id.is_empty() {
-        items.push(CtxItem::new("Share", Cmd::ShareTrack(row)));
-        items.push(CtxItem::new("Start station", Cmd::StationFromUri(t.uri.clone())));
+        items.push(CtxItem::new(tr!("Share"), Cmd::ShareTrack(row)));
+        items.push(CtxItem::new(tr!("Start station"), Cmd::StationFromUri(t.uri.clone())));
         if !t.artist_ids.is_empty() {
-            items.push(CtxItem::muted("Follow artist", FOLLOW_ARTIST_NOTE));
+            items.push(CtxItem::muted(tr!("Follow artist"), FOLLOW_ARTIST_NOTE));
         }
-        items.push(CtxItem::new("Download", Cmd::Download {
+        items.push(CtxItem::new(tr!("Download"), Cmd::Download {
             url: format!("https://open.spotify.com/track/{}", t.id),
             label: t.name.clone(),
         }));
@@ -14120,17 +14707,17 @@ fn track_row_menu(row: usize, t: &Track) -> Vec<CtxItem> {
 /// library track menu plus a "Like" row, which the original shows only when the
 /// track is NOT already saved (it asks `cmd_check_liked` first; so do we).
 fn search_track_menu(row: usize, uri: &str, id: &str, show_like: bool) -> Vec<CtxItem> {
-    let mut items = vec![CtxItem::new("Play", Cmd::OpenSearch(row))];
+    let mut items = vec![CtxItem::new(tr!("Play"), Cmd::OpenSearch(row))];
     if !uri.is_empty() {
-        items.push(CtxItem::new("Add to queue", Cmd::QueueSearchTrack(row)));
+        items.push(CtxItem::new(tr!("Add to queue"), Cmd::QueueSearchTrack(row)));
     }
     if !id.is_empty() {
         if show_like {
-            items.push(CtxItem::new("Like", Cmd::LikeSearchTrack(row)));
+            items.push(CtxItem::new(tr!("Like"), Cmd::LikeSearchTrack(row)));
         }
-        items.push(CtxItem::new("Share", Cmd::ShareSearchTrack(row)));
-        items.push(CtxItem::new("Start station", Cmd::StationFromUri(uri.to_string())));
-        items.push(CtxItem::new("Download", Cmd::DownloadSearchItem(row)));
+        items.push(CtxItem::new(tr!("Share"), Cmd::ShareSearchTrack(row)));
+        items.push(CtxItem::new(tr!("Start station"), Cmd::StationFromUri(uri.to_string())));
+        items.push(CtxItem::new(tr!("Download"), Cmd::DownloadSearchItem(row)));
     }
     items
 }
@@ -14139,21 +14726,21 @@ fn search_track_menu(row: usize, uri: &str, id: &str, show_like: bool) -> Vec<Ct
 /// "Add to queue" is a shell addition (the original only queued single tracks).
 fn search_playlist_menu(row: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Play", Cmd::PlaySearchContext(row)),
-        CtxItem::new("Add to queue", Cmd::QueueSearchHit(row)),
-        CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
-        CtxItem::new("Save playlist", Cmd::SaveSearchItem(row)),
-        CtxItem::new("Download", Cmd::DownloadSearchItem(row)),
+        CtxItem::new(tr!("Play"), Cmd::PlaySearchContext(row)),
+        CtxItem::new(tr!("Add to queue"), Cmd::QueueSearchHit(row)),
+        CtxItem::new(tr!("Show tracks"), Cmd::OpenSearch(row)),
+        CtxItem::new(tr!("Save playlist"), Cmd::SaveSearchItem(row)),
+        CtxItem::new(tr!("Download"), Cmd::DownloadSearchItem(row)),
     ]
 }
 
 /// A search *album* hit — `app.js:2749`, plus the shell's "Add to queue".
 fn search_album_menu(row: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Play", Cmd::PlaySearchContext(row)),
-        CtxItem::new("Add to queue", Cmd::QueueSearchHit(row)),
-        CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
-        CtxItem::new("Save album", Cmd::SaveSearchItem(row)),
+        CtxItem::new(tr!("Play"), Cmd::PlaySearchContext(row)),
+        CtxItem::new(tr!("Add to queue"), Cmd::QueueSearchHit(row)),
+        CtxItem::new(tr!("Show tracks"), Cmd::OpenSearch(row)),
+        CtxItem::new(tr!("Save album"), Cmd::SaveSearchItem(row)),
     ]
 }
 
@@ -14161,8 +14748,8 @@ fn search_album_menu(row: usize) -> Vec<CtxItem> {
 /// (the same list "Show tracks" opens).
 fn search_artist_menu(row: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Show tracks", Cmd::OpenSearch(row)),
-        CtxItem::new("Add top songs to queue", Cmd::QueueSearchHit(row)),
+        CtxItem::new(tr!("Show tracks"), Cmd::OpenSearch(row)),
+        CtxItem::new(tr!("Add top songs to queue"), Cmd::QueueSearchHit(row)),
     ]
 }
 
@@ -14229,18 +14816,18 @@ async fn search_hit_tracks(
 /// A Beatport chart row — `app.js:3489`.
 fn beatport_row_menu(row: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Play", Cmd::BpPlay(row)),
-        CtxItem::new("Add to queue", Cmd::BpQueue(row)),
-        CtxItem::new("Download", Cmd::DownloadBeatportRow(row)),
+        CtxItem::new(tr!("Play"), Cmd::BpPlay(row)),
+        CtxItem::new(tr!("Add to queue"), Cmd::BpQueue(row)),
+        CtxItem::new(tr!("Download"), Cmd::DownloadBeatportRow(row)),
     ]
 }
 
 /// `buildBeatportSelectionMenu` (`app.js:4020`).
 fn beatport_selection_menu(count: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new(format!("Play {count} selected"), Cmd::BpPlaySelection),
-        CtxItem::new(format!("Add {count} to queue"), Cmd::BpQueueSelection),
-        CtxItem::new("Create playlist from selection", Cmd::BpCreatePlaylist),
+        CtxItem::new(lightify_i18n::trn!("Play {n} selected", "Play {n} selected", count), Cmd::BpPlaySelection),
+        CtxItem::new(lightify_i18n::trn!("Add {n} to queue", "Add {n} to queue", count), Cmd::BpQueueSelection),
+        CtxItem::new(tr!("Create playlist from selection"), Cmd::BpCreatePlaylist),
     ]
 }
 
@@ -14248,8 +14835,8 @@ fn beatport_selection_menu(count: usize) -> Vec<CtxItem> {
 /// playlist"; the QUEUE mode uses the ordinary `buildSpotifySelectionMenu`.
 fn sidebar_recent_selection_menu(count: usize) -> Vec<CtxItem> {
     vec![
-        CtxItem::new("Play first selected", Cmd::SidebarPlayFirstSelected),
-        CtxItem::new(format!("Add {count} to queue"), Cmd::QueueSelection),
+        CtxItem::new(tr!("Play first selected"), Cmd::SidebarPlayFirstSelected),
+        CtxItem::new(lightify_i18n::trn!("Add {n} to queue", "Add {n} to queue", count), Cmd::QueueSelection),
     ]
 }
 
@@ -14257,17 +14844,17 @@ fn sidebar_recent_selection_menu(count: usize) -> Vec<CtxItem> {
 /// album art and the track info. It is `buildSpotifyTrackMenu` against the playing
 /// track, so the rows match a track row's menu exactly.
 fn now_playing_menu(t: &Track) -> Vec<CtxItem> {
-    let mut items = vec![CtxItem::new("Play", Cmd::PlayCurrentTrack)];
+    let mut items = vec![CtxItem::new(tr!("Play"), Cmd::PlayCurrentTrack)];
     if !t.uri.is_empty() {
-        items.push(CtxItem::new("Add to queue", Cmd::AddQueue));
+        items.push(CtxItem::new(tr!("Add to queue"), Cmd::AddQueue));
     }
     if !t.id.is_empty() {
-        items.push(CtxItem::new("Share", Cmd::ShareCurrentTrack));
-        items.push(CtxItem::new("Start station", Cmd::StationFromUri(t.uri.clone())));
+        items.push(CtxItem::new(tr!("Share"), Cmd::ShareCurrentTrack));
+        items.push(CtxItem::new(tr!("Start station"), Cmd::StationFromUri(t.uri.clone())));
         if !t.artist_ids.is_empty() {
-            items.push(CtxItem::muted("Follow artist", FOLLOW_ARTIST_NOTE));
+            items.push(CtxItem::muted(tr!("Follow artist"), FOLLOW_ARTIST_NOTE));
         }
-        items.push(CtxItem::new("Download", Cmd::Download {
+        items.push(CtxItem::new(tr!("Download"), Cmd::Download {
             url: format!("https://open.spotify.com/track/{}", t.id),
             label: t.name.clone(),
         }));
@@ -14278,17 +14865,17 @@ fn now_playing_menu(t: &Track) -> Vec<CtxItem> {
 /// A row in the search tab's drill-in — `buildSpotifyTrackMenu` against a track of
 /// the drilled playlist/album.
 fn search_drill_menu(row: usize, t: &Track) -> Vec<CtxItem> {
-    let mut items = vec![CtxItem::new("Play", Cmd::PlaySearchDrillTrack(row))];
+    let mut items = vec![CtxItem::new(tr!("Play"), Cmd::PlaySearchDrillTrack(row))];
     if !t.uri.is_empty() {
-        items.push(CtxItem::new("Add to queue", Cmd::QueueSearchDrillTrack(row)));
+        items.push(CtxItem::new(tr!("Add to queue"), Cmd::QueueSearchDrillTrack(row)));
     }
     if !t.id.is_empty() {
-        items.push(CtxItem::new("Share", Cmd::ShareSearchDrillTrack(row)));
-        items.push(CtxItem::new("Start station", Cmd::StationFromUri(t.uri.clone())));
+        items.push(CtxItem::new(tr!("Share"), Cmd::ShareSearchDrillTrack(row)));
+        items.push(CtxItem::new(tr!("Start station"), Cmd::StationFromUri(t.uri.clone())));
         if !t.artist_ids.is_empty() {
-            items.push(CtxItem::muted("Follow artist", FOLLOW_ARTIST_NOTE));
+            items.push(CtxItem::muted(tr!("Follow artist"), FOLLOW_ARTIST_NOTE));
         }
-        items.push(CtxItem::new("Download", Cmd::Download {
+        items.push(CtxItem::new(tr!("Download"), Cmd::Download {
             url: format!("https://open.spotify.com/track/{}", t.id),
             label: t.name.clone(),
         }));
@@ -14298,14 +14885,14 @@ fn search_drill_menu(row: usize, t: &Track) -> Vec<CtxItem> {
 
 /// A sidebar row — `buildSpotifyTrackMenu` against the queue/recent track.
 fn sidebar_row_menu(row: usize, t: &Track) -> Vec<CtxItem> {
-    let mut items = vec![CtxItem::new("Play", Cmd::SidebarPlay(row))];
+    let mut items = vec![CtxItem::new(tr!("Play"), Cmd::SidebarPlay(row))];
     if !t.uri.is_empty() {
-        items.push(CtxItem::new("Add to queue", Cmd::SidebarQueueRow(row)));
+        items.push(CtxItem::new(tr!("Add to queue"), Cmd::SidebarQueueRow(row)));
     }
     if !t.id.is_empty() {
-        items.push(CtxItem::new("Share", Cmd::ShareSidebarTrack(row)));
-        items.push(CtxItem::new("Start station", Cmd::StationFromUri(t.uri.clone())));
-        items.push(CtxItem::new("Download", Cmd::Download {
+        items.push(CtxItem::new(tr!("Share"), Cmd::ShareSidebarTrack(row)));
+        items.push(CtxItem::new(tr!("Start station"), Cmd::StationFromUri(t.uri.clone())));
+        items.push(CtxItem::new(tr!("Download"), Cmd::Download {
             url: format!("https://open.spotify.com/track/{}", t.id),
             label: t.name.clone(),
         }));
@@ -14320,16 +14907,16 @@ fn sidebar_row_menu(row: usize, t: &Track) -> Vec<CtxItem> {
 fn download_row_menu(item: &downloader::Item) -> Vec<CtxItem> {
     let mut items = Vec::new();
     match item.status.as_str() {
-        "Failed" | "Cancelled" => items.push(CtxItem::new("Retry", Cmd::DownloadRetry(item.local_id.clone()))),
+        "Failed" | "Cancelled" => items.push(CtxItem::new(tr!("Retry"), Cmd::DownloadRetry(item.local_id.clone()))),
         "Downloaded" | "Already Exists" | "Deleted" | "Unavailable" => {}
-        _ => items.push(CtxItem::new("Cancel", Cmd::DownloadCancel(item.local_id.clone()))),
+        _ => items.push(CtxItem::new(tr!("Cancel"), Cmd::DownloadCancel(item.local_id.clone()))),
     }
     items.push(CtxItem::new(
-        if item.file_path.is_empty() { "Open download folder" } else { "Open folder" },
+        if item.file_path.is_empty() { tr!("Open download folder") } else { tr!("Open folder") },
         Cmd::DownloadOpenFolder(item.file_path.clone()),
     ));
     if item.on_disk() {
-        items.push(CtxItem::danger("Delete file", Cmd::DownloadDelete(item.local_id.clone())));
+        items.push(CtxItem::danger(tr!("Delete file"), Cmd::DownloadDelete(item.local_id.clone())));
     }
     items
 }
@@ -14341,9 +14928,42 @@ fn download_row_menu(item: &downloader::Item) -> Vec<CtxItem> {
 /// is estimated here from the label lengths (13px Space Grotesk medium ≈ 7.0px per
 /// glyph, plus 10px row padding and 6px panel padding each side) and clamped so a
 /// long label never runs off the panel.
+/// The name prompt's note for a playlist made from the queue / a selection.
+fn name_note_queue(n: usize) -> String {
+    lightify_i18n::trn!("{n} track from your queue", "{n} tracks from your queue", n)
+}
+
+fn name_note_selected(n: usize) -> String {
+    lightify_i18n::trn!("{n} track selected", "{n} tracks selected", n)
+}
+
 fn menu_width(items: &[CtxItem]) -> f32 {
-    let longest = items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
-    (longest as f32 * 7.0 + 34.0).clamp(176.0, 320.0)
+    let longest = items.iter().map(|i| label_width(&i.label)).fold(0.0, f32::max);
+    (longest + 34.0).clamp(176.0, 320.0)
+}
+
+/// A label's estimated width at 13px: 7px a character, as `menu_width` has always
+/// assumed, except a CJK / Hangul / full-width character, which is about as wide as
+/// the font is tall (13px). Latin text measures exactly as before.
+fn label_width(label: &str) -> f32 {
+    label.chars().map(|c| if is_wide(c) { 13.0 } else { 7.0 }).sum()
+}
+
+/// East Asian wide and full-width characters (Unicode's EastAsianWidth W/F, by block).
+fn is_wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F       // Hangul Jamo (leading)
+        | 0x2E80..=0x303E     // CJK radicals, punctuation
+        | 0x3041..=0x33FF     // kana, Bopomofo, CJK compatibility
+        | 0x3400..=0x4DBF     // CJK extension A
+        | 0x4E00..=0x9FFF     // CJK unified ideographs
+        | 0xA000..=0xA4CF     // Yi
+        | 0xAC00..=0xD7A3     // Hangul syllables
+        | 0xF900..=0xFAFF     // CJK compatibility ideographs
+        | 0xFE30..=0xFE4F     // CJK compatibility forms
+        | 0xFF00..=0xFF60     // full-width forms
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD)  // CJK extensions B…
 }
 
 fn ctx_rows(items: &[CtxItem]) -> Vec<MenuItem> {
@@ -14370,13 +14990,13 @@ fn push_context(weak: &slint::Weak<MainWindow>, items: Vec<CtxItem>) -> Vec<Cmd>
 /// like `shareSpotifyTrack`.
 fn share_spotify_link(weak: &slint::Weak<MainWindow>, kind: &str, id: &str) {
     if id.is_empty() {
-        set_status(weak, "Share \u{2014} no Spotify id".to_string());
+        set_status(weak, tr!("Share \u{2014} no Spotify id"));
         return;
     }
     let url = format!("https://open.spotify.com/{kind}/{id}");
     match copy_to_clipboard(&url) {
-        Ok(()) => set_status(weak, "Copied Spotify link".to_string()),
-        Err(e) => set_status(weak, format!("Share \u{2014} {e}")),
+        Ok(()) => set_status(weak, tr!("Copied Spotify link")),
+        Err(e) => set_status(weak, tr!("Share \u{2014} {}", e)),
     }
 }
 
@@ -14428,7 +15048,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
-    cb.set_text(text.to_string()).map_err(|e| format!("could not set the clipboard: {e}"))
+    cb.set_text(text.to_string()).map_err(|e| tr!("could not set the clipboard: {}", e))
 }
 
 /// Decode album-art bytes to raw RGBA (Send, so it can cross to the UI thread) plus
@@ -14641,7 +15261,7 @@ async fn fetch_drill_snapshot(index: usize) -> Snapshot {
     if index == 0 {
         if let Ok(mut s) = Session::load() {
             if let Ok(page) = s.saved_tracks_page(0).await {
-                base.drill = Some(("Liked Songs".to_string(), page.tracks));
+                base.drill = Some((tr!("Liked Songs"), page.tracks));
             }
         }
     } else if let Some(pl) = base.playlists.get(index - 1).cloned() {
@@ -14650,8 +15270,9 @@ async fn fetch_drill_snapshot(index: usize) -> Snapshot {
                 // Mirror the status the interactive pager sets, so the render shows
                 // the same honesty about an embed-only list.
                 if page.partial {
-                    base.status = format!(
-                        "Loaded {} tracks from \u{201c}{}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                    base.status = lightify_i18n::trn!(
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
                         page.tracks.len(),
                         pl.name
                     );
@@ -14719,7 +15340,7 @@ async fn fetch_snapshot() -> Snapshot {
     }
     let status = {
         let n = s.display_name();
-        if n.is_empty() { "Connected".to_string() } else { format!("Connected as {n}") }
+        if n.is_empty() { tr!("Connected") } else { tr!("Connected as {}", n) }
     };
     let playlists = s.playlists().await.unwrap_or_default();
     thumbs::prefetch(&playlists).await;
@@ -14784,21 +15405,27 @@ async fn fetch_search_drill_snapshot(query: &str, artist: bool) -> Snapshot {
                         }
                     }
                     base.status = match error {
-                        Some(e) => format!("Artist \u{2014} {e}"),
-                        None => format!("Loaded {} tracks from \u{201c}{}\u{201d}\u{2026}", tracks.len(), a.name),
+                        Some(e) => tr!("Artist \u{2014} {}", e),
+                        None => lightify_i18n::trn!(
+                            "Loaded {n} tracks from \u{201c}{0}\u{201d}\u{2026}",
+                            "Loaded {n} tracks from \u{201c}{0}\u{201d}\u{2026}",
+                            tracks.len(),
+                            a.name
+                        ),
                     };
                     base.search_drill = Some((a.name, tracks));
                 }
             } else if let Some(pl) = res.playlists.first().cloned() {
                 if let Ok(page) = s.playlist_tracks_page(&pl.id, 0).await {
                     base.status = if page.partial {
-                        format!(
-                            "Loaded {} tracks from \u{201c}{}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                        lightify_i18n::trn!(
+                            "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
+                            "Loaded {n} tracks from \u{201c}{0}\u{201d} \u{2014} preview only; Spotify won\u{2019}t serve this playlist to this app",
                             page.tracks.len(),
                             pl.name
                         )
                     } else {
-                        format!("Loaded {} tracks from \u{201c}{}\u{201d}", page.tracks.len(), pl.name)
+                        lightify_i18n::trn!("Loaded {n} tracks from \u{201c}{0}\u{201d}", "Loaded {n} tracks from \u{201c}{0}\u{201d}", page.tracks.len(), pl.name)
                     };
                     base.search_drill = Some((pl.name, page.tracks));
                 }
@@ -14909,7 +15536,7 @@ async fn fetch_sidebar_snapshot(mode: i32) -> Snapshot {
     let tracks = if let Ok(mut s) = Session::load() {
         match mode {
             1 => s.queue().await.unwrap_or_default(),
-            2 => s.recently_played(50).await.unwrap_or_default(),
+            2 => play_history::merged(&s.recently_played(50).await.unwrap_or_default()),
             _ => vec![],
         }
     } else {
@@ -14934,13 +15561,13 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
         app.set_signin_open(true);
         app.set_signin_client_id(lightify_core::auth::saved_client_id().into());
         app.set_signin_status(
-            format!("Your Spotify sign-in has expired or was revoked \u{2014} authorise again. ({err})").into(),
+            tr!("Your Spotify sign-in has expired or was revoked \u{2014} authorise again. ({})", err).into(),
         );
         app.set_signin_error(true);
     } else if snap.status.starts_with("Not connected") {
         app.set_signin_open(true);
         app.set_signin_client_id(lightify_core::auth::saved_client_id().into());
-        app.set_status_text("Sign in to Spotify to start".into());
+        app.set_status_text(tr!("Sign in to Spotify to start").into());
     }
     // Headless renders derive the playback-presence highlight from the live context URI
     // (a snapshot has no launch history). `snap.sort` mirrors the toolbar selection.
@@ -14976,7 +15603,7 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
         }
         None => {
             app.set_track_name("\u{2014}".into());
-            app.set_track_artist("Nothing playing".into());
+            app.set_track_artist(tr!("Nothing playing").into());
             app.set_progress(0.0);
             app.set_elapsed("0:00".into());
             app.set_duration("0:00".into());
@@ -15033,18 +15660,19 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
         app.set_sidebar_mode(*mode);
         let pid = current_id(&snap.now);
         let rows = build_side_rows(trks, &pid, *mode == 2);
+        app.set_sidebar_empty_plain(*mode == 1 || *mode == 2);
         app.set_sidebar_empty(
             match mode {
-                1 => "No queued tracks",
-                2 => "No recent tracks yet",
-                _ => "",
+                1 => tr!("No queued tracks"),
+                2 => tr!("No recent tracks yet"),
+                _ => String::new(),
             }
             .into(),
         );
         app.set_sidebar_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
     }
     if let Some(items) = &snap.downloads {
-        app.set_sidebar_empty("No downloads queued".into());
+        app.set_sidebar_empty(tr!("No downloads queued").into());
         app.set_downloads_clearable(items.iter().any(|i| i.finished()));
         app.set_sidebar_dl_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(
             build_dl_rows(items),
@@ -15066,8 +15694,9 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
         app.set_bp_kind(kind.clone().into());
         app.set_bp_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(build_bp_rows(tracks)))));
         app.set_bp_status(
-            format!(
-                "{} tracks \u{2014} {} {}",
+            lightify_i18n::trn!(
+                "{n} tracks \u{2014} {} {}",
+                "{n} tracks \u{2014} {} {}",
                 tracks.len(),
                 genres.get(*idx).map(|(n, _)| n.as_str()).unwrap_or(""),
                 bp_chart_label(kind)
@@ -15079,7 +15708,7 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
     if let Some(devs) = &snap.settings {
         app.set_settings_open(true);
         if devs.is_empty() {
-            app.set_settings_device_status("No devices yet \u{2014} Lightify\u{2019}s own player is still starting.".into());
+            app.set_settings_device_status(tr!("No devices yet \u{2014} Lightify\u{2019}s own player is still starting.").into());
         }
         app.set_settings_devices(slint::ModelRc::from(Rc::new(slint::VecModel::from(build_device_rows(devs)))));
         // Same rows the interactive path builds, so the shot verifies the real thing.
@@ -15090,14 +15719,14 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
             && !want.eq_ignore_ascii_case("default")
             && !outputs.iter().any(|n| n == want);
         let default_active = want.is_empty() || want.eq_ignore_ascii_case("default") || missing;
-        let mut rows: Vec<DeviceRow> = vec![DeviceRow { name: "System default".into(), active: default_active }];
+        let mut rows: Vec<DeviceRow> = vec![DeviceRow { name: tr!("System default").into(), active: default_active }];
         for name in &outputs {
             rows.push(DeviceRow { name: name.clone().into(), active: !default_active && name == want });
         }
         app.set_settings_outputs(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
         if missing {
             app.set_settings_output_note(
-                format!("Configured output \u{201c}{want}\u{201d} isn\u{2019}t connected \u{2014} playing on the system default.").into(),
+                tr!("Configured output \u{201c}{}\u{201d} isn\u{2019}t connected \u{2014} playing on the system default.", want).into(),
             );
         }
     }
@@ -15131,9 +15760,9 @@ fn apply_snapshot(app: &MainWindow, snap: &Snapshot) {
     if let Some(kind) = &snap.ctx {
         if kind == "confirm" {
             let name = snap.playlists.first().map(|p| p.name.clone()).unwrap_or_default();
-            app.set_confirm_title("DELETE PLAYLIST".into());
+            app.set_confirm_title(tr!("DELETE PLAYLIST").into());
             app.set_confirm_message(
-                format!("Delete \u{201c}{name}\u{201d} from your Spotify library?").into(),
+                tr!("Delete \u{201c}{}\u{201d} from your Spotify library?", name).into(),
             );
             app.set_confirm_open(true);
         } else {
@@ -15305,6 +15934,10 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
         .expect("set_platform");
 
     let app = MainWindow::new().expect("build UI");
+    // English unless `--lang` asks otherwise: a render never depends on the saved choice.
+    apply_language(LANG_ARG.get().map(String::as_str).unwrap_or(lightify_i18n::ENGLISH));
+    push_languages(&app, LANG_ARG.get().map(String::as_str).unwrap_or("auto"));
+    cjk_font_fallback();
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_ui_font(ui_font().into());
     app.global::<Motion>().set_reduced(reduce_motion());
@@ -15406,7 +16039,7 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
         app.set_playing(true);
         match v.as_str() {
             "menu" => {
-                let items = vec![CtxItem::new("ASCII lava screensaver", Cmd::LavaSaver)];
+                let items = vec![CtxItem::new(tr!("ASCII lava screensaver"), Cmd::LavaSaver)];
                 app.set_ctx_items(slint::ModelRc::from(Rc::new(slint::VecModel::from(ctx_rows(&items)))));
                 app.set_ctx_w(menu_width(&items));
                 app.set_ctx_x(820.0);
@@ -15415,6 +16048,11 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
             }
             "saver" => app.set_lava_saver(true),
             "settings" => app.set_settings_open(true),
+            // Settings with the language list open.
+            "settings-lang" => {
+                app.set_settings_open(true);
+                app.set_settings_language_open(true);
+            }
             "off" => app.set_lava_on(false),
             _ => {}
         }
@@ -15433,9 +16071,9 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
         app.set_name_prompt_side(np);
         if np == 1 {
             app.set_sidebar_mode(1);
-            app.set_name_prompt_note("9 tracks from your queue".into());
+            app.set_name_prompt_note(name_note_queue(9).into());
         } else {
-            app.set_name_prompt_note("4 tracks selected".into());
+            app.set_name_prompt_note(name_note_selected(4).into());
         }
         app.set_name_prompt_open(true);
     }
@@ -15496,6 +16134,41 @@ fn render_to_png(path: &str, w: u32, h: u32, snap: Option<Snapshot>) {
 
 #[cfg(test)]
 mod tests {
+    /// Every bundled catalog, checked against the template (LANGUAGE-PLAN.md, "Checks
+    /// that keep it from breaking"): it parses, keeps every placeholder, has the plural
+    /// forms its header asks for. For translators: `cargo test catalogs -- --nocapture`
+    /// also prints how much of each language is translated.
+    #[test]
+    fn catalogs_are_safe_to_show() {
+        let pot = include_str!("../translations/lightify-shell.pot");
+        let mut problems = Vec::new();
+        for l in super::LANGS {
+            let r = lightify_i18n::check::catalog(l.code, l.po, pot);
+            println!(
+                "{}: {} translated, {} shown in English (no translation yet), {} due a re-translation (now a count, \
+                 or no longer one), {} entries the template no longer has",
+                l.code,
+                r.translated,
+                r.fallback.len(),
+                r.stale.len(),
+                r.obsolete.len()
+            );
+            problems.extend(r.problems);
+        }
+        assert!(problems.is_empty(), "\n{} problem(s) in the catalogs:\n  {}\n", problems.len(), problems.join("\n  "));
+    }
+
+    #[test]
+    fn menu_width_measures_wide_characters() {
+        use super::label_width;
+        // Latin text: 7 px a character, exactly as before.
+        assert_eq!(label_width("Download liked songs"), 140.0);
+        // CJK and Hangul take about the font size (13 px) each.
+        assert_eq!(label_width("播放队列"), 52.0);
+        assert_eq!(label_width("대기열"), 39.0);
+        assert_eq!(label_width("再生 3 曲"), 13.0 * 3.0 + 7.0 * 3.0);
+    }
+
     #[test]
     fn titlebar_double_press_needs_time_and_place() {
         use super::is_double_press;

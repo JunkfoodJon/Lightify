@@ -148,6 +148,9 @@ component IconBtn inherits Rectangle {
 
 // Stroke icon paths (24 grid, 1.6 stroke, round caps) — the redesign's set.
 export global Icons {
+    // Settings › language's button (the installer's language button draws the same two).
+    out property <string> globe: "M3.5 12a8.5 8.5 0 1 0 17 0a8.5 8.5 0 1 0 -17 0M3.5 12h17M12 3.5c-2.6 2.4-3.9 5.2-3.9 8.5s1.3 6.1 3.9 8.5M12 3.5c2.6 2.4 3.9 5.2 3.9 8.5s-1.3 6.1-3.9 8.5";
+    out property <string> chevron: "M7.5 10l4.5 4.5 4.5-4.5";
     out property <string> library: "M5 4v16M10 4v16M14.5 4.5l4.5 15";
     out property <string> search: "M11 4.5a6.5 6.5 0 1 1 0 13a6.5 6.5 0 1 1 0-13zM16 16l4 4";
     out property <string> charts: "M6 19v-6M12 19V5M18 19v-9";
@@ -184,6 +187,8 @@ component FootTab inherits Rectangle {
     in property <string> label;
     in property <bool> active;
     in property <bool> show-label: true;
+    // Its width with the label, shown or not: the footer asks, to decide whether labels fit.
+    out property <length> labelled-width: 11px + 15px + 7px + 12px + measure.preferred-width;
     callback clicked <=> ta.clicked;
     // `.ft`: a pill; on = selected grey, white label, accent icon.
     property <color> ink: root.active ? Pal.text : (ta.has-hover ? Pal.text : Pal.text3);
@@ -217,6 +222,7 @@ component FootTab inherits Rectangle {
             vertical-alignment: center;
         }
     }
+    measure := Text { visible: false; text: root.label; font-size: TypeScale.small; font-weight: 500; }
     if !root.show-label && ta.has-hover : Rectangle {
         y: -self.height - 6px;
         x: (parent.width - self.width) / 2;
@@ -709,7 +715,7 @@ component SideTrackRow inherits Rectangle {
             alignment: center;
             // Pulses only while this one row is being looked up (a few seconds).
             Text {
-                text: "finding";
+                text: @tr("finding");
                 color: Pal.accent;
                 font-size: 11px;
                 font-family: Fonts.mono;
@@ -739,11 +745,16 @@ component SideTrackRow inherits Rectangle {
 }
 
 // One segment of the Library / Search / Beatport tab control (`.seg .tb`): icon +
-// label; the selected one sits on the selected grey.
+// label; the selected one sits on the selected grey. The control sizes the three
+// (`width`) and may drop the icon or tighten the padding so a longer language fits.
 component TabBtn inherits Rectangle {
     in property <string> label;
     in property <string> cmds;
     in property <bool> active;
+    in property <bool> show-icon: true;
+    in property <length> pad: 8px;
+    // The label's natural width, for the control to size the tabs by.
+    out property <length> label-w: measure.preferred-width;
     callback clicked <=> ta.clicked;
     horizontal-stretch: 1;
     height: 32px;
@@ -751,11 +762,15 @@ component TabBtn inherits Rectangle {
     background: root.active ? Pal.surface2 : transparent;
     animate background { duration: 200ms; easing: ease-out; }
     ta := TouchArea { }
+    measure := Text { visible: false; text: root.label; font-size: 12.5px; font-weight: 500; }
     property <color> ink: root.active || ta.has-hover ? Pal.text : Pal.text3;
     HorizontalLayout {
         alignment: center;
+        // Symmetric, so a label that fits stays centred; one that doesn't elides short of the pill's edge.
+        padding-left: root.pad;
+        padding-right: root.pad;
         spacing: 6px;
-        VerticalLayout {
+        if root.show-icon : VerticalLayout {
             alignment: center;
             Path {
                 width: 15px; height: 15px;
@@ -774,6 +789,7 @@ component TabBtn inherits Rectangle {
             color: root.ink;
             font-size: 12.5px;
             font-weight: 500;
+            overflow: elide;
         }
     }
 }
@@ -789,7 +805,8 @@ component SegBtn inherits Rectangle {
     height: root.h;
     horizontal-stretch: root.stretch ? 1 : 0;
     preferred-width: lay.preferred-width;
-    min-width: lay.preferred-width;
+    // A stretching segment (poll rate) may shrink and elide its label; the others don't.
+    min-width: root.stretch ? lay.min-width : lay.preferred-width;
     border-radius: self.height / 2;
     background: root.active ? Pal.surface2 : transparent;
     animate background { duration: 200ms; easing: ease-out; }
@@ -805,6 +822,7 @@ component SegBtn inherits Rectangle {
             color: root.active || ta.has-hover ? Pal.text : Pal.text3;
             font-size: TypeScale.small;
             font-weight: 500;
+            overflow: elide;
         }
         if root.note != "" : Text {
             text: root.note;
@@ -883,7 +901,9 @@ component LibraryToolbar inherits Rectangle {
                 padding: 2px;
                 spacing: 2px;
                 SegBtn {
-                    label: "Recent";
+                    // The sort order (newest first), not the Recent panel: its own
+                    // context, so a language can word the two differently.
+                    label: @tr("sort order" => "Recent");
                     active: root.mode == "recent";
                     clicked => { root.recent-clicked(); }
                 }
@@ -990,8 +1010,13 @@ component SearchResultRow inherits Rectangle {
                 horizontal-stretch: 1;
                 Text { text: root.name; color: Pal.text; font-size: 18px; font-weight: 700; overflow: elide; }
                 Text {
-                    text: (root.hit == "artist" ? "artist" : root.hit == "track" ? "song" : root.hit == "album" ? "album" : "playlist")
-                        + (root.sub == "" ? " \u{00B7} top result" : " \u{00B7} " + root.sub);
+                    // Each "… · top result" whole, so a translation can order it as it
+                    // needs; with a credit, the type word and the name (Spotify's).
+                    text: root.sub == ""
+                        ? (root.hit == "artist" ? @tr("artist \u{00B7} top result") : root.hit == "track" ? @tr("song \u{00B7} top result")
+                            : root.hit == "album" ? @tr("album \u{00B7} top result") : @tr("playlist \u{00B7} top result"))
+                        : (root.hit == "artist" ? @tr("artist") : root.hit == "track" ? @tr("song") : root.hit == "album" ? @tr("album") : @tr("playlist"))
+                            + " \u{00B7} " + root.sub;
                     color: Pal.text3; font-size: 11px; font-family: Fonts.mono; overflow: elide;
                 }
             }
@@ -1154,7 +1179,10 @@ component FilterChip inherits Rectangle {
     callback clicked <=> ta.clicked;
     // `.chip`: ghost pill; selected = the inverted white pill.
     height: 26px;
-    width: t.preferred-width + 16px;
+    // Label-sized; a row too narrow for every label squeezes the chips (they elide).
+    preferred-width: t.preferred-width + 16px;
+    max-width: t.preferred-width + 16px;
+    min-width: 26px;
     border-radius: 13px;
     background: root.active ? Pal.text : (ta.has-hover ? Pal.surface : transparent);
     border-width: 1px;
@@ -1163,6 +1191,8 @@ component FilterChip inherits Rectangle {
     ta := TouchArea { }
     t := Text {
         text: root.label;
+        width: min(self.preferred-width, parent.width - 16px);
+        overflow: elide;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         color: root.active ? Pal.ink : (ta.has-hover ? Pal.text : Pal.text2);
@@ -1182,11 +1212,11 @@ component FilterBar inherits Rectangle {
     HorizontalLayout {
         spacing: 3px;
         alignment: start;
-        FilterChip { label: "All";       active: root.active == 0; clicked => { root.pick(0); } }
-        FilterChip { label: "Songs";     active: root.active == 1; clicked => { root.pick(1); } }
-        FilterChip { label: "Artists";   active: root.active == 2; clicked => { root.pick(2); } }
-        FilterChip { label: "Albums";    active: root.active == 3; clicked => { root.pick(3); } }
-        FilterChip { label: "Playlists"; active: root.active == 4; clicked => { root.pick(4); } }
+        FilterChip { label: @tr("All");       active: root.active == 0; clicked => { root.pick(0); } }
+        FilterChip { label: @tr("Songs");     active: root.active == 1; clicked => { root.pick(1); } }
+        FilterChip { label: @tr("Artists");   active: root.active == 2; clicked => { root.pick(2); } }
+        FilterChip { label: @tr("Albums");    active: root.active == 3; clicked => { root.pick(3); } }
+        FilterChip { label: @tr("Playlists"); active: root.active == 4; clicked => { root.pick(4); } }
     }
 }
 
@@ -1312,6 +1342,59 @@ component Kicker inherits Text {
 }
 
 // `.btn` ghost pill (secondary actions). `enabled: false` dims it and ignores clicks.
+// Settings › language's button: a globe, the language in use, a chevron — the
+// installer's language button, in the Settings pills' colours. Opens the list.
+component LangPill inherits Rectangle {
+    in property <string> text;
+    in property <bool> open;
+    callback clicked <=> ta.clicked;
+    height: 28px;
+    // As wide as the name; narrower (it elides) only when the card is.
+    preferred-width: row.preferred-width;
+    max-width: row.preferred-width;
+    min-width: 96px;
+    horizontal-stretch: 0;
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: ta.has-hover || root.open ? Pal.border-strong : Pal.border-hi;
+    background: ta.has-hover || root.open ? Pal.surface : transparent;
+    animate background { duration: 150ms; }
+    ta := TouchArea { }
+    row := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 9px;
+        spacing: 7px;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 14px; height: 14px;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: Icons.globe;
+                fill: transparent; stroke: Pal.text2; stroke-width: 1.7px;
+                stroke-line-cap: round; stroke-line-join: round;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Pal.text;
+            font-size: TypeScale.small;
+            font-weight: 500;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 12px; height: 12px;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: Icons.chevron;
+                fill: transparent; stroke: Pal.text2; stroke-width: 2px;
+                stroke-line-cap: round; stroke-line-join: round;
+            }
+        }
+    }
+}
+
 component PillBtn inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
@@ -1439,7 +1522,7 @@ component LocalToggle inherits Rectangle {
             }
         }
         lbl := Text {
-            text: "Local";
+            text: @tr("Local");
             vertical-alignment: center;
             font-size: 12.5px;
             font-weight: 500;
@@ -1672,6 +1755,7 @@ component LocalColHead inherits Rectangle {
         Text {
             text: root.label;
             vertical-alignment: center;
+            overflow: elide;
             font-size: 10.5px;
             font-family: Fonts.mono;
             letter-spacing: 0.3px;
@@ -1717,13 +1801,60 @@ component LocalScrub inherits Rectangle {
     }
 }
 
+// The volume bar's look (Spotify and Local): a dark track and a dot in the presence
+// accent (Pal.accent follows whichever cover is "now") inside a soft halo. Draws only;
+// the caller owns the value and the dragging. The halo overhangs the bar's height.
+component VolumeTrack inherits Rectangle {
+    in property <float> shown;
+    in property <bool> lit;   // hovered or dragging
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 6px; border-radius: 3px; background: #202020;
+    }
+    Rectangle {
+        width: 26px; height: 26px; border-radius: 13px;
+        x: clamp(root.width * root.shown, 6px, root.width - 6px) - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        background: Pal.accent.with-alpha(root.lit ? 0.28 : 0.17);
+        Rectangle {
+            width: 18px; height: 18px; border-radius: 9px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: #0d0f0e;
+            Rectangle {
+                width: 12px; height: 12px; border-radius: 6px;
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                background: Pal.accent;
+            }
+        }
+    }
+}
+
+// A volume bar (Local): VolumeTrack, click or drag anywhere on it.
+component LocalVolume inherits Rectangle {
+    in property <float> value;
+    callback scrubbed(v: float);
+    height: 16px;
+    property <float> shown: ta.pressed ? clamp(ta.mouse-x / self.width, 0, 1) : root.value;
+    VolumeTrack { width: parent.width; height: parent.height; shown: root.shown; lit: ta.has-hover || ta.pressed; }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                root.scrubbed(clamp(self.mouse-x / root.width, 0, 1));
+            }
+        }
+    }
+}
+
 // A small toggle chip (Local filters).
 component LocalChip inherits Rectangle {
     in property <string> label;
     in property <bool> on;
     callback clicked <=> cta.clicked;
     height: 24px;
-    width: ct.preferred-width + 18px;
+    preferred-width: ct.preferred-width + 18px;
+    max-width: ct.preferred-width + 18px;
+    min-width: 24px;
     border-radius: 12px;
     background: root.on ? Pal.accent.with-alpha(0.16) : (cta.has-hover ? Pal.surface : transparent);
     border-width: 1px;
@@ -1732,7 +1863,8 @@ component LocalChip inherits Rectangle {
     // Centred: a chip may be given a width (the filter panel's type grid).
     ct := Text {
         text: root.label;
-        width: self.preferred-width;
+        width: min(self.preferred-width, parent.width - 18px);
+        overflow: elide;
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
         font-size: 10.5px; font-family: Fonts.mono;
         color: root.on ? Pal.text : Pal.text3;
@@ -1755,9 +1887,10 @@ component LocalLenField inherits Rectangle {
     TouchArea { mouse-cursor: MouseCursor.text; clicked => { inp.focus(); } }
     HorizontalLayout {
         padding-left: 10px; padding-right: 10px; spacing: 6px;
-        Text { text: root.label; vertical-alignment: center; font-size: 11px; color: Pal.text3; }
+        Text { text: root.label; vertical-alignment: center; font-size: 11px; color: Pal.text3; overflow: elide; }
         Rectangle {
             horizontal-stretch: 1;
+            min-width: inp.preferred-width;
             inp := TextInput {
                 text <=> root.text;
                 vertical-alignment: center;
@@ -1768,7 +1901,7 @@ component LocalLenField inherits Rectangle {
             }
             if inp.text == "" && !inp.has-focus : Text {
                 width: 100%;
-                text: "any";
+                text: @tr("any");
                 vertical-alignment: center; horizontal-alignment: right;
                 font-size: 12px; font-family: Fonts.mono; color: Pal.faint;
             }
@@ -1943,14 +2076,10 @@ component LocalNowView inherits Rectangle {
                 }
             }
         }
+        // Volume, centred under the transport (no speaker icon, on the owner's request).
         HorizontalLayout {
             alignment: center;
-            spacing: 8px;
-            VerticalLayout {
-                alignment: center;
-                Path { width: 16px; height: 16px; viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke: Pal.text3; stroke-width: 1.6px; stroke-line-cap: round; stroke-line-join: round; commands: Icons.volume; }
-            }
-            VerticalLayout { alignment: center; LocalScrub { width: 130px; value: root.volume; scrubbed(v) => { root.set-volume(v); } } }
+            VerticalLayout { alignment: center; LocalVolume { width: 130px; value: root.volume; scrubbed(v) => { root.set-volume(v); } } }
         }
     }
     // Back to the track list: a dark round chevron.
@@ -2127,7 +2256,7 @@ component LocalView inherits Rectangle {
                                     color: Pal.text; font-size: 12.5px; single-line: true;
                                     edited => { root.filter-edited(self.text); }
                                 }
-                                if fin.text == "" : Text { text: "Filter the library"; vertical-alignment: center; color: Pal.faint; font-size: 12.5px; }
+                                if fin.text == "" : Text { text: @tr("Filter the library"); vertical-alignment: center; color: Pal.faint; font-size: 12.5px; }
                             }
                         }
                     }
@@ -2145,44 +2274,46 @@ component LocalView inherits Rectangle {
                             spacing: 8px;
                             HorizontalLayout {
                                 spacing: 8px;
-                                Text { text: "Filters"; vertical-alignment: center; horizontal-stretch: 1; font-size: 13px; font-weight: 600; color: Pal.text; }
-                                Text { text: root.flt-note; vertical-alignment: center; font-size: 10.5px; font-family: Fonts.mono; color: root.flt-active ? Pal.accent : Pal.faint; }
+                                Text { text: @tr("Filters"); vertical-alignment: center; font-size: 13px; font-weight: 600; color: Pal.text; }
+                                Rectangle { horizontal-stretch: 1; }
+                                // Short of room, the note elides first; the title stays whole.
+                                Text { text: root.flt-note; vertical-alignment: center; overflow: elide; font-size: 10.5px; font-family: Fonts.mono; color: root.flt-active ? Pal.accent : Pal.faint; }
                                 if root.flt-custom : Rectangle {
                                     width: rst.preferred-width + 14px; height: 22px; border-radius: 11px;
                                     background: rta.has-hover ? Pal.surface : transparent;
                                     rta := TouchArea { mouse-cursor: pointer; clicked => { root.flt-reset(); } }
-                                    rst := Text { x: 7px; y: (parent.height - self.height) / 2; text: "Reset"; font-size: 11px; color: rta.has-hover ? Pal.text : Pal.text3; }
+                                    rst := Text { x: 7px; y: (parent.height - self.height) / 2; text: @tr("Reset"); font-size: 11px; color: rta.has-hover ? Pal.text : Pal.text3; }
                                 }
                             }
-                            Text { text: "SHOW"; font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                            Text { text: @tr("SHOW"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
                             HorizontalLayout {
                                 spacing: 4px; alignment: start;
-                                for m[i] in ["All", "Music only", "Long sets"] : LocalChip { label: m; on: root.flt-mode == i; clicked => { root.flt-set-mode(i); } }
+                                for m[i] in [@tr("All"), @tr("Music only"), @tr("Long sets")] : LocalChip { label: m; on: root.flt-mode == i; clicked => { root.flt-set-mode(i); } }
                             }
                             if root.flt-mode > 0 : Text {
-                                text: root.flt-mode == 1 ? "Hides clips under 1:00 \u{2014} songs, long tracks and sets stay." : "Only tracks of 20:00 or more (mixes, sets).";
+                                text: root.flt-mode == 1 ? @tr("Hides clips under 1:00 \u{2014} songs, long tracks and sets stay.") : @tr("Only tracks of 20:00 or more (mixes, sets).");
                                 font-size: 11px; color: Pal.text3; wrap: word-wrap;
                             }
-                            Text { text: "LENGTH"; font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                            Text { text: @tr("LENGTH"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
                             HorizontalLayout {
                                 spacing: 6px;
                                 LocalLenField {
                                     horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
-                                    label: "Shortest"; text <=> root.flt-min-text; invalid: root.flt-min-bad;
+                                    label: @tr("Shortest"); text <=> root.flt-min-text; invalid: root.flt-min-bad;
                                     commit(t) => { root.flt-set-len(false, t); }
                                 }
                                 LocalLenField {
                                     horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
-                                    label: "Longest"; text <=> root.flt-max-text; invalid: root.flt-max-bad;
+                                    label: @tr("Longest"); text <=> root.flt-max-text; invalid: root.flt-max-bad;
                                     commit(t) => { root.flt-set-len(true, t); }
                                 }
                             }
                             Text {
-                                text: root.flt-min-bad || root.flt-max-bad ? "Couldn't read that \u{2014} try 90, 1:30, 5m or 1:02:00." : "Type 90, 1:30, 5m or 1:02:00 \u{00b7} empty = any.";
+                                text: root.flt-min-bad || root.flt-max-bad ? @tr("Couldn't read that \u{2014} try 90, 1:30, 5m or 1:02:00.") : @tr("Type 90, 1:30, 5m or 1:02:00 \u{00b7} empty = any.");
                                 font-size: 10.5px; wrap: word-wrap;
                                 color: root.flt-min-bad || root.flt-max-bad ? #e5484d : Pal.faint;
                             }
-                            if root.flt-types.length > 0 : Text { text: "FILE TYPES"; font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                            if root.flt-types.length > 0 : Text { text: @tr("FILE TYPES"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
                             // Four to a row, however many types the library has.
                             if root.flt-types.length > 0 : Rectangle {
                                 property <length> cw: (self.width - 3 * 6px) / 4;
@@ -2236,10 +2367,10 @@ component LocalView inherits Rectangle {
                         // Right: the list ends 8px short of the window edge (see `lst`).
                         padding-left: 20px; padding-right: 28px; spacing: 12px;
                         LocalColHead { width: 24px; label: "#"; active: root.sort-col == 0; desc: root.sort-desc; clicked => { root.sort(0); } }
-                        LocalColHead { horizontal-stretch: 4; preferred-width: 0px; min-width: 0px; label: "TITLE"; active: root.sort-col == 1; desc: root.sort-desc; clicked => { root.sort(1); } }
-                        LocalColHead { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; label: "ARTIST"; active: root.sort-col == 2; desc: root.sort-desc; clicked => { root.sort(2); } }
-                        LocalColHead { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; label: "ALBUM"; active: root.sort-col == 3; desc: root.sort-desc; clicked => { root.sort(3); } }
-                        LocalColHead { width: 40px; label: "TIME"; right: true; active: root.sort-col == 4; desc: root.sort-desc; clicked => { root.sort(4); } }
+                        LocalColHead { horizontal-stretch: 4; preferred-width: 0px; min-width: 0px; label: @tr("TITLE"); active: root.sort-col == 1; desc: root.sort-desc; clicked => { root.sort(1); } }
+                        LocalColHead { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; label: @tr("ARTIST"); active: root.sort-col == 2; desc: root.sort-desc; clicked => { root.sort(2); } }
+                        LocalColHead { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; label: @tr("ALBUM"); active: root.sort-col == 3; desc: root.sort-desc; clicked => { root.sort(3); } }
+                        LocalColHead { width: 40px; label: @tr("TIME"); right: true; active: root.sort-col == 4; desc: root.sort-desc; clicked => { root.sort(4); } }
                     }
                     Rectangle { y: parent.height - 1px; height: 1px; background: #1a1a1a; }
                 }
@@ -2305,7 +2436,7 @@ component LocalView inherits Rectangle {
                     vertical-stretch: 1;
                     LocalBackdrop { frame: root.bg; sized(w, h) => { root.bg-w = w; root.bg-h = h; } }
                 LocalNowView {
-                    title: root.now-has ? root.now-title : "Nothing playing";
+                    title: root.now-has ? root.now-title : @tr("Nothing playing");
                     artist: root.now-artist;
                     album: root.now-album;
                     art-img: root.now-cover;
@@ -2353,11 +2484,7 @@ component LocalView inherits Rectangle {
                             vertical-alignment: center;
                             font-size: 11px; font-family: Fonts.mono; color: Pal.text3;
                         }
-                        if strip.fit >= 2 : VerticalLayout {
-                            alignment: center;
-                            Path { width: 16px; height: 16px; viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke: Pal.text3; stroke-width: 1.6px; stroke-line-cap: round; stroke-line-join: round; commands: Icons.volume; }
-                        }
-                        if strip.fit >= 2 : VerticalLayout { alignment: center; LocalScrub { width: 70px; value: root.volume; scrubbed(v) => { root.set-volume(v); } } }
+                        if strip.fit >= 2 : VerticalLayout { alignment: center; LocalVolume { width: 76px; value: root.volume; scrubbed(v) => { root.set-volume(v); } } }
                     }
                     // The transport, centred on the window (the library tree beside this
                     // panel would otherwise push it right), kept clear of both sides.
@@ -2417,7 +2544,7 @@ component LocalView inherits Rectangle {
                                 min-width: 0px;
                                 alignment: center;
                                 spacing: 1px;
-                                Text { text: root.now-has ? root.now-title : "Nothing playing"; font-size: 13px; font-weight: 600; overflow: elide; color: root.now-has ? (nta.has-hover ? #ffffff : Pal.text) : Pal.text3; }
+                                Text { text: root.now-has ? root.now-title : @tr("Nothing playing"); font-size: 13px; font-weight: 600; overflow: elide; color: root.now-has ? (nta.has-hover ? #ffffff : Pal.text) : Pal.text3; }
                                 Text { text: root.now-artist; font-size: 12px; color: Pal.text3; overflow: elide; }
                             }
                         }
@@ -2451,9 +2578,9 @@ component LocalView inherits Rectangle {
                     Path { width: 24px; height: 24px; x: 14px; y: 14px; viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke: Pal.accent; stroke-width: 1.8px; stroke-line-cap: round; stroke-line-join: round; commands: Icons.download; }
                 }
             }
-            Text { text: "Drop to add to your local library"; horizontal-alignment: center; font-size: 18px; font-weight: 700; color: Pal.text; }
+            Text { text: @tr("Drop to add to your local library"); horizontal-alignment: center; font-size: 18px; font-weight: 700; color: Pal.text; }
             Text { text: root.drop-detail; horizontal-alignment: center; font-size: 11.5px; font-family: Fonts.mono; color: Pal.text2; }
-            Text { text: "Files stay where they are \u{2014} Lightify only indexes them. Drop a folder to add everything in it."; horizontal-alignment: center; font-size: 12.5px; color: Pal.text3; }
+            Text { text: @tr("Files stay where they are \u{2014} Lightify only indexes them. Drop a folder to add everything in it."); horizontal-alignment: center; font-size: 12.5px; color: Pal.text3; }
         }
     }
     // The chip that follows the pointer while tracks are carried.
@@ -2485,7 +2612,7 @@ component LocalFind inherits Rectangle {
     background: #00000099;
     TouchArea { clicked => { root.close(); } }
     Rectangle {
-        width: min(parent.width - 40px, 540px);
+        width: min(parent.width - 40px, max(540px, fbtns.preferred-width));
         height: min(fbody.preferred-height, parent.height - 40px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -2500,7 +2627,7 @@ component LocalFind inherits Rectangle {
                 height: 56px;
                 HorizontalLayout {
                     padding-left: 22px; padding-right: 10px;
-                    Text { text: "Find music on this PC"; vertical-alignment: center; horizontal-stretch: 1; font-size: 17px; font-weight: 700; color: Pal.text; }
+                    Text { text: @tr("Find music on this PC"); vertical-alignment: center; horizontal-stretch: 1; font-size: 17px; font-weight: 700; color: Pal.text; }
                     VerticalLayout { alignment: center; IconBtn { cmds: Icons.close; stroked: true; icon: 15px; box: 34px; clicked => { root.close(); } } }
                 }
                 Rectangle { y: parent.height - 1px; height: 1px; background: Pal.surface2; }
@@ -2508,8 +2635,8 @@ component LocalFind inherits Rectangle {
             VerticalLayout {
                 padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 4px;
                 spacing: 2px;
-                Text { text: root.busy ? "// looking in the usual places\u{2026}" : "// found in the usual places"; font-size: 11px; font-family: Fonts.mono; color: Pal.text3; }
-                if !root.busy && root.cands.length == 0 : Text { text: "No music found in the usual folders \u{2014} add a folder or files below."; font-size: 12.5px; color: Pal.text3; wrap: word-wrap; }
+                Text { text: root.busy ? @tr("// looking in the usual places\u{2026}") : @tr("// found in the usual places"); font-size: 11px; font-family: Fonts.mono; color: Pal.text3; }
+                if !root.busy && root.cands.length == 0 : Text { text: @tr("No music found in the usual folders \u{2014} add a folder or files below."); font-size: 12.5px; color: Pal.text3; wrap: word-wrap; }
                 for c[i] in root.cands : Rectangle {
                     height: 46px;
                     cta := TouchArea { mouse-cursor: pointer; clicked => { if (!c.added) { root.toggle(i); } } }
@@ -2531,22 +2658,23 @@ component LocalFind inherits Rectangle {
                             Text { text: c.name; font-size: 13px; font-weight: 500; overflow: elide; color: c.added ? Pal.text3 : Pal.text; }
                             Text { text: c.path; font-size: 10.5px; font-family: Fonts.mono; color: Pal.faint; overflow: elide; }
                         }
-                        Text { text: c.added ? "added" : c.count; vertical-alignment: center; font-size: 11px; font-family: Fonts.mono; color: Pal.text3; }
+                        Text { text: c.added ? @tr("added") : c.count; vertical-alignment: center; font-size: 11px; font-family: Fonts.mono; color: Pal.text3; }
                     }
                     Rectangle { y: parent.height - 1px; height: 1px; background: #191919; }
                 }
             }
-            HorizontalLayout {
+            fbtns := HorizontalLayout {
                 padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 18px;
                 spacing: 8px;
-                PillBtn { label: "Add a folder\u{2026}"; clicked => { root.add-folder(); } }
-                PillBtn { label: "Add files\u{2026}"; clicked => { root.add-files(); } }
+                PillBtn { label: @tr("Add a folder\u{2026}"); clicked => { root.add-folder(); } }
+                PillBtn { label: @tr("Add files\u{2026}"); clicked => { root.add-files(); } }
                 Rectangle { horizontal-stretch: 1; }
                 if root.confirm-label != "" : Rectangle {
-                    height: 28px; width: cfl.preferred-width + 26px; border-radius: 14px;
+                    height: 28px; border-radius: 14px;
+                    preferred-width: cfl.preferred-width + 26px; max-width: cfl.preferred-width + 26px; min-width: 48px;
                     background: cfta.has-hover ? #ffffff : Pal.text;
                     cfta := TouchArea { mouse-cursor: pointer; clicked => { root.confirm(); } }
-                    cfl := Text { text: root.confirm-label; color: Pal.ink; font-size: 12.5px; font-weight: 700; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                    cfl := Text { text: root.confirm-label; width: min(self.preferred-width, parent.width - 26px); overflow: elide; color: Pal.ink; font-size: 12.5px; font-weight: 700; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                 }
             }
         }
@@ -2592,7 +2720,7 @@ export component MainWindow inherits Window {
     in property <string> elapsed: "2:38";
     in property <string> duration: "4:04";
     in property <float> volume: 0.8;          // 0..1
-    in property <string> status-text: "Connecting\u{2026}";
+    in property <string> status-text: @tr("Connecting\u{2026}");
 
     // Library sort toolbar (#library-toolbar). The worker keeps a separate mode/dir
     // per surface (playlist list vs drilled track list) and pushes the visible one.
@@ -2693,7 +2821,10 @@ export component MainWindow inherits Window {
     in property <int> bp-strip-found: 0;
     in property <int> bp-strip-total: 0;
     in property <string> bp-done-note: "";
-    in property <string> sidebar-empty: "No queued tracks";
+    in property <string> sidebar-empty: @tr("No queued tracks");
+    // `sidebar-empty` is a plain "nothing here" message (not an error or "Loading…"):
+    // show the hint under it. Set by the host, which knows in any language.
+    in property <bool> sidebar-empty-plain: true;
     // DOWNLOADS mode rows (their own model: a download row shows progress, not a
     // track's artist/time). Only read when `sidebar-mode == 3`.
     in-out property <[DlRow]> sidebar-dl-rows: [];
@@ -2708,22 +2839,27 @@ export component MainWindow inherits Window {
     in-out property <bool> bp-genre-open: false;
     in property <string> bp-kind: "tracks";      // tracks | hype | releases
     in-out property <[BpItem]> bp-rows: [];
-    in property <string> bp-status: "Select a genre to load a Beatport chart";
+    in property <string> bp-status: @tr("Select a genre to load a Beatport chart");
 
     // Settings modal.
     in-out property <bool> settings-open: false;
     in-out property <[DeviceRow]> settings-devices: [];
-    in property <string> settings-device-status: "Loading\u{2026}";
+    in property <string> settings-device-status: @tr("Loading\u{2026}");
     in property <int> poll-ms: 5000;             // 5000 (default) | 3000 | 1000
     // Bundled playback engine (lightify-audio) — Lightify's own Connect device.
-    in property <string> engine-status: "Starting\u{2026}";
+    in property <string> engine-status: @tr("Starting\u{2026}");
     in property <bool> engine-ok: false;
     // Where the engine sends sound. Row 0 is always "System default".
     in-out property <[DeviceRow]> settings-outputs: [];
     in property <string> settings-output-note: "";
+    // Settings › language: "Automatic (Windows language)", then each bundled language in
+    // its own name. Empty (and the card hidden) while English is the only one.
+    in-out property <[DeviceRow]> settings-languages: [];
+    in property <string> settings-language-current: "";   // the active row's name, on the button
+    in-out property <bool> settings-language-open: false;  // the list under the button
     // Downloader (bundled OnTheSpot bridge).
     in-out property <string> settings-download-path: "";
-    in property <string> downloader-status: "Checking\u{2026}";
+    in property <string> downloader-status: @tr("Checking\u{2026}");
     in property <bool> downloader-ready: false;
     in property <bool> downloader-busy: false;
     in property <string> account: "";
@@ -2824,7 +2960,9 @@ export component MainWindow inherits Window {
     // rows are built off the UI thread). Missing entries draw the placeholder glyph.
     in property <[image]> playlist-art;
     in-out property <[Row]> playlists: [
-        { name: "Liked Songs",        sub: "1,240", liked: true },
+        // Sample data for the renders; the app replaces it with `build_rows`. Liked
+        // Songs is ours (translated), the playlist names are Spotify's.
+        { name: @tr("Liked Songs"),   sub: "1,240", liked: true },
         { name: "Deep Focus",         sub: "86" },
         { name: "Late Night Drive",   sub: "132", active: true, playing: true },
         { name: "Techno Bunker",      sub: "204" },
@@ -2915,6 +3053,7 @@ export component MainWindow inherits Window {
     callback set-poll-rate(int);     // poll interval in ms
     callback restart-engine();       // relaunch the bundled playback engine
     callback settings-select-output(int); // pick the engine's audio output device
+    callback settings-select-language(int); // row of settings-languages; switches live
     // Downloader (bundled OnTheSpot bridge).
     callback settings-apply-download-path(string);
     callback settings-start-downloader-login();
@@ -3011,6 +3150,10 @@ export component MainWindow inherits Window {
     in property <bool> local-flt-active: false;
     // The Local queue, shown in the Queue drawer while Local mode is on.
     in property <[SideRow]> local-queue-rows: [];
+    // RECENT in Local mode: the local files played, newest first (local_ui.rs) —
+    // never Spotify's list, which belongs to the Spotify view.
+    in property <[SideRow]> local-recent-rows: [];
+    callback local-recent-play(int);
     callback local-drag-begin(int);
     callback local-drag-to(int);
     callback local-drag-end();
@@ -3343,20 +3486,61 @@ export component MainWindow inherits Window {
                     // Tabs: the segmented Library / Search / Beatport control.
                     HorizontalLayout {
                         padding-left: 10px; padding-right: 10px; padding-top: 10px;
-                        SegTrack {
+                        tabs := SegTrack {
                             height: 40px;
+                            // Fitting the labels, in order: equal thirds with icons (what
+                            // English always gets); each tab as wide as its label, icons
+                            // kept; only the selected tab's icon; no icons; no icons and
+                            // half the padding — and only past that, labels elide.
+                            // A tab costs 8+8 px padding, and 15+6 px for an icon.
+                            // The panel's fixed 288 px, less 10 px padding each side, the
+                            // track's 3 px padding and its two 2 px gaps. (Not `self.width`:
+                            // that depends on the tabs' own sizes, a binding loop.)
+                            property <length> room: 288px - 20px - 10px;
+                            property <length> w0: tab0.label-w;
+                            property <length> w1: tab1.label-w;
+                            property <length> w2: tab2.label-w;
+                            property <length> ws: w0 + w1 + w2;
+                            property <int> fit: max(max(w0, w1), w2) + 37px <= room / 3 ? 0
+                                : ws + 3 * 37px <= room ? 1
+                                : ws + 3 * 16px + 21px <= room ? 2
+                                : ws + 3 * 16px <= room ? 3
+                                : 4;
+                            pure function tab-width(w: length, active: bool) -> length {
+                                if (fit == 0) { return room / 3; }
+                                if (fit == 1) { return w + 37px + (room - ws - 3 * 37px) / 3; }
+                                if (fit == 2) { return w + 16px + (active ? 21px : 0px) + (room - ws - 3 * 16px - 21px) / 3; }
+                                if (fit == 3) { return w + 16px + (room - ws - 3 * 16px) / 3; }
+                                if (ws + 3 * 8px <= room) { return w + 8px + (room - ws - 3 * 8px) / 3; }
+                                return 8px + (room - 3 * 8px) * (w / ws);
+                            }
                             HorizontalLayout {
                                 padding: 3px;
                                 spacing: 2px;
-                                TabBtn { label: "Library"; cmds: Icons.library; active: root.tab == 0; clicked => { root.select-tab(0); } }
-                                TabBtn { label: "Search"; cmds: Icons.search; active: root.tab == 1; clicked => { root.select-tab(1); } }
-                                TabBtn { label: "Beatport"; cmds: Icons.charts; active: root.tab == 2; clicked => { root.select-tab(2); } }
+                                tab0 := TabBtn {
+                                    label: @tr("Library"); cmds: Icons.library; active: root.tab == 0; clicked => { root.select-tab(0); }
+                                    width: tabs.tab-width(self.label-w, self.active);
+                                    show-icon: tabs.fit <= 1 || (tabs.fit == 2 && self.active);
+                                    pad: tabs.fit == 4 ? 4px : 8px;
+                                }
+                                tab1 := TabBtn {
+                                    label: @tr("Search"); cmds: Icons.search; active: root.tab == 1; clicked => { root.select-tab(1); }
+                                    width: tabs.tab-width(self.label-w, self.active);
+                                    show-icon: tabs.fit <= 1 || (tabs.fit == 2 && self.active);
+                                    pad: tabs.fit == 4 ? 4px : 8px;
+                                }
+                                tab2 := TabBtn {
+                                    label: "Beatport"; cmds: Icons.charts; active: root.tab == 2; clicked => { root.select-tab(2); }
+                                    width: tabs.tab-width(self.label-w, self.active);
+                                    show-icon: tabs.fit <= 1 || (tabs.fit == 2 && self.active);
+                                    pad: tabs.fit == 4 ? 4px : 8px;
+                                }
                             }
                         }
                     }
                     // Library list (or, when drilled, the track list with a Back bar).
                     if root.tab == 0 && !root.drilled : LibraryToolbar {
-                        kicker: "// library \u{00B7} " + root.playlists.length;
+                        kicker: @tr("// library \u{00B7} {}", root.playlists.length);
                         mode: root.lib-sort-mode;
                         dir: root.lib-sort-dir;
                         recent-clicked => { root.sort-recent(); }
@@ -3412,7 +3596,7 @@ export component MainWindow inherits Window {
                             }
                         }
                         LibraryToolbar {
-                            kicker: "// tracks";
+                            kicker: @tr("// tracks");
                             mode: root.lib-sort-mode;
                             dir: root.lib-sort-dir;
                             recent-clicked => { root.sort-recent(); }
@@ -3485,7 +3669,7 @@ export component MainWindow inherits Window {
                             alignment: start;
                             padding-top: 14px;
                             Text {
-                                text: "No tracks to show";
+                                text: @tr("No tracks to show");
                                 color: Pal.text3;
                                 font-size: 11px;
                                 horizontal-alignment: center;
@@ -3544,7 +3728,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     if si.text == "" : Text {
-                                        text: "What do you want to hear?";
+                                        text: @tr("What do you want to hear?");
                                         color: Pal.text3; font-size: 13.5px;
                                         x: 38px; y: (parent.height - self.height) / 2;
                                     }
@@ -3659,7 +3843,7 @@ export component MainWindow inherits Window {
                             alignment: start;
                             padding-top: 14px;
                             Text {
-                                text: "No tracks to show";
+                                text: @tr("No tracks to show");
                                 color: Pal.text3;
                                 font-size: 11px;
                                 horizontal-alignment: center;
@@ -3675,9 +3859,9 @@ export component MainWindow inherits Window {
                             padding-right: Space.l;
                             spacing: Space.xs;
                             Text {
-                                text: root.search-loading ? "Searching\u{2026}"
-                                    : root.search-text == "" ? "Search Spotify"
-                                    : "No results for \u{201c}" + root.search-text + "\u{201d}";
+                                text: root.search-loading ? @tr("Searching\u{2026}")
+                                    : root.search-text == "" ? @tr("Search Spotify")
+                                    : @tr("No results for \u{201c}{}\u{201d}", root.search-text);
                                 color: Pal.text2;
                                 font-size: TypeScale.body;
                                 font-weight: 600;
@@ -3686,8 +3870,8 @@ export component MainWindow inherits Window {
                             }
                             if !root.search-loading : Text {
                                 text: root.search-text == ""
-                                    ? "Songs, artists, albums and playlists. Your recent searches will show up here."
-                                    : "Check the spelling, or try fewer or different words.";
+                                    ? @tr("Songs, artists, albums and playlists. Your recent searches will show up here.")
+                                    : @tr("Check the spelling, or try fewer or different words.");
                                 color: Pal.text3;
                                 font-size: TypeScale.caption;
                                 horizontal-alignment: center;
@@ -3890,12 +4074,12 @@ export component MainWindow inherits Window {
                                 padding-bottom: 5px;
                                 spacing: 8px;
                                 ActionBtn {
-                                    label: "Select all";
+                                    label: @tr("Select all");
                                     clicked => { root.bp-select-all(); }
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                                 ActionBtn {
-                                    label: "Create playlist";
+                                    label: @tr("Create playlist");
                                     pad: 12px;
                                     enabled: root.sel-count > 0;
                                     clicked => { root.bp-create-playlist(); }
@@ -3928,7 +4112,7 @@ export component MainWindow inherits Window {
                                         HorizontalLayout {
                                             padding-left: 8px; padding-right: 8px;
                                             Text {
-                                                text: "OPEN \u{2197}";
+                                                text: @tr("OPEN \u{2197}");
                                                 vertical-alignment: center;
                                                 color: obta.has-hover ? Pal.text : Pal.text2;
                                                 font-size: TypeScale.micro;
@@ -3973,7 +4157,7 @@ export component MainWindow inherits Window {
                             horizontal-stretch: 1;
                         }
                         Text {
-                            text: root.list-filter-count < 0 ? "" : (root.list-filter-count == 1 ? "1 match" : root.list-filter-count + " matches");
+                            text: root.list-filter-count < 0 ? "" : @tr("{n} match" | "{n} matches" % root.list-filter-count);
                             color: root.list-filter-count == 0 ? Pal.danger : Pal.text3;
                             font-size: TypeScale.caption;
                             vertical-alignment: center;
@@ -4082,7 +4266,7 @@ export component MainWindow inherits Window {
                     height: art.height + (npane.height - art.height) * root.art-expand;
                     border-radius: 14px * (1 - root.art-expand);
                     clip: true;
-                    background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                    background: @linear-gradient(145deg, #171717 0%, #0e0e0e 100%);
                     if root.prev-art.width > 0 : Image {
                         source: root.prev-art;
                         width: 100%; height: 100%;
@@ -4140,7 +4324,7 @@ export component MainWindow inherits Window {
                             // A hairline inner ring, as on the mockup's cover.
                             border-width: 1px;
                             border-color: #ffffff10;
-                            background: @linear-gradient(145deg, #2b3a44 0%, #17242b 55%, #101a1f 100%);
+                            background: @linear-gradient(145deg, #171717 0%, #0e0e0e 100%);
                             // While expanded, the full-pane layer stands in for it; the box
                             // stays in the layout so nothing below moves. Fully out, it is
                             // not drawn at all (its 1px frame and edges would otherwise
@@ -4175,14 +4359,19 @@ export component MainWindow inherits Window {
                                 image-fit: cover;
                                 opacity: root.art-fade;
                             }
-                            // No cover loaded: the Lightify mark, dimmed into the placeholder
-                            // gradient (UI-PLAN A8), instead of a generic note glyph.
-                            if root.album-art.width == 0 : Image {
-                                source: @image-url("../assets/lightify-icon.png");
-                                width: parent.width * 0.34; height: self.width;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                opacity: 0.28;
+                            // No cover loaded: an idle level meter — five flat dots, the
+                            // middle one lit, waiting for sound. Dot, gap and height all
+                            // scale with the cover (3.9% each), so it holds at every size.
+                            if root.album-art.width == 0 : Rectangle {
+                                width: 100%; height: 100%;
+                                property <length> d: self.width * 0.039;
+                                for i in 5 : Rectangle {
+                                    width: parent.d; height: parent.d;
+                                    border-radius: self.width / 2;
+                                    x: (parent.width - parent.d * 9) / 2 + parent.d * 2 * i;
+                                    y: (parent.height - parent.d) / 2;
+                                    background: i == 2 ? Pal.accent : Pal.border-hi;
+                                }
                             }
                         }
                     }
@@ -4206,9 +4395,9 @@ export component MainWindow inherits Window {
                             spacing: 3px + 2px * npane.k;
                             // Idle ("—" + "Nothing playing" from the host) reads as a title and a
                             // hint instead of a lone dash (UI-PLAN A7).
-                            property <bool> idle: root.track-name == "\u{2014}" && root.track-artist == "Nothing playing";
-                            Text { text: parent.idle ? "Nothing playing" : root.track-name; color: parent.idle ? Pal.text2 : Pal.text; font-size: 19px + 9px * npane.k; font-weight: 700; letter-spacing: -0.3px; horizontal-alignment: center; overflow: elide; }
-                            Text { text: parent.idle ? "Pick a playlist or a song to start" : root.track-artist; color: parent.idle ? Pal.text3 : Pal.text2; font-size: 13px + 2px * npane.k; horizontal-alignment: center; overflow: elide; }
+                            property <bool> idle: root.track-name == "\u{2014}" && root.track-artist == @tr("Nothing playing");
+                            Text { text: parent.idle ? @tr("Nothing playing") : root.track-name; color: parent.idle ? Pal.text2 : Pal.text; font-size: 19px + 9px * npane.k; font-weight: 700; letter-spacing: -0.3px; horizontal-alignment: center; overflow: elide; }
+                            Text { text: parent.idle ? @tr("Pick a playlist or a song to start") : root.track-artist; color: parent.idle ? Pal.text3 : Pal.text2; font-size: 13px + 2px * npane.k; horizontal-alignment: center; overflow: elide; }
                         }
                     }
 
@@ -4297,15 +4486,10 @@ export component MainWindow inherits Window {
                         } }
                     }
 
-                    // Volume — its own centred row, as in the original layout.
+                    // Volume — its own row, centred under the transport (no speaker icon,
+                    // on the owner's request).
                     HorizontalLayout {
                         alignment: center;
-                        spacing: 10px;
-                        VerticalLayout { alignment: center;
-                            Path { width: 17px + 2px * npane.k; height: self.width; viewbox-width: 24; viewbox-height: 24;
-                                fill: transparent; stroke: Pal.text3; stroke-width: 1.6px; stroke-line-cap: round; stroke-line-join: round;
-                                commands: Icons.volume; }
-                        }
                         VerticalLayout { alignment: center;
                             vbar := Rectangle {
                                 width: 130px + 40px * npane.k; height: 14px;
@@ -4328,14 +4512,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                 }
-                                Rectangle {
-                                    y: (parent.height - self.height) / 2;
-                                    width: parent.width; height: 4px; border-radius: 2px; background: Pal.border-hi;
-                                    // White fill: only the seek bar carries the accent.
-                                    Rectangle { x: 0; height: parent.height; width: parent.width * vbar.shown; border-radius: 2px; background: Pal.text; }
-                                }
-                                if vta.has-hover || root.scrubbing-volume : Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Pal.text;
-                                    x: vbar.width * vbar.shown - self.width / 2; y: (parent.height - self.height) / 2; }
+                                VolumeTrack { width: parent.width; height: parent.height; shown: vbar.shown; lit: vta.has-hover || root.scrubbing-volume; }
                             }
                         }
                     }
@@ -4466,8 +4643,10 @@ export component MainWindow inherits Window {
                     property <int> last-mode: 1;
                     changed mode-now => { if (self.mode-now != 0) { self.last-mode = self.mode-now; } }
                     property <int> shown: root.sidebar-mode != 0 ? root.sidebar-mode : self.last-mode;
-                    // QUEUE in Local mode is the Local queue (its own rows and actions).
+                    // QUEUE in Local mode is the Local queue (its own rows and actions);
+                    // RECENT in Local mode is the local files played.
                     property <bool> lq: root.local-mode && self.shown == 1;
+                    property <bool> lr: root.local-mode && self.shown == 2;
                     width: root.sidebar-mode == 0 ? 0px : 300px;
                     animate width { duration: Motion.slide; easing: cubic-bezier(0.22, 0.85, 0.28, 1); }
                     clip: true;
@@ -4485,14 +4664,14 @@ export component MainWindow inherits Window {
                                 padding-right: 8px;
                                 spacing: 10px;
                                 Text {
-                                    text: drawer.shown == 1 ? "Queue" : drawer.shown == 2 ? "Recent" : "Downloads";
+                                    text: drawer.shown == 1 ? @tr("Queue") : drawer.shown == 2 ? @tr("Recent") : @tr("Downloads");
                                     color: Pal.text;
                                     font-size: 15px;
                                     font-weight: 700;
                                     vertical-alignment: center;
                                 }
                                 Text {
-                                    text: drawer.shown == 3 ? root.sidebar-dl-rows.length : drawer.lq ? root.local-queue-rows.length : root.sidebar-rows.length;
+                                    text: drawer.shown == 3 ? root.sidebar-dl-rows.length : drawer.lq ? root.local-queue-rows.length : drawer.lr ? root.local-recent-rows.length : root.sidebar-rows.length;
                                     color: Pal.text3;
                                     font-size: 11px;
                                     font-family: Fonts.mono;
@@ -4505,7 +4684,7 @@ export component MainWindow inherits Window {
                                 if drawer.shown == 1 || drawer.shown == 3 : VerticalLayout {
                                     alignment: center;
                                     ActionBtn {
-                                        label: "Clear";
+                                        label: @tr("Clear");
                                         enabled: drawer.shown != 3 || root.downloads-clearable;
                                         clicked => {
                                             if (drawer.shown == 3) { root.clear-downloads(); }
@@ -4542,7 +4721,7 @@ export component MainWindow inherits Window {
                                 }
                                 HorizontalLayout {
                                     spacing: 6px;
-                                    Text { text: "Finding on Spotify"; color: Pal.text2; font-size: TypeScale.small; horizontal-stretch: 1; vertical-alignment: bottom; }
+                                    Text { text: @tr("Finding on Spotify"); color: Pal.text2; font-size: TypeScale.small; horizontal-stretch: 1; vertical-alignment: bottom; }
                                     Text { text: root.bp-strip-found; color: Pal.text; font-size: 11px; font-family: Fonts.mono; vertical-alignment: bottom; }
                                     Text { text: "/ " + root.bp-strip-total; color: Pal.faint; font-size: 11px; font-family: Fonts.mono; vertical-alignment: bottom; }
                                 }
@@ -4590,8 +4769,8 @@ export component MainWindow inherits Window {
                                 horizontal-alignment: center;
                                 wrap: word-wrap;
                             }
-                            if root.sidebar-empty == "No downloads queued" : Text {
-                                text: "Right-click a song or playlist and choose Download.";
+                            if root.sidebar-empty == @tr("No downloads queued") : Text {
+                                text: @tr("Right-click a song or playlist and choose Download.");
                                 color: Pal.text3;
                                 font-size: TypeScale.caption;
                                 horizontal-alignment: center;
@@ -4623,13 +4802,38 @@ export component MainWindow inherits Window {
                             padding-left: Space.l;
                             padding-right: Space.l;
                             spacing: Space.xs;
-                            Text { text: "Nothing playing"; color: Pal.text2; font-size: TypeScale.small; horizontal-alignment: center; }
+                            Text { text: @tr("Nothing playing"); color: Pal.text2; font-size: TypeScale.small; horizontal-alignment: center; }
                             Text {
-                                text: "Click a track to play it \u{2014} the rest of its list follows here. Right-click a track and choose Add to queue to play it next.";
+                                text: @tr("Click a track to play it \u{2014} the rest of its list follows here. Right-click a track and choose Add to queue to play it next.");
                                 color: Pal.text3; font-size: TypeScale.caption; horizontal-alignment: center; wrap: word-wrap;
                             }
                         }
-                        if drawer.shown != 3 && !drawer.lq && root.sidebar-rows.length > 0 : sblist := ListView {
+                        if drawer.lr && root.local-recent-rows.length > 0 : ListView {
+                            vertical-stretch: 1;
+                            for r[i] in root.local-recent-rows : SideTrackRow {
+                                name: r.name;
+                                artist: r.artist;
+                                time: r.time;
+                                playing: r.playing;
+                                selectable: false;
+                                removable: false;
+                                clicked => { root.local-recent-play(i); }
+                            }
+                        }
+                        if drawer.lr && root.local-recent-rows.length == 0 : VerticalLayout {
+                            vertical-stretch: 1;
+                            alignment: start;
+                            padding-top: 16px;
+                            padding-left: Space.l;
+                            padding-right: Space.l;
+                            spacing: Space.xs;
+                            Text { text: @tr("No local tracks played yet"); color: Pal.text2; font-size: TypeScale.small; horizontal-alignment: center; }
+                            Text {
+                                text: @tr("Files you play in Local mode will show up here.");
+                                color: Pal.text3; font-size: TypeScale.caption; horizontal-alignment: center; wrap: word-wrap;
+                            }
+                        }
+                        if drawer.shown != 3 && !drawer.lq && !drawer.lr && root.sidebar-rows.length > 0 : sblist := ListView {
                             vertical-stretch: 1;
                             // Hold-to-select drag (`RowTouch`): the pointer's y inside the
                             // visible list, and an auto-scroll while it sits near an edge.
@@ -4696,12 +4900,12 @@ export component MainWindow inherits Window {
                                 padding: 6px;
                                 alignment: center;
                                 ActionBtn {
-                                    label: "Create playlist from queue";
+                                    label: @tr("Create playlist from queue");
                                     clicked => { root.sidebar-create-playlist(); }
                                 }
                             }
                         }
-                        if drawer.shown != 3 && !drawer.lq && root.sidebar-rows.length == 0 : VerticalLayout {
+                        if drawer.shown != 3 && !drawer.lq && !drawer.lr && root.sidebar-rows.length == 0 : VerticalLayout {
                             vertical-stretch: 1;
                             alignment: start;
                             padding-top: 16px;
@@ -4716,10 +4920,10 @@ export component MainWindow inherits Window {
                             }
                             // A pointer to how the list fills (UI-PLAN A7) — only under the
                             // plain "empty" messages, never under an error or "Loading…".
-                            if root.sidebar-empty == "No queued tracks" || root.sidebar-empty == "No recent tracks yet" : Text {
+                            if root.sidebar-empty-plain : Text {
                                 text: drawer.shown == 1
-                                    ? "Right-click any song and choose Add to queue."
-                                    : "Songs you play will show up here.";
+                                    ? @tr("Right-click any song and choose Add to queue.")
+                                    : @tr("Songs you play will show up here.");
                                 color: Pal.text3;
                                 font-size: TypeScale.caption;
                                 horizontal-alignment: center;
@@ -4733,7 +4937,7 @@ export component MainWindow inherits Window {
         }
 
         // ── Status bar ───────────────────────────────────────────────────────
-        if root.mini-mode == "off" : Rectangle {
+        if root.mini-mode == "off" : foot := Rectangle {
             height: 42px;
             background: Pal.bg;
             Rectangle { y: 0; height: 1px; background: #161616; }
@@ -4755,7 +4959,7 @@ export component MainWindow inherits Window {
                     : Pal.text3;
             }
             // Local library mode: lit while on, grey while off.
-            LocalToggle {
+            ltog := LocalToggle {
                 x: 46px;
                 // Centred below the 1px top line, rounded down a pixel: the window's
                 // resize edge continues the footer colour below it.
@@ -4767,18 +4971,27 @@ export component MainWindow inherits Window {
                 }
             }
             // Queue / recent / downloads toggles, centered in the footer.
-            // Labelled toggles (UI-PLAN A4). All three labels need ~290px and the full
-            // window's minimum width is 640px, so they always fit; the footer doesn't
-            // exist in the mini layouts.
+            // Labelled toggles (UI-PLAN A4). In English all three labels need ~290px, which
+            // the 640px minimum window always has; the footer doesn't exist in the mini
+            // layouts. Longer labels (other languages) beside an update pill: the toggles
+            // move left of the pill, and drop to icons (with tooltips) if even that is
+            // too tight.
+            property <length> foot-right: upill.visible ? upill.x : (updl.visible ? updl.x : self.width);
+            property <length> foot-left: ltog.x + ltog.width + 8px;
+            property <bool> foot-labels: qtab.labelled-width + rtab.labelled-width + dtab.labelled-width + 8px
+                <= self.foot-right - 8px - self.foot-left;
             HorizontalLayout {
+                width: self.preferred-width;
+                x: max(parent.foot-left, min((parent.width - self.width) / 2, parent.foot-right - 8px - self.width));
                 alignment: center;
                 spacing: 4px;
-                VerticalLayout { alignment: center; FootTab { label: "Queue"; active: root.sidebar-mode == 1; cmds: Icons.queue; clicked => { root.toggle-sidebar(1); } } }
-                VerticalLayout { alignment: center; FootTab { label: "Recent"; active: root.sidebar-mode == 2; cmds: Icons.recent; clicked => { root.toggle-sidebar(2); } } }
-                VerticalLayout { alignment: center; FootTab { label: "Downloads"; active: root.sidebar-mode == 3; cmds: Icons.download; clicked => { root.toggle-sidebar(3); } } }
+                VerticalLayout { alignment: center; qtab := FootTab { label: @tr("Queue"); show-label: foot.foot-labels; active: root.sidebar-mode == 1; cmds: Icons.queue; clicked => { root.toggle-sidebar(1); } } }
+                VerticalLayout { alignment: center; rtab := FootTab { label: @tr("Recent"); show-label: foot.foot-labels; active: root.sidebar-mode == 2; cmds: Icons.recent; clicked => { root.toggle-sidebar(2); } } }
+                VerticalLayout { alignment: center; dtab := FootTab { label: @tr("Downloads"); show-label: foot.foot-labels; active: root.sidebar-mode == 3; cmds: Icons.download; clicked => { root.toggle-sidebar(3); } } }
             }
             // An update that's downloaded and verified: "2.3.0 ready · Restart".
-            if root.update-state == "ready" : Rectangle {
+            upill := Rectangle {
+                visible: root.update-state == "ready";
                 width: upl.preferred-width;
                 height: 28px;
                 x: parent.width - self.width - 10px;
@@ -4796,7 +5009,7 @@ export component MainWindow inherits Window {
                         alignment: center;
                         Rectangle { width: 6px; height: 6px; border-radius: 3px; background: Pal.accent; }
                     }
-                    Text { text: root.update-version + " ready"; color: Pal.text; font-size: TypeScale.small; font-weight: 500; vertical-alignment: center; }
+                    Text { text: @tr("{} ready", root.update-version); color: Pal.text; font-size: TypeScale.small; font-weight: 500; vertical-alignment: center; }
                     VerticalLayout {
                         alignment: center;
                         Rectangle {
@@ -4804,16 +5017,17 @@ export component MainWindow inherits Window {
                             width: rtxt.preferred-width + 18px;
                             border-radius: 10px;
                             background: Pal.text;
-                            rtxt := Text { text: "Restart"; color: Pal.ink; font-size: 11.5px; font-weight: 700;
+                            rtxt := Text { text: @tr("Restart"); color: Pal.ink; font-size: 11.5px; font-weight: 700;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                         }
                     }
                 }
             }
-            if root.update-state == "downloading" : Text {
+            updl := Text {
+                visible: root.update-state == "downloading";
                 x: parent.width - self.width - 16px;
                 y: (parent.height - self.height) / 2;
-                text: "updating\u{2026} " + Math.round(root.update-progress * 100) + "%";
+                text: @tr("updating\u{2026} {}%", Math.round(root.update-progress * 100));
                 color: Pal.text3; font-size: 11px; font-family: Fonts.mono;
             }
         }
@@ -5012,7 +5226,7 @@ export component MainWindow inherits Window {
                         padding-left: 22px;
                         padding-right: 12px;
                         spacing: 12px;
-                        Text { text: "Settings"; color: Pal.text; font-size: 18px; font-weight: 700; vertical-alignment: center; }
+                        Text { text: @tr("Settings"); color: Pal.text; font-size: 18px; font-weight: 700; vertical-alignment: center; }
                         Text {
                             text: root.app-version == "" ? "lightify" : "lightify " + root.app-version;
                             color: Pal.text3; font-size: 11px; font-family: Fonts.mono;
@@ -5049,8 +5263,8 @@ export component MainWindow inherits Window {
                             // Spotify desktop app is never part of the chain.
                             Card {
                                 HorizontalLayout {
-                                    Kicker { text: "// playback engine"; }
-                                    PillBtn { label: "Restart"; clicked => { root.restart-engine(); } }
+                                    Kicker { text: @tr("// playback engine"); }
+                                    PillBtn { label: @tr("Restart"); clicked => { root.restart-engine(); } }
                                 }
                                 HorizontalLayout {
                                     spacing: 8px;
@@ -5058,14 +5272,14 @@ export component MainWindow inherits Window {
                                     Text { text: root.engine-status; color: root.engine-ok ? Pal.text : Pal.text2; font-size: 13.5px; font-weight: 500; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
                                 }
                                 Text {
-                                    text: "Lightify decodes audio itself and registers as a Spotify Connect device \u{2014} the Spotify app is never required.";
+                                    text: @tr("Lightify decodes audio itself and registers as a Spotify Connect device \u{2014} the Spotify app is never required.");
                                     color: Pal.text2; font-size: 12.5px; wrap: word-wrap;
                                 }
                             }
 
                             // AUDIO OUTPUT — which sound card the engine plays through.
                             Card {
-                                Kicker { text: "// audio output"; }
+                                Kicker { text: @tr("// audio output"); }
                                 Rectangle {
                                     // Exactly three 34px rows, so the list never cuts a
                                     // row's text in half; the rest scrolls.
@@ -5105,7 +5319,7 @@ export component MainWindow inherits Window {
                                     }
                                     if root.settings-outputs.length == 0 : Text {
                                         x: 10px; y: 8px;
-                                        text: "No audio outputs found"; color: Pal.text3; font-size: TypeScale.small;
+                                        text: @tr("No audio outputs found"); color: Pal.text3; font-size: TypeScale.small;
                                     }
                                 }
                                 if root.settings-output-note != "" : Text {
@@ -5117,8 +5331,8 @@ export component MainWindow inherits Window {
                             // PLAYBACK DEVICE
                             Card {
                                 HorizontalLayout {
-                                    Kicker { text: "// playback device"; }
-                                    PillBtn { label: "Refresh"; clicked => { root.settings-refresh-devices(); } }
+                                    Kicker { text: @tr("// playback device"); }
+                                    PillBtn { label: @tr("Refresh"); clicked => { root.settings-refresh-devices(); } }
                                 }
                                 Rectangle {
                                     // One 40px row per device, up to three; the rest scrolls.
@@ -5150,7 +5364,7 @@ export component MainWindow inherits Window {
                                                         width: seltxt.preferred-width + 22px; height: 26px; border-radius: 13px;
                                                         border-width: 1px;
                                                         border-color: dvr.has-hover ? Pal.border-strong : Pal.border-hi;
-                                                        seltxt := Text { text: "Select"; color: dvr.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.small; font-weight: 500;
+                                                        seltxt := Text { text: @tr("Select"); color: dvr.has-hover ? Pal.text : Pal.text2; font-size: TypeScale.small; font-weight: 500;
                                                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                                     }
                                                 }
@@ -5166,14 +5380,14 @@ export component MainWindow inherits Window {
 
                             // ASCII LAVA — the backdrop behind now playing, Spotify and Local.
                             Card {
-                                Kicker { text: "// ascii lava"; }
+                                Kicker { text: @tr("// ascii lava"); }
                                 HorizontalLayout {
                                     spacing: 12px;
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         spacing: 3px;
-                                        Text { text: "Lava behind now playing"; color: Pal.text; font-size: 13.5px; font-weight: 500; }
-                                        Text { text: "Right-click the lava for the screensaver."; color: Pal.text3; font-size: 12px; wrap: word-wrap; }
+                                        Text { text: @tr("Lava behind now playing"); color: Pal.text; font-size: 13.5px; font-weight: 500; }
+                                        Text { text: @tr("Right-click the lava for the screensaver."); color: Pal.text3; font-size: 12px; wrap: word-wrap; }
                                     }
                                     VerticalLayout {
                                         alignment: center;
@@ -5197,17 +5411,72 @@ export component MainWindow inherits Window {
                             spacing: 14px;
                             alignment: start;
 
+                            // LANGUAGE — Automatic (Windows' language) or a bundled one, each
+                            // in its own name; picking one switches the whole app live. Only
+                            // shown once there is a language besides English. A button with
+                            // the language in use (the installer's picker); the list opens
+                            // under it inside the card — every row, nothing to scroll — since
+                            // a list floating over the scrolling Settings body would be cut
+                            // off at its edge.
+                            if root.settings-languages.length > 1 : Card {
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    // The kicker keeps its words; the button's name elides first.
+                                    Kicker { text: @tr("// language"); min-width: self.preferred-width; }
+                                    LangPill {
+                                        text: root.settings-language-current;
+                                        open: root.settings-language-open;
+                                        clicked => { root.settings-language-open = !root.settings-language-open; }
+                                    }
+                                }
+                                if root.settings-language-open : VerticalLayout {
+                                    for l[i] in root.settings-languages : Rectangle {
+                                        height: 30px;
+                                        border-radius: 8px;
+                                        background: lngr.has-hover ? Pal.surface : transparent;
+                                        lngr := TouchArea {
+                                            clicked => {
+                                                root.settings-language-open = false;
+                                                root.settings-select-language(i);
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px;
+                                            spacing: 14px;
+                                            Text {
+                                                text: l.name;
+                                                color: l.active || lngr.has-hover ? Pal.text : Pal.text2;
+                                                font-size: 13px; font-weight: l.active ? 600 : 500;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                            }
+                                            if l.active : VerticalLayout {
+                                                alignment: center;
+                                                Path {
+                                                    width: 14px; height: 14px;
+                                                    viewbox-width: 24; viewbox-height: 24;
+                                                    commands: Icons.check;
+                                                    fill: transparent; stroke: Pal.accent; stroke-width: 2px;
+                                                    stroke-line-cap: round; stroke-line-join: round;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // POLL RATE
                             Card {
-                                Kicker { text: "// poll rate"; }
+                                Kicker { text: @tr("// poll rate"); }
                                 SegTrack {
                                     height: 36px;
                                     HorizontalLayout {
                                         padding: 3px;
                                         spacing: 2px;
-                                        SegBtn { label: "Slow"; note: "5s"; h: 30px; stretch: true; active: root.poll-ms == 5000; clicked => { root.set-poll-rate(5000); } }
-                                        SegBtn { label: "Normal"; note: "3s"; h: 30px; stretch: true; active: root.poll-ms == 3000; clicked => { root.set-poll-rate(3000); } }
-                                        SegBtn { label: "Fast"; note: "1s"; h: 30px; stretch: true; active: root.poll-ms == 1000; clicked => { root.set-poll-rate(1000); } }
+                                        SegBtn { label: @tr("Slow"); note: "5s"; h: 30px; stretch: true; active: root.poll-ms == 5000; clicked => { root.set-poll-rate(5000); } }
+                                        SegBtn { label: @tr("Normal"); note: "3s"; h: 30px; stretch: true; active: root.poll-ms == 3000; clicked => { root.set-poll-rate(3000); } }
+                                        SegBtn { label: @tr("Fast"); note: "1s"; h: 30px; stretch: true; active: root.poll-ms == 1000; clicked => { root.set-poll-rate(1000); } }
                                     }
                                 }
                             }
@@ -5218,13 +5487,13 @@ export component MainWindow inherits Window {
                             Card {
                                 HorizontalLayout {
                                     spacing: 8px;
-                                    Kicker { text: "// downloader"; }
+                                    Kicker { text: @tr("// downloader"); }
                                     // Stays clickable while busy: the sign-in this starts
                                     // resolves in the background (success or a timeout) with
                                     // nothing to force this open panel to notice on its own —
                                     // this is the fallback way to ask again besides the poll.
                                     PillBtn {
-                                        label: root.downloader-busy ? "Waiting\u{2026} (retry)" : "Connect Spotify Downloader";
+                                        label: root.downloader-busy ? @tr("Waiting\u{2026} (retry)") : @tr("Connect Spotify Downloader");
                                         enabled: !root.downloader-ready;
                                         clicked => { root.settings-start-downloader-login(); }
                                     }
@@ -5239,7 +5508,7 @@ export component MainWindow inherits Window {
                                         overflow: elide; horizontal-stretch: 1; vertical-alignment: center;
                                     }
                                 }
-                                Kicker { text: "download folder"; }
+                                Kicker { text: @tr("download folder"); }
                                 // Download folder — shared with the shipped app (same config
                                 // key), so a path set in either one is what both write into.
                                 HorizontalLayout {
@@ -5264,12 +5533,13 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                         if dlpath.text == "" : Text {
-                                            text: "Download folder";
+                                            text: @tr("Download folder");
                                             color: Pal.text3; font-size: 11.5px; font-family: Fonts.mono;
+                                            width: parent.width - 20px; overflow: elide;
                                             x: 10px; y: (parent.height - self.height) / 2;
                                         }
                                     }
-                                    PillBtn { label: "Save"; h: 36px; clicked => { root.settings-apply-download-path(dlpath.text); } }
+                                    PillBtn { label: @tr("Save"); h: 36px; clicked => { root.settings-apply-download-path(dlpath.text); } }
                                 }
                             }
 
@@ -5278,13 +5548,13 @@ export component MainWindow inherits Window {
                             Card {
                                 HorizontalLayout {
                                     spacing: 8px;
-                                    Kicker { text: "// updates"; }
+                                    Kicker { text: @tr("// updates"); }
                                     PillBtn {
-                                        label: root.update-state == "ready" ? "Restart now"
-                                            : root.update-state == "available" ? "Download"
-                                            : root.update-state == "checking" ? "Checking\u{2026}"
-                                            : root.update-state == "downloading" ? "Downloading\u{2026}"
-                                            : "Check now";
+                                        label: root.update-state == "ready" ? @tr("Restart now")
+                                            : root.update-state == "available" ? @tr("Download")
+                                            : root.update-state == "checking" ? @tr("Checking\u{2026}")
+                                            : root.update-state == "downloading" ? @tr("Downloading\u{2026}")
+                                            : @tr("Check now");
                                         enabled: root.update-state != "checking" && root.update-state != "downloading";
                                         clicked => {
                                             if (root.update-state == "ready") { root.update-restart(); }
@@ -5296,12 +5566,12 @@ export component MainWindow inherits Window {
                                     spacing: 8px;
                                     StatusDot { on: root.update-state == "ready" || root.update-state == "available"; }
                                     Text {
-                                        text: root.update-state == "ready" ? "Lightify " + root.update-version + " downloaded \u{2014} restart to finish"
-                                            : root.update-state == "available" ? "Lightify " + root.update-version + " is available"
-                                            : root.update-state == "checking" ? "Checking lightify.stream\u{2026}"
-                                            : root.update-state == "downloading" ? "Downloading Lightify " + root.update-version
+                                        text: root.update-state == "ready" ? @tr("Lightify {} downloaded \u{2014} restart to finish", root.update-version)
+                                            : root.update-state == "available" ? @tr("Lightify {} is available", root.update-version)
+                                            : root.update-state == "checking" ? @tr("Checking lightify.stream\u{2026}")
+                                            : root.update-state == "downloading" ? @tr("Downloading Lightify {}", root.update-version)
                                             : root.update-state == "error" ? root.update-note
-                                            : root.update-state == "current" ? "Lightify " + root.app-version + " is up to date"
+                                            : root.update-state == "current" ? @tr("Lightify {} is up to date", root.app-version)
                                             : "Lightify " + root.app-version;
                                         color: root.update-state == "error" ? Pal.danger : Pal.text;
                                         font-size: 13px; font-weight: 500;
@@ -5319,7 +5589,7 @@ export component MainWindow inherits Window {
                                 if root.update-attention : HorizontalLayout {
                                     alignment: end;
                                     PillBtn {
-                                        label: "Mark seen";
+                                        label: @tr("Mark seen");
                                         clicked => { root.update-mark-seen(); }
                                     }
                                 }
@@ -5337,7 +5607,7 @@ export component MainWindow inherits Window {
                                 }
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    Text { text: "Install updates automatically"; color: Pal.text2; font-size: 12.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                                    Text { text: @tr("Install updates automatically"); color: Pal.text2; font-size: 12.5px; vertical-alignment: center; horizontal-stretch: 1; }
                                     VerticalLayout {
                                         alignment: center;
                                         Switch {
@@ -5358,13 +5628,13 @@ export component MainWindow inherits Window {
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         spacing: 6px;
-                                        Kicker { text: "// account"; }
-                                        Text { text: root.account == "" ? "Not connected" : root.account; color: Pal.text2; font-size: 13px; overflow: elide; }
+                                        Kicker { text: @tr("// account"); }
+                                        Text { text: root.account == "" ? @tr("Not connected") : root.account; color: Pal.text2; font-size: 13px; overflow: elide; }
                                     }
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         spacing: 6px;
-                                        Kicker { text: "// about"; }
+                                        Kicker { text: @tr("// about"); }
                                         Text { text: root.app-version == "" ? "Lightify" : "Lightify " + root.app-version; color: Pal.text2; font-size: 13px; }
                                     }
                                 }
@@ -5437,7 +5707,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     if cmdk.text == "" : Text {
-                        text: "Search actions, playlists\u{2026}";
+                        text: @tr("Search actions, playlists\u{2026}");
                         color: Pal.text3; font-size: 15px;
                         x: 48px; y: (parent.height - self.height) / 2;
                     }
@@ -5467,7 +5737,7 @@ export component MainWindow inherits Window {
                     vertical-stretch: 1;
                     alignment: start;
                     padding-top: 18px;
-                    Text { text: "No matches"; color: Pal.text3; font-size: TypeScale.small; horizontal-alignment: center; }
+                    Text { text: @tr("No matches"); color: Pal.text3; font-size: TypeScale.small; horizontal-alignment: center; }
                 }
             }
         }
@@ -5558,7 +5828,7 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
-                    PillBtn { label: "No"; h: 32px; clicked => { root.confirm-open = false; } }
+                    PillBtn { label: @tr("No"); h: 32px; clicked => { root.confirm-open = false; } }
                     // Danger pill.
                     Rectangle {
                         width: ytxt.preferred-width + 30px; height: 32px; border-radius: 16px;
@@ -5568,7 +5838,7 @@ export component MainWindow inherits Window {
                         cyes := TouchArea {
                             clicked => { root.confirm-open = false; root.confirm-accept(); }
                         }
-                        ytxt := Text { text: "Yes"; font-size: 13px; font-weight: 600; color: cyes.has-hover ? #ffd0d0 : Pal.danger;
+                        ytxt := Text { text: @tr("Yes"); font-size: 13px; font-weight: 600; color: cyes.has-hover ? #ffd0d0 : Pal.danger;
                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                     }
                 }
@@ -5609,7 +5879,7 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 VerticalLayout {
                     spacing: 4px;
-                    Kicker { text: "// new playlist"; }
+                    Kicker { text: @tr("// new playlist"); }
                     if root.name-prompt-note != "" : Text {
                         text: root.name-prompt-note;
                         color: Pal.text2; font-size: TypeScale.small; wrap: word-wrap;
@@ -5647,7 +5917,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     if npin.text == "" : Text {
-                        text: "Playlist name";
+                        text: @tr("Playlist name");
                         color: Pal.text3; font-size: 14px;
                         x: 12px; y: (parent.height - self.height) / 2;
                     }
@@ -5656,7 +5926,7 @@ export component MainWindow inherits Window {
                     alignment: end;
                     spacing: 8px;
                     PillBtn {
-                        label: "Cancel"; h: 32px;
+                        label: @tr("Cancel"); h: 32px;
                         clicked => { root.name-prompt-open = false; root.name-prompt-cancel(); }
                     }
                     // The one primary button: the white pill, live once there's a name.
@@ -5668,7 +5938,7 @@ export component MainWindow inherits Window {
                             clicked => { root.name-prompt-open = false; root.name-prompt-accept(npin.text); }
                         }
                         savet := Text {
-                            text: "Save";
+                            text: @tr("Save");
                             color: npin.text == "" ? Pal.faint : Pal.ink;
                             font-size: 13px; font-weight: 700;
                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
@@ -5700,8 +5970,8 @@ export component MainWindow inherits Window {
                 spacing: 22px;
                 VerticalLayout {
                     spacing: 8px;
-                    Kicker { text: "// first run"; }
-                    Text { text: "Connect Spotify"; color: Pal.text; font-size: 26px; font-weight: 700; letter-spacing: -0.4px; }
+                    Kicker { text: @tr("// first run"); }
+                    Text { text: @tr("Connect Spotify"); color: Pal.text; font-size: 26px; font-weight: 700; letter-spacing: -0.4px; }
                 }
                 VerticalLayout {
                     spacing: 16px;
@@ -5712,7 +5982,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             horizontal-stretch: 1;
                             spacing: 8px;
-                            Text { text: "Go to"; color: Pal.text2; font-size: 14px; }
+                            Text { text: @tr("Go to"); color: Pal.text2; font-size: 14px; }
                             CodeBox {
                                 text: "developer.spotify.com/dashboard";
                                 action: "open";
@@ -5726,7 +5996,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             horizontal-stretch: 1;
                             spacing: 8px;
-                            Text { text: "Create an app \u{2014} set the redirect URI to"; color: Pal.text2; font-size: 14px; wrap: word-wrap; }
+                            Text { text: @tr("Create an app \u{2014} set the redirect URI to"); color: Pal.text2; font-size: 14px; wrap: word-wrap; }
                             CodeBox { text: "http://127.0.0.1:8901/callback"; }
                         }
                     }
@@ -5736,7 +6006,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             horizontal-stretch: 1;
                             spacing: 8px;
-                            Text { text: "Paste your Client ID below and authorise"; color: Pal.text2; font-size: 14px; wrap: word-wrap; }
+                            Text { text: @tr("Paste your Client ID below and authorise"); color: Pal.text2; font-size: 14px; wrap: word-wrap; }
                             Rectangle {
                                 height: 40px;
                                 background: Pal.panel;
@@ -5757,7 +6027,7 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 if cid.text == "" : Text {
-                                    text: "paste your Spotify Client ID here";
+                                    text: @tr("paste your Spotify Client ID here");
                                     color: Pal.text3; font-size: 13px; font-family: Fonts.mono;
                                     x: 12px; y: (parent.height - self.height) / 2;
                                 }
@@ -5777,12 +6047,12 @@ export component MainWindow inherits Window {
                             clicked => { if (!root.signin-waiting) { root.signin-authorise(cid.text); } }
                         }
                         atxt := Text {
-                            text: "Authorise";
+                            text: @tr("Authorise");
                             color: Pal.ink; font-size: 14px; font-weight: 700;
                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                         }
                     }
-                    PillBtn { label: "Retry"; h: 40px; clicked => { root.signin-retry(); } }
+                    PillBtn { label: @tr("Retry"); h: 40px; clicked => { root.signin-retry(); } }
                     Text {
                         text: root.signin-status;
                         horizontal-stretch: 1;

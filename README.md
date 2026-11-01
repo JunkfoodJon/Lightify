@@ -36,7 +36,7 @@ isn't code-signed yet, so Windows SmartScreen may say the publisher is unknown; 
 PowerShell and compare:
 
 ```powershell
-Get-FileHash .\Lightify_2.3.12_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.13_x64-setup.exe -Algorithm SHA256
 ```
 
 If you'd rather not trust a prebuilt file, [build it yourself](#build-from-source).
@@ -64,6 +64,11 @@ If you'd rather not trust a prebuilt file, [build it yourself](#build-from-sourc
   and checked before it installs, and you choose whether it downloads on its own.
 - **ASCII lava** behind the now-playing view, if you want it, with a full-screen
   screensaver one right-click away.
+- **In your language.** English, Deutsch, Español, Français, Italiano, Nederlands, Polski,
+  Português (Brasil), Русский, 日本語, 简体中文 and 한국어, picked in the installer or in
+  Settings and switched on the spot. It follows Windows' language unless you choose one.
+  The translations are first drafts, marked "preview" until a native speaker has read
+  them; corrections are welcome in [Issues](https://github.com/JunkfoodJon/Lightify/issues).
 - **Light on your PC.** One process; about 80 MB in use while open and around 6 MB once
   minimized.
 
@@ -116,14 +121,17 @@ itself closed and briefly play a few seconds at low volume on your account.
 | `lightify-shell/vendor/` | Two upstream crates with small patches (`librespot-connect`, Slint's software renderer), used through `[patch.crates-io]` |
 | `lightify-core/` | Spotify session, sign-in, Web API client, Beatport client, update check, data models |
 | `lightify-installer/` | Lightify's own installer, updater and uninstaller, and the tools that pack and sign a release |
+| `lightify-i18n/` | The translation layer the app and the installer share: `.po` reader, plural rules, `tr!` / `trn!`, catalog checks |
+| `lightify-shell/translations/`, `lightify-installer/translations/` | The templates (`.pot`) and one catalog per language (`<code>/LC_MESSAGES/*.po`), compiled into the exe |
+| `scripts/extract-strings.py` | Regenerates the templates from the source (`@tr` in `.slint`, `tr!` / `trn!` in Rust) |
 | `lightify-shell/installer/` | The old Inno Setup script, kept for reference; no longer used |
 
 The Downloads panel talks to an optional, separately distributed downloader bridge that
 is **not** part of this repository. In builds from this source, downloading reports that
 the downloader bridge wasn't found; everything else works as normal.
 
-A few code comments refer to design notes (`PARITY.md`, `UI-PLAN.md`) that are kept out of
-this repository.
+A few code comments refer to design notes (`PARITY.md`, `UI-PLAN.md`, `LANGUAGE-PLAN.md`)
+that are kept out of this repository.
 
 ## Privacy and security
 

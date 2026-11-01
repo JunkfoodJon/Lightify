@@ -1,5 +1,12 @@
 fn main() {
-    slint_build::compile("ui/installer.slint").unwrap();
+    // Translations, as lightify-shell/build.rs does them (LANGUAGE-PLAN.md).
+    let bundle = lightify_i18n::build::emit("lightify-installer");
+    let mut config = slint_build::CompilerConfiguration::new()
+        .with_default_translation_context(slint_build::DefaultTranslationContext::None);
+    if let Some(dir) = bundle {
+        config = config.with_bundled_translations(dir);
+    }
+    slint_build::compile_with_config("ui/installer.slint", config).unwrap();
 
     // The version shown before a payload is read (and in the exe's VERSIONINFO) is the
     // app's own, read from lightify-shell/Cargo.toml so the two can never drift. The

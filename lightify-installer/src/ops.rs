@@ -11,6 +11,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use lightify_i18n::tr;
 use lightify_installer::payload::{self, Header, PayloadReader};
 
 use crate::win::{self, Hive, Key};
@@ -83,18 +84,18 @@ pub fn validate_dir(p: &Path) -> Result<(), String> {
     let absolute = (s.len() >= 3 && s.as_bytes()[1] == b':' && (s.as_bytes()[2] == b'\\' || s.as_bytes()[2] == b'/'))
         || s.starts_with(r"\\");
     if !absolute || s.contains('%') {
-        return Err("Choose a full folder path, like C:\\Programs\\Lightify.".into());
+        return Err(tr!("Choose a full folder path, like C:\\Programs\\Lightify."));
     }
     if p.parent().is_none() || s.len() <= 3 {
-        return Err("Pick a folder, not the root of a drive.".into());
+        return Err(tr!("Pick a folder, not the root of a drive."));
     }
     if let Some(windir) = std::env::var_os("SystemRoot") {
         if win::path_within(p, Path::new(&windir)) {
-            return Err("Lightify can't be installed inside the Windows folder.".into());
+            return Err(tr!("Lightify can't be installed inside the Windows folder."));
         }
     }
     if s.contains(['<', '>', '|', '?', '*', '"']) {
-        return Err("That folder name has characters Windows doesn't allow.".into());
+        return Err(tr!("That folder name has characters Windows doesn't allow."));
     }
     Ok(())
 }
@@ -133,6 +134,18 @@ fn user_data_dirs() -> Vec<PathBuf> {
         }
     }
     v
+}
+
+/// Lightify's own data folder, where the language setting lives: the sandbox's, else
+/// `LIGHTIFY_DATA_DIR`, else lightify-core's default (config.rs `data_dir()`).
+pub fn app_data_dir() -> Option<PathBuf> {
+    if let Some(sb) = sandbox() {
+        return Some(sb.join("data").join("Lightify"));
+    }
+    std::env::var_os("LIGHTIFY_DATA_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_dir().map(|d| d.join("Lightify")))
 }
 
 /// Where lightify-core's updater keeps downloaded installers.
@@ -244,7 +257,7 @@ pub fn wait_helpers(dir: &Path, timeout_ms: u32) {
 
 pub fn launch_app(dir: &Path) -> Result<(), String> {
     let exe = dir.join(APP_EXE);
-    win::spawn_detached(&exe, &[], Some(dir)).map_err(|e| format!("could not start {}: {e}", exe.display()))
+    win::spawn_detached(&exe, &[], Some(dir)).map_err(|e| tr!("could not start {}: {}", exe.display(), e))
 }
 
 // ── Install ─────────────────────────────────────────────────────────────────
@@ -266,9 +279,10 @@ pub enum Ev {
 }
 
 pub const STEP_APP: &str = "Lightify.exe";
-pub const STEP_BRIDGE: &str = "Downloader bridge";
+// Shown translated (`steps_model`); matched here in English, so only marked.
+pub const STEP_BRIDGE: &str = lightify_i18n::tr_noop!("Downloader bridge");
 pub const STEP_FFMPEG: &str = "ffmpeg";
-pub const STEP_FINAL: &str = "Shortcuts and uninstall entry";
+pub const STEP_FINAL: &str = lightify_i18n::tr_noop!("Shortcuts and uninstall entry");
 
 /// The per-step list shown while installing, for what this payload carries.
 pub fn step_labels(h: &Header) -> Vec<String> {
@@ -321,7 +335,7 @@ fn swap_in(tmp: &Path, target: &Path) -> io::Result<()> {
             }
             i += 1;
             if i > 20 {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{name} is in use")));
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, tr!("{} is in use", name)));
             }
         }
     }
@@ -359,7 +373,7 @@ fn today_yyyymmdd() -> String {
 
 fn io_err(what: &Path, e: io::Error) -> String {
     match e.kind() {
-        io::ErrorKind::PermissionDenied => format!("{}: access denied", what.display()),
+        io::ErrorKind::PermissionDenied => tr!("{}: access denied", what.display()),
         _ => format!("{}: {e}", what.display()),
     }
 }
@@ -371,9 +385,9 @@ fn run_inno_uninstaller(ex: &Existing) -> Result<(), String> {
     let status = std::process::Command::new(un)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         .status()
-        .map_err(|e| format!("could not run the old uninstaller {}: {e}", un.display()))?;
+        .map_err(|e| tr!("could not run the old uninstaller {}: {}", un.display(), e))?;
     if !status.success() {
-        return Err(format!("the old uninstaller {} failed ({status})", un.display()));
+        return Err(tr!("the old uninstaller {} failed ({})", un.display(), status));
     }
     // Inno's first stage re-runs itself from %TEMP%; wait for the real work to end.
     let hive = hive_for(ex.all_users);
@@ -389,15 +403,15 @@ fn run_inno_uninstaller(ex: &Existing) -> Result<(), String> {
 
 pub fn install(plan: &Plan, exe: &Path, ev: &mut dyn FnMut(Ev)) -> Result<(), String> {
     let mut reader = PayloadReader::open(exe)
-        .map_err(|e| format!("this Setup file is damaged ({e}) - download it again"))?
-        .ok_or("this copy of Setup has no files in it (it is the uninstaller) - download Setup from lightify.stream")?;
+        .map_err(|e| tr!("this Setup file is damaged ({}) - download it again", e))?
+        .ok_or_else(|| tr!("this copy of Setup has no files in it (it is the uninstaller) - download Setup from lightify.stream"))?;
     let header = reader.header.clone();
     let labels = step_labels(&header);
     let last = labels.len() - 1;
     let dir = &plan.dir;
 
     if let Some(old) = &plan.migrate {
-        ev(Ev::Current("removing the previous installer".into()));
+        ev(Ev::Current(tr!("removing the previous installer")));
         run_inno_uninstaller(old)?;
     }
 
@@ -426,7 +440,7 @@ pub fn install(plan: &Plan, exe: &Path, ev: &mut dyn FnMut(Ev)) -> Result<(), St
             cur_step = step;
             ev(Ev::Step(step, 1));
         }
-        ev(Ev::Current(format!("copying {}", entry.name)));
+        ev(Ev::Current(tr!("copying {}", entry.name)));
         let target = dir.join(&entry.name);
         let tmp = dir.join(format!("{}.lfy-new", entry.name));
         let mut f = File::create(&tmp).map_err(|e| io_err(&tmp, e))?;
@@ -451,7 +465,7 @@ pub fn install(plan: &Plan, exe: &Path, ev: &mut dyn FnMut(Ev)) -> Result<(), St
 
     // uninstall.exe = this stub without its payload.
     ev(Ev::Step(last, 1));
-    ev(Ev::Current(format!("writing {UNINSTALL_EXE}")));
+    ev(Ev::Current(tr!("writing {}", UNINSTALL_EXE)));
     let un = dir.join(UNINSTALL_EXE);
     let un_tmp = dir.join(format!("{UNINSTALL_EXE}.lfy-new"));
     payload::write_stub(exe, &un_tmp).map_err(|e| io_err(&un, e))?;
@@ -460,10 +474,10 @@ pub fn install(plan: &Plan, exe: &Path, ev: &mut dyn FnMut(Ev)) -> Result<(), St
     send_progress(done, ev);
 
     if !plan.update {
-        ev(Ev::Current("creating shortcuts".into()));
+        ev(Ev::Current(tr!("creating shortcuts")));
         write_shortcuts(plan)?;
     }
-    ev(Ev::Current("registering with Windows".into()));
+    ev(Ev::Current(tr!("registering with Windows")));
     let mut files: Vec<String> = header.files.iter().map(|f| f.name.clone()).collect();
     files.push(UNINSTALL_EXE.into());
     // Keep the names the version being replaced recorded: a file it shipped that this
@@ -479,18 +493,18 @@ pub fn install(plan: &Plan, exe: &Path, ev: &mut dyn FnMut(Ev)) -> Result<(), St
     write_entry(plan, &header.version, &files, header.total_size() + stub)?;
     ev(Ev::Step(last, 2));
     ev(Ev::Progress(1.0));
-    ev(Ev::Current("done".into()));
+    ev(Ev::Current(tr!("done")));
     Ok(())
 }
 
 fn write_shortcuts(plan: &Plan) -> Result<(), String> {
     let dir = &plan.dir;
     let app = dir.join(APP_EXE);
-    let sm = start_menu_dir(plan.all_users).ok_or("could not find the Start menu folder")?;
+    let sm = start_menu_dir(plan.all_users).ok_or_else(|| tr!("could not find the Start menu folder"))?;
     win::create_shortcut(&sm.join("Lightify.lnk"), &app, "", dir, &app, "Lightify")?;
     win::create_shortcut(&sm.join("Uninstall Lightify.lnk"), &dir.join(UNINSTALL_EXE), "--uninstall", dir, &app, "Uninstall Lightify")?;
     if plan.desktop {
-        let desk = desktop_dir(plan.all_users).ok_or("could not find the desktop folder")?;
+        let desk = desktop_dir(plan.all_users).ok_or_else(|| tr!("could not find the desktop folder"))?;
         win::create_shortcut(&desk.join("Lightify.lnk"), &app, "", dir, &app, "Lightify")?;
     }
     Ok(())
@@ -527,9 +541,9 @@ pub struct Removal {
 }
 
 pub fn removal_steps(wipe: bool) -> Vec<String> {
-    let mut v = vec!["App files".to_string(), "Shortcuts and uninstall entry".to_string()];
+    let mut v = vec![lightify_i18n::tr_noop!("App files").to_string(), STEP_FINAL.to_string()];
     if wipe {
-        v.push("Settings and Spotify sign-in".into());
+        v.push(lightify_i18n::tr_noop!("Settings and Spotify sign-in").into());
     }
     v
 }
@@ -622,7 +636,7 @@ pub fn uninstall(r: &Removal, ev: &mut dyn FnMut(Ev)) -> Result<Vec<String>, Str
     for (i, n) in names.iter().enumerate() {
         let p = dir.join(n);
         if p.is_file() {
-            ev(Ev::Current(format!("removing {n}")));
+            ev(Ev::Current(tr!("removing {}", n)));
             if fs::remove_file(&p).is_err() {
                 leftovers.push(p.to_string_lossy().into_owned());
             }
@@ -633,7 +647,7 @@ pub fn uninstall(r: &Removal, ev: &mut dyn FnMut(Ev)) -> Result<Vec<String>, Str
     ev(Ev::Step(0, 2));
 
     ev(Ev::Step(1, 1));
-    ev(Ev::Current("removing shortcuts".into()));
+    ev(Ev::Current(tr!("removing shortcuts")));
     if let Some(sm) = start_menu_dir(r.all_users) {
         let _ = fs::remove_file(sm.join("Lightify.lnk"));
         let _ = fs::remove_file(sm.join("Uninstall Lightify.lnk"));
@@ -645,7 +659,7 @@ pub fn uninstall(r: &Removal, ev: &mut dyn FnMut(Ev)) -> Result<Vec<String>, Str
             let _ = fs::remove_file(lnk);
         }
     }
-    ev(Ev::Current("removing the Apps entry".into()));
+    ev(Ev::Current(tr!("removing the Apps entry")));
     win::delete_key_tree(hive_for(r.all_users), &own_subkey())?;
     if let Some(u) = updates_dir() {
         let _ = fs::remove_dir_all(&u);
@@ -660,7 +674,7 @@ pub fn uninstall(r: &Removal, ev: &mut dyn FnMut(Ev)) -> Result<Vec<String>, Str
         ev(Ev::Step(2, 1));
         let keep = protected_paths();
         for d in user_data_dirs() {
-            ev(Ev::Current(format!("removing {}", d.display())));
+            ev(Ev::Current(tr!("removing {}", d.display())));
             if let Err(e) = remove_tree_except(&d, &keep) {
                 leftovers.push(format!("{} ({e})", d.display()));
             }
@@ -668,7 +682,7 @@ pub fn uninstall(r: &Removal, ev: &mut dyn FnMut(Ev)) -> Result<Vec<String>, Str
         ev(Ev::Step(2, 2));
     }
     ev(Ev::Progress(1.0));
-    ev(Ev::Current("done".into()));
+    ev(Ev::Current(tr!("done")));
     Ok(leftovers)
 }
 

@@ -350,7 +350,7 @@ pub fn download_path() -> String {
 pub async fn set_download_path(path: &str) -> Result<String, String> {
     let path = path.trim().to_string();
     if path.is_empty() {
-        return Err("Download path cannot be empty".to_string());
+        return Err(lightify_i18n::tr!("Download path cannot be empty"));
     }
     std::fs::create_dir_all(&path).map_err(|e| format!("Failed to create download path {path}: {e}"))?;
     let dir = lightify_core::config::data_dir();

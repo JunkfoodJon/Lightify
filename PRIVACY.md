@@ -40,7 +40,8 @@ Settings → Apps.
 | `lightify-audio-cache\` | The playback engine's own saved Spotify sign-in and volume. No audio is stored. |
 | `thumbs\` | Cover art, resized, so lists open quickly. |
 | `lightify_shell_library.json`, `lightify_shell_queue.json`, `lightify_shell_resume.json`, `lightify_shell_recent_searches.json`, `lightify_shell_mini.txt` | Your library list, your queue, where you left off, your recent searches and your last mini-player size, so they're there next time. |
-| `lightify_shell_window.json`, `lightify_shell_mode.txt`, `lightify_shell_lava.txt`, `lightify_shell_autoupdate.txt`, `lightify_shell_update_seen.txt` | Where the window sits and its size, whether you were in Local mode, and your ASCII lava and update settings. |
+| `lightify_shell_window.json`, `lightify_shell_mode.txt`, `lightify_shell_lava.txt`, `lightify_shell_autoupdate.txt`, `lightify_shell_update_seen.txt`, `lightify_shell_lang.txt` | Where the window sits and its size, whether you were in Local mode, your ASCII lava and update settings, and the language you picked. |
+| `lightify_shell_history.json`, `lightify_shell_local_history.json` | The songs you played, for the Recent panel: one list for Spotify, one for Local mode. |
 | `lightify_shell_local_folders.json`, `lightify_shell_local_index.json`, `lightify_shell_local_playlists.json`, `lightify_shell_local_filters.json` | Local mode: the folders and files you added, the list of tracks found in them (each file's path, length and tags: title, artist, album, genre, track and disc number), your local playlists and your filters. |
 | `lightify_bp_matches.json` | Which Spotify track matched each Beatport chart entry, so a chart doesn't have to be looked up again. |
 | `lightify-shell-audio.log`, `lightify-shell-media.log` | Diagnostic logs from the playback engine and Windows' media controls. They stay on your PC. |

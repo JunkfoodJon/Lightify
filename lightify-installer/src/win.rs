@@ -220,7 +220,7 @@ pub fn run_elevated(exe: &Path, args: &[String], wait: bool) -> Result<Elevated,
             if err.raw_os_error() == Some(1223) {
                 return Ok(Elevated::Declined);
             }
-            return Err(format!("could not start the elevated installer: {err}"));
+            return Err(lightify_i18n::tr!("could not start the elevated installer: {}", err));
         }
         if info.hProcess.is_null() {
             return Ok(Elevated::Started);

@@ -1,0 +1,1771 @@
+# lightify-shell — ja translation. MACHINE DRAFT: needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-shell\n"
+"Language: ja\n"
+"Language-Team: machine draft — needs native review\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: ui/app.slint:715
+msgid "finding"
+msgstr "検索中"
+
+#: ui/app.slint:897
+msgctxt "sort order"
+msgid "Recent"
+msgstr "最近"
+
+#: ui/app.slint:1007
+msgid "artist · top result"
+msgstr "アーティスト · トップ結果"
+
+#: ui/app.slint:1007
+msgid "song · top result"
+msgstr "曲 · トップ結果"
+
+#: ui/app.slint:1008
+msgid "album · top result"
+msgstr "アルバム · トップ結果"
+
+#: ui/app.slint:1008
+msgid "playlist · top result"
+msgstr "プレイリスト · トップ結果"
+
+#: ui/app.slint:1009
+msgid "artist"
+msgstr "アーティスト"
+
+#: ui/app.slint:1009
+msgid "song"
+msgstr "曲"
+
+#: ui/app.slint:1009
+msgid "album"
+msgstr "アルバム"
+
+#: ui/app.slint:1009
+msgid "playlist"
+msgstr "プレイリスト"
+
+#: ui/app.slint:1206 ui/app.slint:2229
+msgid "All"
+msgstr "すべて"
+
+#: ui/app.slint:1207 src/main.rs:11463
+msgid "Songs"
+msgstr "曲"
+
+#: ui/app.slint:1208 src/local_ui.rs:1300 src/main.rs:11465
+msgid "Artists"
+msgstr "アーティスト"
+
+#: ui/app.slint:1209 src/local_ui.rs:1310 src/main.rs:11467
+msgid "Albums"
+msgstr "アルバム"
+
+#: ui/app.slint:1210 src/main.rs:11469
+msgid "Playlists"
+msgstr "プレイリスト"
+
+#: ui/app.slint:1463
+msgid "Local"
+msgstr "ローカル"
+
+#: ui/app.slint:1842
+msgid "any"
+msgstr "指定なし"
+
+#: ui/app.slint:2197
+msgid "Filter the library"
+msgstr "ライブラリを絞り込む"
+
+#: ui/app.slint:2215
+msgid "Filters"
+msgstr "フィルター"
+
+#: ui/app.slint:2223
+msgid "Reset"
+msgstr "リセット"
+
+#: ui/app.slint:2226
+msgid "SHOW"
+msgstr "表示"
+
+#: ui/app.slint:2229
+msgid "Music only"
+msgstr "音楽のみ"
+
+#: ui/app.slint:2229
+msgid "Long sets"
+msgstr "長いセット"
+
+#: ui/app.slint:2232
+msgid "Hides clips under 1:00 — songs, long tracks and sets stay."
+msgstr "1:00未満のクリップを非表示にします — 曲、長い曲、セットは表示されたままです。"
+
+#: ui/app.slint:2232
+msgid "Only tracks of 20:00 or more (mixes, sets)."
+msgstr "20:00以上の曲のみ（ミックス、セット）。"
+
+#: ui/app.slint:2235
+msgid "LENGTH"
+msgstr "長さ"
+
+#: ui/app.slint:2240
+msgid "Shortest"
+msgstr "最短"
+
+#: ui/app.slint:2245
+msgid "Longest"
+msgstr "最長"
+
+#: ui/app.slint:2250
+msgid "Couldn't read that — try 90, 1:30, 5m or 1:02:00."
+msgstr "読み取れませんでした — 90、1:30、5m、1:02:00 のように入力してください。"
+
+#: ui/app.slint:2250
+msgid "Type 90, 1:30, 5m or 1:02:00 · empty = any."
+msgstr "90、1:30、5m、1:02:00 の形式で入力 · 空欄 = 指定なし。"
+
+#: ui/app.slint:2254
+msgid "FILE TYPES"
+msgstr "ファイル形式"
+
+#: ui/app.slint:2308
+msgid "TITLE"
+msgstr "タイトル"
+
+#: ui/app.slint:2309
+msgid "ARTIST"
+msgstr "アーティスト"
+
+#: ui/app.slint:2310
+msgid "ALBUM"
+msgstr "アルバム"
+
+#: ui/app.slint:2311
+msgid "TIME"
+msgstr "時間"
+
+#: ui/app.slint:2377 ui/app.slint:2485 ui/app.slint:4293 ui/app.slint:4294
+#: ui/app.slint:4700 src/main.rs:10890 src/main.rs:15602
+msgid "Nothing playing"
+msgstr "再生していません"
+
+#: ui/app.slint:2519
+msgid "Drop to add to your local library"
+msgstr "ドロップしてローカルライブラリに追加"
+
+#: ui/app.slint:2521
+msgid "Files stay where they are — Lightify only indexes them. Drop a folder to add everything in it."
+msgstr "ファイルは元の場所に残ります — Lightifyはインデックスを作成するだけです。フォルダーをドロップすると中身がすべて追加されます。"
+
+#: ui/app.slint:2568
+msgid "Find music on this PC"
+msgstr "このPCの音楽を探す"
+
+#: ui/app.slint:2576
+msgid "// looking in the usual places…"
+msgstr "// よく使われる場所を検索中…"
+
+#: ui/app.slint:2576
+msgid "// found in the usual places"
+msgstr "// よく使われる場所で見つかりました"
+
+#: ui/app.slint:2577
+msgid "No music found in the usual folders — add a folder or files below."
+msgstr "よく使われるフォルダーに音楽が見つかりません — 下からフォルダーまたはファイルを追加してください。"
+
+#: ui/app.slint:2599
+msgid "added"
+msgstr "追加済み"
+
+#: ui/app.slint:2607
+msgid "Add a folder…"
+msgstr "フォルダーを追加…"
+
+#: ui/app.slint:2608
+msgid "Add files…"
+msgstr "ファイルを追加…"
+
+#: ui/app.slint:2661
+msgid "Connecting…"
+msgstr "接続中…"
+
+#: ui/app.slint:2762 src/main.rs:2161 src/main.rs:2430 src/main.rs:3184
+#: src/main.rs:3284 src/main.rs:3367 src/main.rs:3652 src/main.rs:3760
+#: src/main.rs:11758 src/main.rs:11817 src/main.rs:11905 src/main.rs:15662
+msgid "No queued tracks"
+msgstr "再生キューに曲がありません"
+
+#: ui/app.slint:2780
+msgid "Select a genre to load a Beatport chart"
+msgstr "ジャンルを選んでBeatportのチャートを読み込みます"
+
+#: ui/app.slint:2785 src/main.rs:3840
+msgid "Loading…"
+msgstr "読み込み中…"
+
+#: ui/app.slint:2788
+msgid "Starting…"
+msgstr "起動中…"
+
+#: ui/app.slint:2798 ui/app.slint:5440 src/main.rs:3838
+msgid "Checking…"
+msgstr "確認中…"
+
+#: ui/app.slint:2901 src/main.rs:2141 src/main.rs:2298 src/main.rs:2304
+#: src/main.rs:2911 src/main.rs:7233 src/main.rs:7411 src/main.rs:8763
+#: src/main.rs:10274 src/main.rs:13497 src/main.rs:15260
+msgid "Liked Songs"
+msgstr "お気に入りの曲"
+
+#: ui/app.slint:3430 src/main.rs:13497
+msgid "Library"
+msgstr "ライブラリ"
+
+#: ui/app.slint:3431 src/main.rs:13594
+msgid "Search"
+msgstr "検索"
+
+#: ui/app.slint:3438
+msgid "// library · {}"
+msgstr "// ライブラリ · {}"
+
+#: ui/app.slint:3494
+msgid "// tracks"
+msgstr "// 曲"
+
+#: ui/app.slint:3567 ui/app.slint:3741 src/main.rs:13962 src/main.rs:14080
+msgid "No tracks to show"
+msgstr "表示する曲がありません"
+
+#: ui/app.slint:3626
+msgid "What do you want to hear?"
+msgstr "何を聴きたいですか？"
+
+#: ui/app.slint:3757
+msgid "Searching…"
+msgstr "検索中…"
+
+#: ui/app.slint:3758
+msgid "Search Spotify"
+msgstr "Spotifyを検索"
+
+#: ui/app.slint:3759
+msgid "No results for “{}”"
+msgstr "「{}」の検索結果はありません"
+
+#: ui/app.slint:3768
+msgid "Songs, artists, albums and playlists. Your recent searches will show up here."
+msgstr "曲、アーティスト、アルバム、プレイリストを検索できます。最近の検索はここに表示されます。"
+
+#: ui/app.slint:3769
+msgid "Check the spelling, or try fewer or different words."
+msgstr "スペルを確認するか、キーワードを減らすか変えてお試しください。"
+
+#: ui/app.slint:3972
+msgid "Select all"
+msgstr "すべて選択"
+
+#: ui/app.slint:3977
+msgid "Create playlist"
+msgstr "プレイリストを作成"
+
+#: ui/app.slint:4010
+msgid "OPEN ↗"
+msgstr "開く ↗"
+
+#: ui/app.slint:4055
+msgid "{n} match"
+msgid_plural "{n} matches"
+msgstr[0] "{n}件一致"
+
+#: ui/app.slint:4295
+msgid "Pick a playlist or a song to start"
+msgstr "プレイリストまたは曲を選んで再生を開始"
+
+#: ui/app.slint:4562 ui/app.slint:4883 src/main.rs:4335
+msgid "Queue"
+msgstr "再生キュー"
+
+#: ui/app.slint:4562 ui/app.slint:4884
+msgid "Recent"
+msgstr "最近"
+
+#: ui/app.slint:4562 ui/app.slint:4885
+msgid "Downloads"
+msgstr "ダウンロード"
+
+#: ui/app.slint:4582 src/main.rs:11523
+msgid "Clear"
+msgstr "クリア"
+
+#: ui/app.slint:4619
+msgid "Finding on Spotify"
+msgstr "Spotifyで検索中"
+
+#: ui/app.slint:4667 src/main.rs:12144 src/main.rs:15671
+msgid "No downloads queued"
+msgstr "ダウンロード待ちはありません"
+
+#: ui/app.slint:4668
+msgid "Right-click a song or playlist and choose Download."
+msgstr "曲またはプレイリストを右クリックして「ダウンロード」を選択してください。"
+
+#: ui/app.slint:4702
+msgid "Click a track to play it — the rest of its list follows here. Right-click a track and choose Add to queue to play it next."
+msgstr "曲をクリックすると再生され、そのリストの残りの曲がここに続きます。次に再生するには、曲を右クリックして「再生キューに追加」を選択してください。"
+
+#: ui/app.slint:4725
+msgid "No local tracks played yet"
+msgstr "まだローカルの曲を再生していません"
+
+#: ui/app.slint:4727
+msgid "Files you play in Local mode will show up here."
+msgstr "ローカルモードで再生したファイルがここに表示されます。"
+
+#: ui/app.slint:4798
+msgid "Create playlist from queue"
+msgstr "再生キューからプレイリストを作成"
+
+#: ui/app.slint:4820
+msgid "Right-click any song and choose Add to queue."
+msgstr "曲を右クリックして「再生キューに追加」を選択してください。"
+
+#: ui/app.slint:4821
+msgid "Songs you play will show up here."
+msgstr "再生した曲がここに表示されます。"
+
+#: ui/app.slint:4907
+msgid "{} ready"
+msgstr "バージョン{}の準備完了"
+
+#: ui/app.slint:4915 ui/app.slint:5162
+msgid "Restart"
+msgstr "再起動"
+
+#: ui/app.slint:4925
+msgid "updating… {}%"
+msgstr "更新中… {}%"
+
+#: ui/app.slint:5124
+msgid "Settings"
+msgstr "設定"
+
+#: ui/app.slint:5161
+msgid "// playback engine"
+msgstr "// 再生エンジン"
+
+#: ui/app.slint:5170
+msgid "Lightify decodes audio itself and registers as a Spotify Connect device — the Spotify app is never required."
+msgstr "Lightifyは自身で音声をデコードし、Spotify Connectデバイスとして登録されます — Spotifyアプリは不要です。"
+
+#: ui/app.slint:5177
+msgid "// audio output"
+msgstr "// オーディオ出力"
+
+#: ui/app.slint:5217
+msgid "No audio outputs found"
+msgstr "オーディオ出力が見つかりません"
+
+#: ui/app.slint:5229
+msgid "// playback device"
+msgstr "// 再生デバイス"
+
+#: ui/app.slint:5230
+msgid "Refresh"
+msgstr "更新"
+
+#: ui/app.slint:5262
+msgid "Select"
+msgstr "選択"
+
+#: ui/app.slint:5278
+msgid "// ascii lava"
+msgstr "// ascii溶岩"
+
+#: ui/app.slint:5284
+msgid "Lava behind now playing"
+msgstr "再生中の画面の背景に溶岩を表示"
+
+#: ui/app.slint:5285
+msgid "Right-click the lava for the screensaver."
+msgstr "溶岩を右クリックするとスクリーンセーバーになります。"
+
+#: ui/app.slint:5313
+msgid "// language"
+msgstr "// 言語"
+
+#: ui/app.slint:5356
+msgid "// poll rate"
+msgstr "// ポーリング間隔"
+
+#: ui/app.slint:5362
+msgid "Slow"
+msgstr "遅い"
+
+#: ui/app.slint:5363
+msgid "Normal"
+msgstr "標準"
+
+#: ui/app.slint:5364
+msgid "Fast"
+msgstr "速い"
+
+#: ui/app.slint:5375
+msgid "// downloader"
+msgstr "// ダウンローダー"
+
+#: ui/app.slint:5381
+msgid "Waiting… (retry)"
+msgstr "待機中…（再試行）"
+
+#: ui/app.slint:5381
+msgid "Connect Spotify Downloader"
+msgstr "Spotifyダウンローダーを接続"
+
+#: ui/app.slint:5396
+msgid "download folder"
+msgstr "ダウンロードフォルダー"
+
+#: ui/app.slint:5421
+msgid "Download folder"
+msgstr "ダウンロードフォルダー"
+
+#: ui/app.slint:5427 ui/app.slint:5826
+msgid "Save"
+msgstr "保存"
+
+#: ui/app.slint:5436
+msgid "// updates"
+msgstr "// アップデート"
+
+#: ui/app.slint:5438
+msgid "Restart now"
+msgstr "今すぐ再起動"
+
+#: ui/app.slint:5439 src/main.rs:14663 src/main.rs:14694 src/main.rs:14716
+#: src/main.rs:14729 src/main.rs:14817 src/main.rs:14853 src/main.rs:14874
+#: src/main.rs:14891
+msgid "Download"
+msgstr "ダウンロード"
+
+#: ui/app.slint:5441
+msgid "Downloading…"
+msgstr "ダウンロード中…"
+
+#: ui/app.slint:5442
+msgid "Check now"
+msgstr "今すぐ確認"
+
+#: ui/app.slint:5454
+msgid "Lightify {} downloaded — restart to finish"
+msgstr "Lightify {}をダウンロードしました — 再起動して完了"
+
+#: ui/app.slint:5455
+msgid "Lightify {} is available"
+msgstr "Lightify {}が利用可能です"
+
+#: ui/app.slint:5456
+msgid "Checking lightify.stream…"
+msgstr "lightify.streamを確認中…"
+
+#: ui/app.slint:5457
+msgid "Downloading Lightify {}"
+msgstr "Lightify {}をダウンロード中"
+
+#: ui/app.slint:5459
+msgid "Lightify {} is up to date"
+msgstr "Lightify {}は最新です"
+
+#: ui/app.slint:5477
+msgid "Mark seen"
+msgstr "既読にする"
+
+#: ui/app.slint:5495
+msgid "Install updates automatically"
+msgstr "アップデートを自動でインストール"
+
+#: ui/app.slint:5516
+msgid "// account"
+msgstr "// アカウント"
+
+#: ui/app.slint:5517
+msgid "Not connected"
+msgstr "未接続"
+
+#: ui/app.slint:5522
+msgid "// about"
+msgstr "// 情報"
+
+#: ui/app.slint:5595
+msgid "Search actions, playlists…"
+msgstr "操作やプレイリストを検索…"
+
+#: ui/app.slint:5625
+msgid "No matches"
+msgstr "一致する項目はありません"
+
+#: ui/app.slint:5716
+msgid "No"
+msgstr "いいえ"
+
+#: ui/app.slint:5726
+msgid "Yes"
+msgstr "はい"
+
+#: ui/app.slint:5767
+msgid "// new playlist"
+msgstr "// 新しいプレイリスト"
+
+#: ui/app.slint:5805
+msgid "Playlist name"
+msgstr "プレイリスト名"
+
+#: ui/app.slint:5814 src/main.rs:14908
+msgid "Cancel"
+msgstr "キャンセル"
+
+#: ui/app.slint:5858
+msgid "// first run"
+msgstr "// 初回設定"
+
+#: ui/app.slint:5859
+msgid "Connect Spotify"
+msgstr "Spotifyに接続"
+
+#: ui/app.slint:5870
+msgid "Go to"
+msgstr "次のURLにアクセス"
+
+#: ui/app.slint:5884
+msgid "Create an app — set the redirect URI to"
+msgstr "アプリを作成 — リダイレクトURIを次のように設定"
+
+#: ui/app.slint:5894
+msgid "Paste your Client ID below and authorise"
+msgstr "下にClient IDを貼り付けて認証"
+
+#: ui/app.slint:5915
+msgid "paste your Spotify Client ID here"
+msgstr "ここにSpotifyのClient IDを貼り付け"
+
+#: ui/app.slint:5935
+msgid "Authorise"
+msgstr "認証"
+
+#: ui/app.slint:5940 src/main.rs:14906
+msgid "Retry"
+msgstr "再試行"
+
+#: src/downloader.rs:353
+msgid "Download path cannot be empty"
+msgstr "ダウンロード先を空にすることはできません"
+
+#: src/local_ui.rs:753 src/local_ui.rs:2037
+msgid "{n} audio file"
+msgid_plural "{n} audio files"
+msgstr[0] "オーディオファイル{n}個"
+
+#: src/local_ui.rs:756 src/local_ui.rs:1051 src/local_ui.rs:1482
+#: src/local_ui.rs:2038
+msgid "{n} folder"
+msgid_plural "{n} folders"
+msgstr[0] "フォルダー{n}個"
+
+#: src/local_ui.rs:759 src/local_ui.rs:2039
+msgid "{n} skipped (not audio)"
+msgid_plural "{n} skipped (not audio)"
+msgstr[0] "{n}個をスキップ（音声以外）"
+
+#: src/local_ui.rs:836
+msgid "Added {n} track to the queue"
+msgid_plural "Added {n} tracks to the queue"
+msgstr[0] "{n}曲を再生キューに追加しました"
+
+#: src/local_ui.rs:915
+msgid "Created “{}”"
+msgstr "「{}」を作成しました"
+
+#: src/local_ui.rs:969
+msgid "Play {n} track"
+msgid_plural "Play {n} tracks"
+msgstr[0] "{n}曲を再生"
+
+#: src/local_ui.rs:969 src/local_ui.rs:1014 src/main.rs:13484 src/main.rs:14661
+#: src/main.rs:14684 src/main.rs:14706 src/main.rs:14725 src/main.rs:14736
+#: src/main.rs:14815 src/main.rs:14843 src/main.rs:14864 src/main.rs:14884
+msgid "Play"
+msgstr "再生"
+
+#: src/local_ui.rs:972 src/main.rs:14686 src/main.rs:14708 src/main.rs:14726
+#: src/main.rs:14737 src/main.rs:14816 src/main.rs:14845 src/main.rs:14866
+#: src/main.rs:14886
+msgid "Add to queue"
+msgstr "再生キューに追加"
+
+#: src/local_ui.rs:975
+msgid "Add to “{}”"
+msgstr "「{}」に追加"
+
+#: src/local_ui.rs:979
+msgid "New playlist from {n} track"
+msgid_plural "New playlist from {n} tracks"
+msgstr[0] "{n}曲から新しいプレイリストを作成"
+
+#: src/local_ui.rs:981
+msgid "New playlist from track"
+msgstr "この曲から新しいプレイリストを作成"
+
+#: src/local_ui.rs:986 src/local_ui.rs:1003 src/local_ui.rs:1020
+msgid "Show in folder"
+msgstr "フォルダーに表示"
+
+#: src/local_ui.rs:990
+msgid "Remove {n} from playlist"
+msgid_plural "Remove {n} from playlist"
+msgstr[0] "{n}曲をプレイリストから削除"
+
+#: src/local_ui.rs:990
+msgid "Remove from playlist"
+msgstr "プレイリストから削除"
+
+#: src/local_ui.rs:1001
+msgid "Play now"
+msgstr "今すぐ再生"
+
+#: src/local_ui.rs:1005
+msgid "Remove from queue"
+msgstr "再生キューから削除"
+
+#: src/local_ui.rs:1016
+msgid "Rename"
+msgstr "名前を変更"
+
+#: src/local_ui.rs:1017
+msgid "Delete playlist"
+msgstr "プレイリストを削除"
+
+#: src/local_ui.rs:1021
+msgid "Remove folder from library"
+msgstr "フォルダーをライブラリから削除"
+
+#: src/local_ui.rs:1024 src/local_ui.rs:1347
+msgid "New playlist"
+msgstr "新しいプレイリスト"
+
+#: src/local_ui.rs:1053
+msgid "Nothing to add — only audio files and folders are taken"
+msgstr "追加するものがありません — 追加できるのはオーディオファイルとフォルダーのみです"
+
+#: src/local_ui.rs:1054
+msgid "Added {0} and {1} — scanning…"
+msgstr "{0}と{1}を追加しました — スキャン中…"
+
+#: src/local_ui.rs:1055 src/local_ui.rs:1056
+msgid "Added {} — scanning…"
+msgstr "{}を追加しました — スキャン中…"
+
+#: src/local_ui.rs:1157
+msgid "{} h {} m"
+msgstr "{}時間{}分"
+
+#: src/local_ui.rs:1157
+msgid "{} m"
+msgstr "{}分"
+
+#: src/local_ui.rs:1161
+msgid "{n} track"
+msgid_plural "{n} tracks"
+msgstr[0] "{n}曲"
+
+#: src/local_ui.rs:1166
+msgid "Added {n} track to “{0}”"
+msgid_plural "Added {n} tracks to “{0}”"
+msgstr[0] "「{0}」に{n}曲を追加しました"
+
+#: src/local_ui.rs:1173
+msgid "// local · scanning {}…"
+msgstr "// ローカル · スキャン中 {}…"
+
+#: src/local_ui.rs:1174
+msgid "// local · scanning…"
+msgstr "// ローカル · スキャン中…"
+
+#: src/local_ui.rs:1175
+msgid "// local · {} of {}"
+msgstr "// ローカル · {} / {}"
+
+#: src/local_ui.rs:1176
+msgid "// local · {}"
+msgstr "// ローカル · {}"
+
+#: src/local_ui.rs:1179
+msgid "{0} of {1} hidden"
+msgid_plural "{0} of {1} hidden"
+msgstr[0] "{1}件中{0}件を非表示"
+
+#: src/local_ui.rs:1181
+msgid "nothing hidden"
+msgstr "非表示なし"
+
+#: src/local_ui.rs:1284 src/local_ui.rs:1361
+msgid "All music"
+msgstr "すべての音楽"
+
+#: src/local_ui.rs:1320
+msgid "Genres"
+msgstr "ジャンル"
+
+#: src/local_ui.rs:1329
+msgid "Folders"
+msgstr "フォルダー"
+
+#: src/local_ui.rs:1339 src/local_ui.rs:1366
+msgid "Recently added"
+msgstr "最近追加した項目"
+
+#: src/local_ui.rs:1341
+msgid "Local playlists"
+msgstr "ローカルプレイリスト"
+
+#: src/local_ui.rs:1398
+msgid "{n} album"
+msgid_plural "{n} albums"
+msgstr[0] "アルバム{n}枚"
+
+#: src/local_ui.rs:1408
+msgid "Looking for music…"
+msgstr "音楽を探しています…"
+
+#: src/local_ui.rs:1410
+msgid "No music yet. Click + (top left) to find music on this PC, or drop audio files and folders here."
+msgstr "まだ音楽がありません。+（左上）をクリックしてこのPCの音楽を探すか、ここにオーディオファイルやフォルダーをドロップしてください。"
+
+#: src/local_ui.rs:1413
+msgid "Nothing here matches the filter."
+msgstr "フィルターに一致する項目はありません。"
+
+#: src/local_ui.rs:1415
+msgid "This playlist is empty — drag tracks onto it in the list on the left, or right-click a track."
+msgstr "このプレイリストは空です — 左側のリストにあるこのプレイリストへ曲をドラッグするか、曲を右クリックしてください。"
+
+#: src/local_ui.rs:1417
+msgid "Nothing here."
+msgstr "何もありません。"
+
+#: src/local_ui.rs:1467
+msgid "{}{} tracks"
+msgid_plural "{}{} tracks"
+msgstr[0] "{}{}曲"
+
+#: src/local_ui.rs:1482
+msgid "Add {} · {}"
+msgstr "{} · {}を追加"
+
+#: src/local_ui.rs:1543
+msgid "A new local playlist"
+msgstr "新しいローカルプレイリスト"
+
+#: src/local_ui.rs:1545
+msgid "{n} track for a new local playlist"
+msgid_plural "{n} tracks for a new local playlist"
+msgstr[0] "新しいローカルプレイリスト用の{n}曲"
+
+#: src/local_ui.rs:1547
+msgid "Rename the playlist"
+msgstr "プレイリスト名を変更"
+
+#: src/local_ui.rs:1737
+msgid "Can’t play “{}” — {}"
+msgstr "「{}」を再生できません — {}"
+
+#: src/local_ui.rs:1894
+msgid "Add a music folder to Lightify"
+msgstr "Lightifyに音楽フォルダーを追加"
+
+#: src/local_ui.rs:1896
+msgid "Add music files to Lightify"
+msgstr "Lightifyに音楽ファイルを追加"
+
+#: src/local_ui.rs:1896
+msgid "Audio files"
+msgstr "オーディオファイル"
+
+#: src/main.rs:1465
+msgid "Playlists error — {}"
+msgstr "プレイリストのエラー — {}"
+
+#: src/main.rs:1655 src/main.rs:1754 src/main.rs:1824 src/main.rs:1900
+msgid "Spotify rate limit — pausing polling for {}"
+msgstr "Spotifyのレート制限 — ポーリングを{}停止します"
+
+#: src/main.rs:1857 src/main.rs:1989 src/main.rs:4868
+msgid "Spotify rate limit — resuming in {}"
+msgstr "Spotifyのレート制限 — {}後に再開します"
+
+#: src/main.rs:1885
+msgid "Offline — reconnecting (next try in {})"
+msgstr "オフライン — 再接続中（{}後に再試行）"
+
+#: src/main.rs:2029 src/main.rs:4892
+msgid "Spotify rate limit — pausing for {}"
+msgstr "Spotifyのレート制限 — {}一時停止します"
+
+#: src/main.rs:2031 src/main.rs:4412 src/main.rs:4894
+msgid "Search — {}"
+msgstr "検索 — {}"
+
+#: src/main.rs:2102
+msgid "Give the playlist a name"
+msgstr "プレイリストに名前を付けてください"
+
+#: src/main.rs:2134 src/main.rs:8482
+msgid "That list just changed — try again"
+msgstr "リストが変更されました — もう一度お試しください"
+
+#: src/main.rs:2161 src/main.rs:3284 src/main.rs:3299 src/main.rs:11732
+#: src/main.rs:11758 src/main.rs:11837 src/main.rs:15663
+msgid "No recent tracks yet"
+msgstr "最近再生した曲はまだありません"
+
+#: src/main.rs:2183 src/main.rs:4798 src/main.rs:15761
+msgid "Delete “{}” from your Spotify library?"
+msgstr "「{}」をSpotifyライブラリから削除しますか？"
+
+#: src/main.rs:2192 src/main.rs:4800 src/main.rs:15759
+msgid "DELETE PLAYLIST"
+msgstr "プレイリストを削除"
+
+#: src/main.rs:2204
+msgid "Resuming {}…"
+msgstr "{}を再開中…"
+
+#: src/main.rs:2206 src/main.rs:4954
+msgid "Resume — {}"
+msgstr "再開 — {}"
+
+#: src/main.rs:2225
+msgid "Playback — {}"
+msgstr "再生 — {}"
+
+#: src/main.rs:2259
+msgid "Next — {}"
+msgstr "次へ — {}"
+
+#: src/main.rs:2276
+msgid "Prev — {}"
+msgstr "前へ — {}"
+
+#: src/main.rs:2299
+msgid "Loading Liked Songs…"
+msgstr "お気に入りの曲を読み込み中…"
+
+#: src/main.rs:2317
+msgid "Loading {}…"
+msgstr "{}を読み込み中…"
+
+#: src/main.rs:2346
+msgid "That track is no longer in the list"
+msgstr "その曲はリストにありません"
+
+#: src/main.rs:2436 src/main.rs:2546 src/main.rs:3476 src/main.rs:3602
+#: src/main.rs:3668 src/main.rs:4036 src/main.rs:4219 src/main.rs:4367
+#: src/main.rs:4444 src/main.rs:4488 src/main.rs:4655 src/main.rs:4768
+msgid "Play — {}"
+msgstr "再生 — {}"
+
+#: src/main.rs:2576
+msgid "Album — {}"
+msgstr "アルバム — {}"
+
+#: src/main.rs:2635
+msgid "Shuffle — {}"
+msgstr "シャッフル — {}"
+
+#: src/main.rs:2663
+msgid "Repeat — {}"
+msgstr "リピート — {}"
+
+#: src/main.rs:2681 src/main.rs:4000 src/main.rs:4312 src/main.rs:4457
+#: src/main.rs:4845
+msgid "Added to queue"
+msgstr "再生キューに追加しました"
+
+#: src/main.rs:2683 src/main.rs:3304
+msgid "Queue — {}"
+msgstr "再生キュー — {}"
+
+#: src/main.rs:2786
+msgid "No track playing"
+msgstr "再生中の曲はありません"
+
+#: src/main.rs:2797 src/main.rs:4009
+msgid "Saved to Liked Songs"
+msgstr "お気に入りの曲に追加しました"
+
+#: src/main.rs:2797
+msgid "Removed from Liked Songs"
+msgstr "お気に入りの曲から削除しました"
+
+#: src/main.rs:2802
+msgid "Like — {}"
+msgstr "お気に入り — {}"
+
+#: src/main.rs:2823
+msgid "Seek — {}"
+msgstr "シーク — {}"
+
+#: src/main.rs:2840
+msgid "Volume — {}"
+msgstr "音量 — {}"
+
+#: src/main.rs:2883
+msgid "Loading recent…"
+msgstr "最近の再生を読み込み中…"
+
+#: src/main.rs:2891 src/main.rs:2964
+msgid "Loading downloads…"
+msgstr "ダウンロードを読み込み中…"
+
+#: src/main.rs:2924 src/main.rs:2940
+msgid "Nothing to download on that row"
+msgstr "その行にはダウンロードできるものがありません"
+
+#: src/main.rs:2947 src/main.rs:3521
+msgid "Matching “{}” on Spotify…"
+msgstr "Spotifyで「{}」を照合中…"
+
+#: src/main.rs:2953
+msgid "No Spotify match to download for {}"
+msgstr "{}に一致するSpotifyの曲がないためダウンロードできません"
+
+#: src/main.rs:2954 src/main.rs:4141
+msgid "Beatport — {}"
+msgstr "Beatport — {}"
+
+#: src/main.rs:2985 src/main.rs:2997 src/main.rs:3009
+msgid "That download is no longer listed"
+msgstr "そのダウンロードはリストにありません"
+
+#: src/main.rs:3020
+msgid "Waiting…"
+msgstr "待機中…"
+
+#: src/main.rs:3035
+msgid "Downloader sign-in started — open Spotify and pick OnTheSpot in the device list. If Windows asked about the firewall, make sure both Private and Public networks are allowed — it only checks Private by default."
+msgstr "ダウンローダーのログインを開始しました — Spotifyを開き、デバイス一覧からOnTheSpotを選んでください。Windowsからファイアウォールについて確認された場合は、プライベートとパブリックの両方のネットワークを許可してください — 既定ではプライベートのみがオンになっています。"
+
+#: src/main.rs:3045
+msgid "Downloader setup failed — {}"
+msgstr "ダウンローダーの設定に失敗しました — {}"
+
+#: src/main.rs:3103
+msgid "Download path saved"
+msgstr "ダウンロード先を保存しました"
+
+#: src/main.rs:3105
+msgid "Failed to set download path — {}"
+msgstr "ダウンロード先を設定できませんでした — {}"
+
+#: src/main.rs:3124 src/main.rs:3329
+msgid "Lightify isn’t the active Spotify player right now — Settings → Restart, then try again."
+msgstr "Lightifyは現在アクティブなSpotifyプレーヤーではありません — 設定 → 再起動 を行ってから、もう一度お試しください。"
+
+#: src/main.rs:3154
+msgid "Clearing the queue…"
+msgstr "再生キューをクリア中…"
+
+#: src/main.rs:3170
+msgid "Cleared queue"
+msgstr "再生キューをクリアしました"
+
+#: src/main.rs:3173
+msgid "Cleared the queue, but {n} queued tracks are still there"
+msgid_plural "Cleared the queue, but {n} queued tracks are still there"
+msgstr[0] "再生キューをクリアしましたが、まだ{n}曲残っています"
+
+#: src/main.rs:3189
+msgid "Couldn’t confirm the queue was cleared — try again"
+msgstr "再生キューのクリアを確認できませんでした — もう一度お試しください"
+
+#: src/main.rs:3300
+msgid "Recent — other devices’ plays didn’t load: {}"
+msgstr "最近 — 他のデバイスの再生履歴を読み込めませんでした：{}"
+
+#: src/main.rs:3304
+msgid "Recent — {}"
+msgstr "最近 — {}"
+
+#: src/main.rs:3369
+msgid "Removed “{}” from the queue"
+msgstr "「{}」を再生キューから削除しました"
+
+#: src/main.rs:3570
+msgid "Match — {}"
+msgstr "照合 — {}"
+
+#: src/main.rs:3579
+msgid "No Spotify match for “{}”"
+msgstr "「{}」に一致する曲がSpotifyにありません"
+
+#: src/main.rs:3610
+msgid "Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "再生中 — チャートの残りを準備中（残り{n}曲）"
+
+#: src/main.rs:3615 src/main.rs:3672
+msgid "Playing {} — {}"
+msgstr "再生中：{} — {}"
+
+#: src/main.rs:3616
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "「{0}」はSpotifyにありません — 代わりに「{1}」を再生します。再生中 — チャートの残りを準備中（残り{n}曲）"
+
+#: src/main.rs:3621
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing {1} — {2}"
+msgstr "「{0}」はSpotifyにありません — 代わりに「{1}」を再生します。再生中：{1} — {2}"
+
+#: src/main.rs:3694
+msgid "Playing — {0} queued, {n} left to match"
+msgid_plural "Playing — {0} queued, {n} left to match"
+msgstr[0] "再生中 — {0}曲を再生キューに追加、残り{n}曲を照合中"
+
+#: src/main.rs:3699
+msgid "Playing — {n} queued"
+msgid_plural "Playing — {n} queued"
+msgstr[0] "再生中 — {n}曲を再生キューに追加"
+
+#: src/main.rs:3700
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgstr[0] "「{0}」はSpotifyにありません — 代わりに「{1}」を再生します。再生中 — {2}曲を再生キューに追加、残り{n}曲を照合中"
+
+#: src/main.rs:3705
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgstr[0] "「{0}」はSpotifyにありません — 代わりに「{1}」を再生します。再生中 — {n}曲を再生キューに追加"
+
+#: src/main.rs:3726
+msgid "Opened the chart in your browser"
+msgstr "ブラウザーでチャートを開きました"
+
+#: src/main.rs:3728
+msgid "Open this in your browser: {}"
+msgstr "ブラウザーで次を開いてください：{}"
+
+#: src/main.rs:3767
+msgid "Playing the chart — {} of {n} tracks found on Spotify"
+msgid_plural "Playing the chart — {} of {n} tracks found on Spotify"
+msgstr[0] "チャートを再生中 — {n}曲中{}曲がSpotifyで見つかりました"
+
+#: src/main.rs:3775
+msgid "Lining up the chart — {} so far; retrying ({})"
+msgstr "チャートを準備中 — 現在{}曲、再試行中（{}）"
+
+#: src/main.rs:3776
+msgid "Playing the chart — {} lined up…"
+msgstr "チャートを再生中 — {}曲を準備済み…"
+
+#: src/main.rs:3804 src/main.rs:12242 src/main.rs:12250
+msgid "Beatport queue refill — {}"
+msgstr "Beatportの再生キュー補充 — {}"
+
+#: src/main.rs:3827 src/main.rs:5274
+msgid "Not running"
+msgstr "停止中"
+
+#: src/main.rs:3845 src/main.rs:15707
+msgid "No devices yet — Lightify’s own player is still starting."
+msgstr "デバイスがまだありません — Lightifyのプレーヤーを起動中です。"
+
+#: src/main.rs:3853
+msgid "Devices — {}"
+msgstr "デバイス — {}"
+
+#: src/main.rs:3863
+msgid "Playing on {}"
+msgstr "{}で再生中"
+
+#: src/main.rs:3868
+msgid "Transfer — {}"
+msgstr "再生の切り替え — {}"
+
+#: src/main.rs:3967 src/main.rs:16038
+msgid "ASCII lava screensaver"
+msgstr "ASCII溶岩スクリーンセーバー"
+
+#: src/main.rs:4032
+msgid "Nothing to play here"
+msgstr "再生できるものがありません"
+
+#: src/main.rs:4043
+msgid "Getting tracks…"
+msgstr "曲を取得中…"
+
+#: src/main.rs:4047 src/main.rs:4081
+msgid "Add to queue — {}"
+msgstr "再生キューに追加 — {}"
+
+#: src/main.rs:4052
+msgid "Nothing playable in “{}”"
+msgstr "「{}」に再生できる曲がありません"
+
+#: src/main.rs:4066
+msgid "Adding to queue… {}/{}"
+msgstr "再生キューに追加中… {}/{}"
+
+#: src/main.rs:4084
+msgid "Added {n} track to queue, then stopped — {0}"
+msgid_plural "Added {n} tracks to queue, then stopped — {0}"
+msgstr[0] "{n}曲を再生キューに追加した後、停止しました — {0}"
+
+#: src/main.rs:4092
+msgid "Added the first {0} of {n} tracks from “{1}” to queue"
+msgid_plural "Added the first {0} of {n} tracks from “{1}” to queue"
+msgstr[0] "「{1}」の{n}曲のうち最初の{0}曲を再生キューに追加しました"
+
+#: src/main.rs:4100
+msgid "Added {n} track from “{0}” to queue"
+msgid_plural "Added {n} tracks from “{0}” to queue"
+msgstr[0] "「{0}」から{n}曲を再生キューに追加しました"
+
+#: src/main.rs:4111
+msgid "Playlist saved"
+msgstr "プレイリストを保存しました"
+
+#: src/main.rs:4114
+msgid "Album saved"
+msgstr "アルバムを保存しました"
+
+#: src/main.rs:4131
+msgid "Added to queue: {}"
+msgstr "再生キューに追加しました：{}"
+
+#: src/main.rs:4140
+msgid "No Spotify match for {}"
+msgstr "{}に一致する曲がSpotifyにありません"
+
+#: src/main.rs:4171 src/main.rs:4189
+msgid "No Beatport tracks selected"
+msgstr "Beatportの曲が選択されていません"
+
+#: src/main.rs:4191
+msgid "Matching {n} Beatport tracks…"
+msgid_plural "Matching {n} Beatport tracks…"
+msgstr[0] "Beatportの{n}曲を照合中…"
+
+#: src/main.rs:4205
+msgid "No Spotify matches for the selection"
+msgstr "選択した曲に一致するものがSpotifyにありません"
+
+#: src/main.rs:4224
+msgid "Playing {n} selected ({} unmatched)"
+msgid_plural "Playing {n} selected ({} unmatched)"
+msgstr[0] "選択した{n}曲を再生中（{}曲は一致なし）"
+
+#: src/main.rs:4230 src/main.rs:4664
+msgid "Playing {n} selected"
+msgid_plural "Playing {n} selected"
+msgstr[0] "選択した{n}曲を再生中"
+
+#: src/main.rs:4254 src/main.rs:4703
+msgid "Added {n} to queue, then stopped — {}"
+msgid_plural "Added {n} to queue, then stopped — {}"
+msgstr[0] "{n}曲を再生キューに追加した後、停止しました — {}"
+
+#: src/main.rs:4262
+msgid "Added {n} to queue ({} unmatched)"
+msgid_plural "Added {n} to queue ({} unmatched)"
+msgstr[0] "{n}曲を再生キューに追加しました（{}曲は一致なし）"
+
+#: src/main.rs:4268 src/main.rs:4709
+msgid "Added {n} to queue"
+msgid_plural "Added {n} to queue"
+msgstr[0] "{n}曲を再生キューに追加しました"
+
+#: src/main.rs:4272
+msgid "BP Selection"
+msgstr "BPセレクション"
+
+#: src/main.rs:4278
+msgid "Created: {} ({n} unmatched)"
+msgid_plural "Created: {} ({n} unmatched)"
+msgstr[0] "作成しました：{}（{n}曲は一致なし）"
+
+#: src/main.rs:4284 src/main.rs:4338 src/main.rs:4728
+msgid "Created: {}"
+msgstr "作成しました：{}"
+
+#: src/main.rs:4295 src/main.rs:4741
+msgid "Create playlist — {}"
+msgstr "プレイリストの作成 — {}"
+
+#: src/main.rs:4333
+msgid "Queue is empty"
+msgstr "再生キューは空です"
+
+#: src/main.rs:4347
+msgid "Failed: {}"
+msgstr "失敗しました：{}"
+
+#: src/main.rs:4371
+msgid "Nothing selected"
+msgstr "何も選択されていません"
+
+#: src/main.rs:4651 src/main.rs:4675
+msgid "Selection has no playable tracks"
+msgstr "選択範囲に再生できる曲がありません"
+
+#: src/main.rs:4658
+msgid "Playing the first {0} of {n} selected"
+msgid_plural "Playing the first {0} of {n} selected"
+msgstr[0] "選択した{n}曲のうち最初の{0}曲を再生中"
+
+#: src/main.rs:4723
+msgid "Selection has no playlist tracks"
+msgstr "選択範囲にプレイリストの曲がありません"
+
+#: src/main.rs:4725
+msgid "Selection"
+msgstr "選択した曲"
+
+#: src/main.rs:4764
+msgid "Play — playlist has no URI"
+msgstr "再生 — プレイリストにURIがありません"
+
+#: src/main.rs:4781
+msgid "Playlist saved to library"
+msgstr "プレイリストをライブラリに保存しました"
+
+#: src/main.rs:4828
+msgid "Playlists — {}"
+msgstr "プレイリスト — {}"
+
+#: src/main.rs:4830
+msgid "Deleted playlist: {}"
+msgstr "プレイリストを削除しました：{}"
+
+#: src/main.rs:4832
+msgid "Failed to delete playlist: {}"
+msgstr "プレイリストを削除できませんでした：{}"
+
+#: src/main.rs:4905 src/main.rs:5340
+msgid "Audio output → {}"
+msgstr "オーディオ出力 → {}"
+
+#: src/main.rs:4912
+msgid "Running · Lightify"
+msgstr "実行中 · Lightify"
+
+#: src/main.rs:4925
+msgid "Playing through {}"
+msgstr "{}経由で再生中"
+
+#: src/main.rs:4953
+msgid "Playback engine restarted — resumed"
+msgstr "再生エンジンを再起動しました — 再生を再開しました"
+
+#: src/main.rs:4962
+msgid "Playback device — {}"
+msgstr "再生デバイス — {}"
+
+#: src/main.rs:5133
+msgid "Error — {}"
+msgstr "エラー — {}"
+
+#: src/main.rs:5134 src/main.rs:10064
+msgid "Playback engine — {}"
+msgstr "再生エンジン — {}"
+
+#: src/main.rs:5140
+msgid "Ignored a station that was no longer wanted"
+msgstr "不要になったラジオを無視しました"
+
+#: src/main.rs:5158
+msgid "Station — {n} similar tracks after this one"
+msgid_plural "Station — {n} similar tracks after this one"
+msgstr[0] "ラジオ — この曲の後に似た曲が{n}曲"
+
+#: src/main.rs:5186
+msgid "Station had no tracks to queue"
+msgstr "ラジオに追加できる曲がありませんでした"
+
+#: src/main.rs:5217 src/main.rs:5254
+msgid "Station — {}"
+msgstr "ラジオ — {}"
+
+#: src/main.rs:5222
+msgid "Station queued — {n} tracks after this one"
+msgid_plural "Station queued — {n} tracks after this one"
+msgstr[0] "ラジオを追加しました — この曲の後に{n}曲"
+
+#: src/main.rs:5242 src/main.rs:11832
+msgid "Loading queue…"
+msgstr "再生キューを読み込み中…"
+
+#: src/main.rs:5258
+msgid "Station started — {n} tracks"
+msgid_plural "Station started — {n} tracks"
+msgstr[0] "ラジオを開始しました — {n}曲"
+
+#: src/main.rs:5298
+msgid "Playback moved to another Spotify device — Lightify’s player stopped. Settings → Restart to play here again."
+msgstr "再生が別のSpotifyデバイスに移りました — Lightifyのプレーヤーは停止しました。ここで再生するには 設定 → 再起動 を行ってください。"
+
+#: src/main.rs:5306
+msgid "Playback engine stopped (audio device lost?) — restarting…"
+msgstr "再生エンジンが停止しました（オーディオデバイスが失われた可能性があります） — 再起動中…"
+
+#: src/main.rs:5308 src/main.rs:5360 src/main.rs:5378
+msgid "Restarting…"
+msgstr "再起動中…"
+
+#: src/main.rs:5316
+msgid "Playback engine keeps stopping — check the audio output in Settings, then Restart"
+msgstr "再生エンジンが何度も停止します — 設定でオーディオ出力を確認してから再起動してください"
+
+#: src/main.rs:5332
+msgid "That output list changed — pick again"
+msgstr "出力の一覧が変わりました — もう一度選択してください"
+
+#: src/main.rs:5356
+msgid "Settings — {}"
+msgstr "設定 — {}"
+
+#: src/main.rs:5377
+msgid "Reclaiming playback after downloader sign-in…"
+msgstr "ダウンローダーのログイン後、再生を取り戻しています…"
+
+#: src/main.rs:9465
+msgid "Playback error — {}"
+msgstr "再生エラー — {}"
+
+#: src/main.rs:9773
+msgid "Cleared the queued-ahead tracks"
+msgstr "再生待ちの曲をクリアしました"
+
+#: src/main.rs:10017
+msgid "Not found"
+msgstr "見つかりません"
+
+#: src/main.rs:10050
+msgid "Audio output “{}” isn’t available — playing on the system default"
+msgstr "オーディオ出力「{}」は使用できません — システムの既定の出力で再生します"
+
+#: src/main.rs:10052
+msgid "Starting Lightify playback…"
+msgstr "Lightifyの再生を開始中…"
+
+#: src/main.rs:10054
+msgid "One-time Spotify streaming sign-in — finish it in your browser"
+msgstr "初回のみSpotifyストリーミングへのログインが必要です — ブラウザーで完了してください"
+
+#: src/main.rs:10063
+msgid "Failed — {}"
+msgstr "失敗しました — {}"
+
+#: src/main.rs:10091 src/main.rs:15718
+msgid "System default"
+msgstr "システムの既定"
+
+#: src/main.rs:10096 src/main.rs:15725
+msgid "Configured output “{}” isn’t connected — playing on the system default."
+msgstr "設定した出力「{}」が接続されていません — システムの既定の出力で再生します。"
+
+#: src/main.rs:10231 src/main.rs:12525
+msgid "{}m"
+msgstr "{}分"
+
+#: src/main.rs:10233
+msgid "{}s"
+msgstr "{}秒"
+
+#: src/main.rs:10275
+msgid "Your saved Spotify tracks"
+msgstr "Spotifyに保存した曲"
+
+#: src/main.rs:10284
+msgid "{} tracks"
+msgid_plural "{} tracks"
+msgstr[0] "{}曲"
+
+#: src/main.rs:10286
+msgid "{} tracks • {}"
+msgid_plural "{} tracks • {}"
+msgstr[0] "{}曲 • {}"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected"
+msgstr "接続済み"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected as {}"
+msgstr "{}として接続済み"
+
+#: src/main.rs:11244
+msgid "Artist • {} followers"
+msgid_plural "Artist • {} followers"
+msgstr[0] "アーティスト • フォロワー{}人"
+
+#: src/main.rs:11246
+msgid "Artist"
+msgstr "アーティスト"
+
+#: src/main.rs:11265
+msgid "Album • {}"
+msgstr "アルバム • {}"
+
+#: src/main.rs:11278
+msgid "Playlist • {} tracks"
+msgid_plural "Playlist • {} tracks"
+msgstr[0] "プレイリスト • {}曲"
+
+#: src/main.rs:11280
+msgid "Playlist • {} tracks • {}"
+msgid_plural "Playlist • {} tracks • {}"
+msgstr[0] "プレイリスト • {}曲 • {}"
+
+#: src/main.rs:11454
+msgid "See all"
+msgstr "すべて表示"
+
+#: src/main.rs:11518
+msgid "Recent searches"
+msgstr "最近の検索"
+
+#: src/main.rs:11685
+msgid "All {n} found on Spotify"
+msgid_plural "All {n} found on Spotify"
+msgstr[0] "{n}曲すべてがSpotifyで見つかりました"
+
+#: src/main.rs:11689
+msgid "{} of {} found · {n} not on Spotify"
+msgid_plural "{} of {} found · {n} not on Spotify"
+msgstr[0] "{} / {}件検出 · {n}件はSpotifyになし"
+
+#: src/main.rs:12186
+msgid "Queueing download: {}…"
+msgstr "ダウンロードに追加中：{}…"
+
+#: src/main.rs:12190
+msgid "Download queued: {}"
+msgstr "ダウンロードに追加しました：{}"
+
+#: src/main.rs:12523
+msgid "just now"
+msgstr "たった今"
+
+#: src/main.rs:12527
+msgid "{}h"
+msgstr "{}時間"
+
+#: src/main.rs:12529
+msgid "{}d"
+msgstr "{}日"
+
+#: src/main.rs:12630
+msgid "Fetching {} — {}…"
+msgstr "{} — {}を取得中…"
+
+#: src/main.rs:12636 src/main.rs:15693
+msgid "{n} tracks — {} {}"
+msgid_plural "{n} tracks — {} {}"
+msgstr[0] "{n}曲 — {} {}"
+
+#: src/main.rs:12703 src/main.rs:15560
+msgid "Your Spotify sign-in has expired or was revoked — authorise again. ({})"
+msgstr "Spotifyへのログインが期限切れになったか、取り消されました — もう一度認証してください。（{}）"
+
+#: src/main.rs:12717 src/main.rs:15566
+msgid "Sign in to Spotify to start"
+msgstr "Spotifyにログインして始めましょう"
+
+#: src/main.rs:12732
+msgid "Signed in as {}"
+msgstr "{}としてログイン中"
+
+#: src/main.rs:12758
+msgid "Opening browser — complete the login…"
+msgstr "ブラウザーを開いています — ログインを完了してください…"
+
+#: src/main.rs:12773
+msgid "Re-opening browser — complete the login…"
+msgstr "ブラウザーを再度開いています — ログインを完了してください…"
+
+#: src/main.rs:13021
+msgid "Automatic (Windows language)"
+msgstr "自動（Windowsの言語）"
+
+#: src/main.rs:13023
+msgid "{} (preview)"
+msgstr "{}（プレビュー）"
+
+#: src/main.rs:13161
+msgid "The downloaded update is gone — check again"
+msgstr "ダウンロードしたアップデートが見つかりません — もう一度確認してください"
+
+#: src/main.rs:13176
+msgid "Couldn't start the update: {}"
+msgstr "アップデートを開始できませんでした：{}"
+
+#: src/main.rs:13415
+msgid "Restored queue — {n} track"
+msgid_plural "Restored queue — {n} tracks"
+msgstr[0] "再生キューを復元しました — {n}曲"
+
+#: src/main.rs:13484
+msgid "Pause"
+msgstr "一時停止"
+
+#: src/main.rs:13484 src/main.rs:13485 src/main.rs:13486 src/main.rs:13487
+#: src/main.rs:13488
+msgid "Playback"
+msgstr "再生"
+
+#: src/main.rs:13485
+msgid "Next track"
+msgstr "次の曲"
+
+#: src/main.rs:13486
+msgid "Previous track"
+msgstr "前の曲"
+
+#: src/main.rs:13487
+msgid "Toggle shuffle"
+msgstr "シャッフルの切り替え"
+
+#: src/main.rs:13488
+msgid "Cycle repeat"
+msgstr "リピートの切り替え"
+
+#: src/main.rs:13489
+msgid "Open settings"
+msgstr "設定を開く"
+
+#: src/main.rs:13489
+msgid "App"
+msgstr "アプリ"
+
+#: src/main.rs:13490
+msgid "Show queue"
+msgstr "再生キューを表示"
+
+#: src/main.rs:13490 src/main.rs:13491
+msgid "Panel"
+msgstr "パネル"
+
+#: src/main.rs:13491
+msgid "Show recent"
+msgstr "最近の再生を表示"
+
+#: src/main.rs:13492
+msgid "Collapse left panel"
+msgstr "左パネルを折りたたむ"
+
+#: src/main.rs:13492 src/main.rs:13493 src/main.rs:13494 src/main.rs:13495
+#: src/main.rs:13496
+msgid "Window"
+msgstr "ウィンドウ"
+
+#: src/main.rs:13493
+msgid "Mini player: square"
+msgstr "ミニプレーヤー：正方形"
+
+#: src/main.rs:13494
+msgid "Mini player: bar"
+msgstr "ミニプレーヤー：バー"
+
+#: src/main.rs:13495
+msgid "Mini player: nano (cover only)"
+msgstr "ミニプレーヤー：ナノ（ジャケットのみ）"
+
+#: src/main.rs:13496
+msgid "Exit mini player"
+msgstr "ミニプレーヤーを終了"
+
+#: src/main.rs:13505
+msgid "Playlist"
+msgstr "プレイリスト"
+
+#: src/main.rs:13593
+msgid "Search for “{}”"
+msgstr "「{}」を検索"
+
+#: src/main.rs:13960 src/main.rs:14032
+msgid "Loading “{}”…"
+msgstr "「{}」を読み込み中…"
+
+#: src/main.rs:13966 src/main.rs:14087 src/main.rs:15269 src/main.rs:15417
+msgid "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgid_plural "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgstr[0] "「{0}」から{n}曲を読み込みました — プレビューのみ。Spotifyはこのアプリにこのプレイリストを提供していません"
+
+#: src/main.rs:13973 src/main.rs:14094 src/main.rs:15424
+msgid "Loaded {n} tracks from “{0}”"
+msgid_plural "Loaded {n} tracks from “{0}”"
+msgstr[0] "「{0}」から{n}曲を読み込みました"
+
+#: src/main.rs:13977 src/main.rs:15405
+msgid "Loaded {n} tracks from “{0}”…"
+msgid_plural "Loaded {n} tracks from “{0}”…"
+msgstr[0] "「{0}」から{n}曲を読み込みました…"
+
+#: src/main.rs:13987 src/main.rs:14115
+msgid "“{}” failed: {}"
+msgstr "「{}」が失敗しました：{}"
+
+#: src/main.rs:13991 src/main.rs:14119
+msgid "“{}” stopped after {n} tracks: {}"
+msgid_plural "“{}” stopped after {n} tracks: {}"
+msgstr[0] "「{}」は{n}曲で停止しました：{}"
+
+#: src/main.rs:14100
+msgid "Loaded {0} / {1} tracks from “{2}”"
+msgid_plural "Loaded {0} / {1} tracks from “{2}”"
+msgstr[0] "「{2}」から{0} / {1}曲を読み込みました"
+
+#: src/main.rs:14106
+msgid "Loaded {0} tracks from “{1}”"
+msgid_plural "Loaded {0} tracks from “{1}”"
+msgstr[0] "「{1}」から{0}曲を読み込みました"
+
+#: src/main.rs:14581
+msgid "Start station needs a Spotify track"
+msgstr "ラジオを開始するにはSpotifyの曲が必要です"
+
+#: src/main.rs:14587
+msgid "Start station needs Lightify’s own player — Settings → Restart"
+msgstr "ラジオを開始するにはLightifyのプレーヤーが必要です — 設定 → 再起動"
+
+#: src/main.rs:14607
+msgid "Building station…"
+msgstr "ラジオを作成中…"
+
+#: src/main.rs:14614
+msgid "Follow artist needs the user-follow-modify scope, which this token doesn’t carry"
+msgstr "アーティストをフォローするにはuser-follow-modifyスコープが必要ですが、このトークンにはありません"
+
+#: src/main.rs:14643 src/main.rs:14824
+msgid "Play {n} selected"
+msgid_plural "Play {n} selected"
+msgstr[0] "選択した{n}曲を再生"
+
+#: src/main.rs:14644 src/main.rs:14825 src/main.rs:14835
+msgid "Add {n} to queue"
+msgid_plural "Add {n} to queue"
+msgstr[0] "{n}曲を再生キューに追加"
+
+#: src/main.rs:14645 src/main.rs:14826
+msgid "Create playlist from selection"
+msgstr "選択した曲でプレイリストを作成"
+
+#: src/main.rs:14652
+msgid "Open"
+msgstr "開く"
+
+#: src/main.rs:14653
+msgid "Download liked songs"
+msgstr "お気に入りの曲をダウンロード"
+
+#: src/main.rs:14662
+msgid "Save to library"
+msgstr "ライブラリに保存"
+
+#: src/main.rs:14664
+msgid "Delete"
+msgstr "削除"
+
+#: src/main.rs:14689 src/main.rs:14714 src/main.rs:14848 src/main.rs:14869
+#: src/main.rs:14889
+msgid "Share"
+msgstr "シェア"
+
+#: src/main.rs:14690 src/main.rs:14715 src/main.rs:14849 src/main.rs:14870
+#: src/main.rs:14890
+msgid "Start station"
+msgstr "ラジオを開始"
+
+#: src/main.rs:14692 src/main.rs:14851 src/main.rs:14872
+msgid "Follow artist"
+msgstr "アーティストをフォロー"
+
+#: src/main.rs:14712
+msgid "Like"
+msgstr "お気に入りに追加"
+
+#: src/main.rs:14727 src/main.rs:14738 src/main.rs:14747
+msgid "Show tracks"
+msgstr "曲を表示"
+
+#: src/main.rs:14728
+msgid "Save playlist"
+msgstr "プレイリストを保存"
+
+#: src/main.rs:14739
+msgid "Save album"
+msgstr "アルバムを保存"
+
+#: src/main.rs:14748
+msgid "Add top songs to queue"
+msgstr "人気曲を再生キューに追加"
+
+#: src/main.rs:14834
+msgid "Play first selected"
+msgstr "選択した最初の曲を再生"
+
+#: src/main.rs:14911
+msgid "Open download folder"
+msgstr "ダウンロードフォルダーを開く"
+
+#: src/main.rs:14911
+msgid "Open folder"
+msgstr "フォルダーを開く"
+
+#: src/main.rs:14915
+msgid "Delete file"
+msgstr "ファイルを削除"
+
+#: src/main.rs:14929
+msgid "{n} track from your queue"
+msgid_plural "{n} tracks from your queue"
+msgstr[0] "再生キューの{n}曲"
+
+#: src/main.rs:14933
+msgid "{n} track selected"
+msgid_plural "{n} tracks selected"
+msgstr[0] "{n}曲を選択中"
+
+#: src/main.rs:14989
+msgid "Share — no Spotify id"
+msgstr "シェア — SpotifyのIDがありません"
+
+#: src/main.rs:14994
+msgid "Copied Spotify link"
+msgstr "Spotifyのリンクをコピーしました"
+
+#: src/main.rs:14995
+msgid "Share — {}"
+msgstr "シェア — {}"
+
+#: src/main.rs:15047
+msgid "could not set the clipboard: {}"
+msgstr "クリップボードに設定できませんでした：{}"
+
+#: src/main.rs:15404
+msgid "Artist — {}"
+msgstr "アーティスト — {}"
+
+#: src/tray.rs:68 src/tray.rs:80
+msgid "Show Lightify"
+msgstr "Lightifyを表示"
+
+#: src/tray.rs:69 src/tray.rs:81
+msgid "Quit"
+msgstr "終了"

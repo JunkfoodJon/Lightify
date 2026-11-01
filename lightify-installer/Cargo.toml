@@ -23,8 +23,9 @@ path = "src/bin/lightify-sign.rs"
 
 [dependencies]
 # Same Slint line and features as lightify-shell, so the installer looks and renders
-# exactly like the app (software renderer, no-frame winit window).
-slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030"] }
+# exactly like the app (software renderer, no-frame winit window). unstable-fontique-010:
+# the Han font fallback fix (main.rs fix_han_fallback).
+slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030", "unstable-fontique-010"] }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +38,8 @@ ed25519-dalek = "2"
 base64 = "0.22"
 getrandom = "0.2"
 dirs = "5"
+# The installer's own translations (LANGUAGE-PLAN.md), the same catalogs Slint bundles.
+lightify-i18n = { path = "../lightify-i18n" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -61,6 +64,7 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 slint-build = "1"
+lightify-i18n = { path = "../lightify-i18n" }
 
 [profile.release]
 # The stub is downloaded with every release and copied as uninstall.exe: keep it lean.

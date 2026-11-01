@@ -1,0 +1,378 @@
+# lightify-installer: pt-BR translation
+# MACHINE DRAFT — needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-installer\n"
+"Language: pt-BR\n"
+"Language-Team: machine draft — needs native review\n"
+"Last-Translator: machine draft (not reviewed)\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+#: ui/installer.slint:496 src/main.rs:538 src/main.rs:1352
+msgid "Setup couldn't finish"
+msgstr "A instalação não pôde ser concluída"
+
+#: ui/installer.slint:503
+msgid "Lightify reopens where you left off."
+msgstr "O Lightify reabre de onde você parou."
+
+#: ui/installer.slint:520
+msgid "Uninstall Lightify"
+msgstr "Desinstalar o Lightify"
+
+#: ui/installer.slint:520 ui/installer.slint:554
+msgid "Updating Lightify"
+msgstr "Atualizando o Lightify"
+
+#: ui/installer.slint:520
+msgid "Lightify Setup"
+msgstr "Instalação do Lightify"
+
+#: ui/installer.slint:554
+msgid "Update didn't finish"
+msgstr "A atualização não foi concluída"
+
+#: ui/installer.slint:561
+msgid "installed → {} · signature checked"
+msgstr "instalada → {} · assinatura verificada"
+
+#: ui/installer.slint:562
+msgid "{} → {} · signature checked"
+msgstr "{} → {} · assinatura verificada"
+
+#: ui/installer.slint:607
+msgid "uninstall"
+msgstr "desinstalação"
+
+#: ui/installer.slint:607
+msgid "setup"
+msgstr "instalação"
+
+#: ui/installer.slint:651
+msgid "// welcome"
+msgstr "// boas-vindas"
+
+#: ui/installer.slint:652
+msgid "Install Lightify"
+msgstr "Instalar o Lightify"
+
+#: ui/installer.slint:661
+msgid "language"
+msgstr "idioma"
+
+#: ui/installer.slint:676
+msgid "install for"
+msgstr "instalar para"
+
+#: ui/installer.slint:692
+msgid "Just me"
+msgstr "Só para mim"
+
+#: ui/installer.slint:703
+msgid "Everyone on this PC"
+msgstr "Todos neste PC"
+
+#: ui/installer.slint:719
+msgid "install to"
+msgstr "instalar em"
+
+#: ui/installer.slint:727
+msgid "Change"
+msgstr "Alterar"
+
+#: ui/installer.slint:737
+msgid "Desktop shortcut"
+msgstr "Atalho na área de trabalho"
+
+#: ui/installer.slint:803 ui/installer.slint:872 ui/installer.slint:925
+#: ui/installer.slint:996
+msgid "Cancel"
+msgstr "Cancelar"
+
+#: ui/installer.slint:807
+msgid "Install"
+msgstr "Instalar"
+
+#: ui/installer.slint:824
+msgid "// licence"
+msgstr "// licença"
+
+#: ui/installer.slint:825
+msgid "Licence"
+msgstr "Licença"
+
+#: ui/installer.slint:835 ui/installer.slint:1074
+msgid "Back"
+msgstr "Voltar"
+
+#: ui/installer.slint:839
+msgid "I accept"
+msgstr "Aceito"
+
+#: ui/installer.slint:858
+msgid "// lightify is open"
+msgstr "// lightify está aberto"
+
+#: ui/installer.slint:859
+msgid "Close Lightify first"
+msgstr "Feche o Lightify primeiro"
+
+#: ui/installer.slint:877
+msgid "Closing…"
+msgstr "Fechando…"
+
+#: ui/installer.slint:877
+msgid "Close Lightify"
+msgstr "Fechar o Lightify"
+
+#: ui/installer.slint:894
+msgid "// uninstalling"
+msgstr "// desinstalando"
+
+#: ui/installer.slint:894
+msgid "// installing"
+msgstr "// instalando"
+
+#: ui/installer.slint:895
+msgid "Removing Lightify"
+msgstr "Removendo o Lightify"
+
+#: ui/installer.slint:895
+msgid "Installing Lightify"
+msgstr "Instalando o Lightify"
+
+#: ui/installer.slint:910
+msgid "{}%"
+msgstr "{}%"
+
+#: ui/installer.slint:944
+msgid "// done"
+msgstr "// pronto"
+
+#: ui/installer.slint:945
+msgid "Lightify is installed"
+msgstr "O Lightify está instalado"
+
+#: ui/installer.slint:947
+msgid "It keeps itself up to date from lightify.stream."
+msgstr "Ele se mantém atualizado pelo lightify.stream."
+
+#: ui/installer.slint:953
+msgid "Launch Lightify"
+msgstr "Abrir o Lightify"
+
+#: ui/installer.slint:961
+msgid "Finish"
+msgstr "Concluir"
+
+#: ui/installer.slint:977
+msgid "// uninstall"
+msgstr "// desinstalar"
+
+#: ui/installer.slint:978
+msgid "Remove Lightify?"
+msgstr "Remover o Lightify?"
+
+#: ui/installer.slint:981
+msgid "Removes the app, its shortcuts and the downloader bridge. Your downloaded music is never touched."
+msgstr "Remove o app, os atalhos dele e a ponte do downloader. Suas músicas baixadas ficam intactas."
+
+#: ui/installer.slint:987
+msgid "Also remove my settings and Spotify sign-in"
+msgstr "Remover também minhas configurações e o login do Spotify"
+
+#: ui/installer.slint:1000
+msgid "Remove"
+msgstr "Remover"
+
+#: ui/installer.slint:1020
+msgid "// removed"
+msgstr "// removido"
+
+#: ui/installer.slint:1021
+msgid "Lightify is removed"
+msgstr "O Lightify foi removido"
+
+#: ui/installer.slint:1023
+msgid "Settings and sign-in were removed too. Your downloaded music was left where it is."
+msgstr "As configurações e o login também foram removidos. Suas músicas baixadas ficaram onde estavam."
+
+#: ui/installer.slint:1023
+msgid "Your settings and downloaded music were left where they are."
+msgstr "Suas configurações e músicas baixadas ficaram onde estavam."
+
+#: ui/installer.slint:1033 ui/installer.slint:1078
+msgid "Close"
+msgstr "Fechar"
+
+#: ui/installer.slint:1049
+msgid "// something went wrong"
+msgstr "// algo deu errado"
+
+#: src/main.rs:106
+msgid "I accept the <a>licence</a>"
+msgstr "Aceito a <a>licença</a>"
+
+#: src/main.rs:145
+msgid "{} (preview)"
+msgstr "{} (prévia)"
+
+#: src/main.rs:328 src/ops.rs:406
+msgid "this Setup file is damaged ({}) - download it again"
+msgstr "este instalador está corrompido ({}) - baixe-o de novo"
+
+#: src/main.rs:472
+msgid "Setup can't start"
+msgstr "O instalador não pode ser iniciado"
+
+#: src/main.rs:520
+msgid "preparing"
+msgstr "preparando"
+
+#: src/main.rs:552 src/main.rs:1335
+msgid "Lightify is open. Setup can close it for you — your settings are kept, and you can reopen it when setup finishes."
+msgstr "O Lightify está aberto. O instalador pode fechá-lo para você — suas configurações são mantidas e você pode reabri-lo quando a instalação terminar."
+
+#: src/main.rs:644
+msgid "Setup can't write to that folder. Pick another one, or install for everyone on this PC."
+msgstr "O instalador não consegue gravar nessa pasta. Escolha outra ou instale para todos neste PC."
+
+#: src/main.rs:698
+msgid "Installing for everyone needs administrator approval."
+msgstr "Instalar para todos exige a aprovação de um administrador."
+
+#: src/main.rs:735 src/main.rs:1230
+msgid "Lightify is still open. Quit it from its tray icon (right-click → Quit), then press Close Lightify again."
+msgstr "O Lightify ainda está aberto. Saia pelo ícone na bandeja (botão direito → Sair) e clique em Fechar o Lightify de novo."
+
+#: src/main.rs:891
+msgid "Lightify isn't installed"
+msgstr "O Lightify não está instalado"
+
+#: src/main.rs:892
+msgid "There is no Lightify install on this PC to update. Download Setup from lightify.stream."
+msgstr "Não há uma instalação do Lightify neste PC para atualizar. Baixe o instalador em lightify.stream."
+
+#: src/main.rs:1119
+msgid "There is no Lightify install in {}."
+msgstr "Não há uma instalação do Lightify em {}."
+
+#: src/main.rs:1121
+msgid "Nothing to remove"
+msgstr "Nada para remover"
+
+#: src/main.rs:1186
+msgid "Lightify wasn't fully removed"
+msgstr "O Lightify não foi totalmente removido"
+
+#: src/main.rs:1198
+msgid "Lightify is open. Setup can close it for you, then remove it."
+msgstr "O Lightify está aberto. O instalador pode fechá-lo para você e depois removê-lo."
+
+#: src/main.rs:1330 src/ops.rs:90
+msgid "Pick a folder, not the root of a drive."
+msgstr "Escolha uma pasta, não a raiz de uma unidade."
+
+#: src/main.rs:1342 src/ops.rs:443
+msgid "copying {}"
+msgstr "copiando {}"
+
+#: src/main.rs:1365 src/ops.rs:639 src/ops.rs:677
+msgid "removing {}"
+msgstr "removendo {}"
+
+#: src/ops.rs:87
+msgid "Choose a full folder path, like C:\\Programs\\Lightify."
+msgstr "Escolha um caminho de pasta completo, como C:\\Programs\\Lightify."
+
+#: src/ops.rs:94
+msgid "Lightify can't be installed inside the Windows folder."
+msgstr "O Lightify não pode ser instalado dentro da pasta do Windows."
+
+#: src/ops.rs:98
+msgid "That folder name has characters Windows doesn't allow."
+msgstr "Esse nome de pasta tem caracteres que o Windows não permite."
+
+#: src/ops.rs:260
+msgid "could not start {}: {}"
+msgstr "não foi possível iniciar {}: {}"
+
+#: src/ops.rs:283
+msgid "Downloader bridge"
+msgstr "Ponte do downloader"
+
+#: src/ops.rs:285
+msgid "Shortcuts and uninstall entry"
+msgstr "Atalhos e entrada de desinstalação"
+
+#: src/ops.rs:338
+msgid "{} is in use"
+msgstr "{} está em uso"
+
+#: src/ops.rs:376
+msgid "{}: access denied"
+msgstr "{}: acesso negado"
+
+#: src/ops.rs:388
+msgid "could not run the old uninstaller {}: {}"
+msgstr "não foi possível executar o desinstalador antigo {}: {}"
+
+#: src/ops.rs:390
+msgid "the old uninstaller {} failed ({})"
+msgstr "o desinstalador antigo {} falhou ({})"
+
+#: src/ops.rs:407
+msgid "this copy of Setup has no files in it (it is the uninstaller) - download Setup from lightify.stream"
+msgstr "esta cópia do instalador não contém arquivos (é o desinstalador) - baixe o instalador em lightify.stream"
+
+#: src/ops.rs:414
+msgid "removing the previous installer"
+msgstr "removendo a instalação anterior"
+
+#: src/ops.rs:468
+msgid "writing {}"
+msgstr "gravando {}"
+
+#: src/ops.rs:477
+msgid "creating shortcuts"
+msgstr "criando atalhos"
+
+#: src/ops.rs:480
+msgid "registering with Windows"
+msgstr "registrando no Windows"
+
+#: src/ops.rs:496 src/ops.rs:685
+msgid "done"
+msgstr "concluído"
+
+#: src/ops.rs:503
+msgid "could not find the Start menu folder"
+msgstr "não foi possível encontrar a pasta do menu Iniciar"
+
+#: src/ops.rs:507
+msgid "could not find the desktop folder"
+msgstr "não foi possível encontrar a pasta da área de trabalho"
+
+#: src/ops.rs:544
+msgid "App files"
+msgstr "Arquivos do app"
+
+#: src/ops.rs:546
+msgid "Settings and Spotify sign-in"
+msgstr "Configurações e login do Spotify"
+
+#: src/ops.rs:650
+msgid "removing shortcuts"
+msgstr "removendo atalhos"
+
+#: src/ops.rs:662
+msgid "removing the Apps entry"
+msgstr "removendo a entrada em Aplicativos"
+
+#: src/win.rs:223
+msgid "could not start the elevated installer: {}"
+msgstr "não foi possível iniciar o instalador com permissões de administrador: {}"

@@ -97,6 +97,12 @@ $pack = Join-Path $installerCrate 'target\release\lightify-pack.exe'
 foreach ($p in $stub, $pack) {
     if (-not (Test-Path $p)) { Fail "Missing $p - build lightify-installer first (drop -SkipBuild)." }
 }
+# The pseudo language (LIGHTIFY_PSEUDO, LANGUAGE-PLAN.md Phase 1) is a test build only.
+foreach ($p in $exe, $stub) {
+    if (Select-String -Path $p -Pattern 'qps-ploc' -SimpleMatch -Quiet) {
+        Fail "$p was built with LIGHTIFY_PSEUDO (pseudo language) - rebuild without it."
+    }
+}
 $license = Join-Path $repo 'LICENSE.md'
 if (-not (Test-Path $license)) { Fail "Missing $license" }
 

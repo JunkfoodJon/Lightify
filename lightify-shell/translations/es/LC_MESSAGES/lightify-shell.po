@@ -1,0 +1,1828 @@
+# lightify-shell: es translation
+# MACHINE DRAFT — needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-shell\n"
+"Language: es\n"
+"Language-Team: machine draft — needs native review\n"
+"Last-Translator: machine draft (not reviewed)\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: ui/app.slint:715
+msgid "finding"
+msgstr "buscando"
+
+#: ui/app.slint:897
+msgctxt "sort order"
+msgid "Recent"
+msgstr "Recientes"
+
+#: ui/app.slint:1007
+msgid "artist · top result"
+msgstr "artista · resultado principal"
+
+#: ui/app.slint:1007
+msgid "song · top result"
+msgstr "canción · resultado principal"
+
+#: ui/app.slint:1008
+msgid "album · top result"
+msgstr "álbum · resultado principal"
+
+#: ui/app.slint:1008
+msgid "playlist · top result"
+msgstr "playlist · resultado principal"
+
+#: ui/app.slint:1009
+msgid "artist"
+msgstr "artista"
+
+#: ui/app.slint:1009
+msgid "song"
+msgstr "canción"
+
+#: ui/app.slint:1009
+msgid "album"
+msgstr "álbum"
+
+#: ui/app.slint:1009
+msgid "playlist"
+msgstr "playlist"
+
+#: ui/app.slint:1206 ui/app.slint:2229
+msgid "All"
+msgstr "Todo"
+
+#: ui/app.slint:1207 src/main.rs:11463
+msgid "Songs"
+msgstr "Canciones"
+
+#: ui/app.slint:1208 src/local_ui.rs:1300 src/main.rs:11465
+msgid "Artists"
+msgstr "Artistas"
+
+#: ui/app.slint:1209 src/local_ui.rs:1310 src/main.rs:11467
+msgid "Albums"
+msgstr "Álbumes"
+
+#: ui/app.slint:1210 src/main.rs:11469
+msgid "Playlists"
+msgstr "Playlists"
+
+#: ui/app.slint:1463
+msgid "Local"
+msgstr "Local"
+
+#: ui/app.slint:1842
+msgid "any"
+msgstr "cualquiera"
+
+#: ui/app.slint:2197
+msgid "Filter the library"
+msgstr "Filtrar la biblioteca"
+
+#: ui/app.slint:2215
+msgid "Filters"
+msgstr "Filtros"
+
+#: ui/app.slint:2223
+msgid "Reset"
+msgstr "Limpiar"
+
+#: ui/app.slint:2226
+msgid "SHOW"
+msgstr "MOSTRAR"
+
+#: ui/app.slint:2229
+msgid "Music only"
+msgstr "Solo música"
+
+#: ui/app.slint:2229
+msgid "Long sets"
+msgstr "Sets largos"
+
+#: ui/app.slint:2232
+msgid "Hides clips under 1:00 — songs, long tracks and sets stay."
+msgstr "Oculta clips de menos de 1:00 — canciones, temas largos y sets se quedan."
+
+#: ui/app.slint:2232
+msgid "Only tracks of 20:00 or more (mixes, sets)."
+msgstr "Solo lo que dura 20:00 o más (mixes, sets)."
+
+#: ui/app.slint:2235
+msgid "LENGTH"
+msgstr "DURACIÓN"
+
+#: ui/app.slint:2240
+msgid "Shortest"
+msgstr "Mínima"
+
+#: ui/app.slint:2245
+msgid "Longest"
+msgstr "Máxima"
+
+#: ui/app.slint:2250
+msgid "Couldn't read that — try 90, 1:30, 5m or 1:02:00."
+msgstr "No lo entendí — prueba 90, 1:30, 5m o 1:02:00."
+
+#: ui/app.slint:2250
+msgid "Type 90, 1:30, 5m or 1:02:00 · empty = any."
+msgstr "Escribe 90, 1:30, 5m o 1:02:00 · vacío = cualquiera."
+
+#: ui/app.slint:2254
+msgid "FILE TYPES"
+msgstr "TIPOS DE ARCHIVO"
+
+#: ui/app.slint:2308
+msgid "TITLE"
+msgstr "TÍTULO"
+
+#: ui/app.slint:2309
+msgid "ARTIST"
+msgstr "ARTISTA"
+
+#: ui/app.slint:2310
+msgid "ALBUM"
+msgstr "ÁLBUM"
+
+#: ui/app.slint:2311
+msgid "TIME"
+msgstr "TIEMPO"
+
+#: ui/app.slint:2377 ui/app.slint:2485 ui/app.slint:4293 ui/app.slint:4294
+#: ui/app.slint:4700 src/main.rs:10890 src/main.rs:15602
+msgid "Nothing playing"
+msgstr "Nada en reproducción"
+
+#: ui/app.slint:2519
+msgid "Drop to add to your local library"
+msgstr "Suelta para añadir a tu biblioteca local"
+
+#: ui/app.slint:2521
+msgid "Files stay where they are — Lightify only indexes them. Drop a folder to add everything in it."
+msgstr "Los archivos se quedan donde están — Lightify solo los indexa. Suelta una carpeta para añadir todo lo que contiene."
+
+#: ui/app.slint:2568
+msgid "Find music on this PC"
+msgstr "Buscar música en este PC"
+
+#: ui/app.slint:2576
+msgid "// looking in the usual places…"
+msgstr "// buscando en los sitios habituales…"
+
+#: ui/app.slint:2576
+msgid "// found in the usual places"
+msgstr "// encontrado en los sitios habituales"
+
+#: ui/app.slint:2577
+msgid "No music found in the usual folders — add a folder or files below."
+msgstr "No se encontró música en las carpetas habituales — añade una carpeta o archivos abajo."
+
+#: ui/app.slint:2599
+msgid "added"
+msgstr "añadida"
+
+#: ui/app.slint:2607
+msgid "Add a folder…"
+msgstr "Añadir carpeta…"
+
+#: ui/app.slint:2608
+msgid "Add files…"
+msgstr "Añadir archivos…"
+
+#: ui/app.slint:2661
+msgid "Connecting…"
+msgstr "Conectando…"
+
+#: ui/app.slint:2762 src/main.rs:2161 src/main.rs:2430 src/main.rs:3184
+#: src/main.rs:3284 src/main.rs:3367 src/main.rs:3652 src/main.rs:3760
+#: src/main.rs:11758 src/main.rs:11817 src/main.rs:11905 src/main.rs:15662
+msgid "No queued tracks"
+msgstr "No hay canciones en cola"
+
+#: ui/app.slint:2780
+msgid "Select a genre to load a Beatport chart"
+msgstr "Elige un género para cargar una lista de Beatport"
+
+#: ui/app.slint:2785 src/main.rs:3840
+msgid "Loading…"
+msgstr "Cargando…"
+
+#: ui/app.slint:2788
+msgid "Starting…"
+msgstr "Iniciando…"
+
+#: ui/app.slint:2798 ui/app.slint:5440 src/main.rs:3838
+msgid "Checking…"
+msgstr "Comprobando…"
+
+#: ui/app.slint:2901 src/main.rs:2141 src/main.rs:2298 src/main.rs:2304
+#: src/main.rs:2911 src/main.rs:7233 src/main.rs:7411 src/main.rs:8763
+#: src/main.rs:10274 src/main.rs:13497 src/main.rs:15260
+msgid "Liked Songs"
+msgstr "Tus me gusta"
+
+#: ui/app.slint:3430 src/main.rs:13497
+msgid "Library"
+msgstr "Biblioteca"
+
+#: ui/app.slint:3431 src/main.rs:13594
+msgid "Search"
+msgstr "Buscar"
+
+#: ui/app.slint:3438
+msgid "// library · {}"
+msgstr "// biblioteca · {}"
+
+#: ui/app.slint:3494
+msgid "// tracks"
+msgstr "// canciones"
+
+#: ui/app.slint:3567 ui/app.slint:3741 src/main.rs:13962 src/main.rs:14080
+msgid "No tracks to show"
+msgstr "No hay canciones que mostrar"
+
+#: ui/app.slint:3626
+msgid "What do you want to hear?"
+msgstr "¿Qué quieres escuchar?"
+
+#: ui/app.slint:3757
+msgid "Searching…"
+msgstr "Buscando…"
+
+#: ui/app.slint:3758
+msgid "Search Spotify"
+msgstr "Buscar en Spotify"
+
+#: ui/app.slint:3759
+msgid "No results for “{}”"
+msgstr "No hay resultados para “{}”"
+
+#: ui/app.slint:3768
+msgid "Songs, artists, albums and playlists. Your recent searches will show up here."
+msgstr "Canciones, artistas, álbumes y playlists. Aquí aparecerán tus búsquedas recientes."
+
+#: ui/app.slint:3769
+msgid "Check the spelling, or try fewer or different words."
+msgstr "Revisa la ortografía o prueba con menos palabras o con otras."
+
+#: ui/app.slint:3972
+msgid "Select all"
+msgstr "Seleccionar todo"
+
+#: ui/app.slint:3977
+msgid "Create playlist"
+msgstr "Crear playlist"
+
+#: ui/app.slint:4010
+msgid "OPEN ↗"
+msgstr "ABRIR ↗"
+
+#: ui/app.slint:4055
+msgid "{n} match"
+msgid_plural "{n} matches"
+msgstr[0] "{n} coincidencia"
+msgstr[1] "{n} coincidencias"
+
+#: ui/app.slint:4295
+msgid "Pick a playlist or a song to start"
+msgstr "Elige una playlist o una canción para empezar"
+
+#: ui/app.slint:4562 ui/app.slint:4883 src/main.rs:4335
+msgid "Queue"
+msgstr "Cola"
+
+#: ui/app.slint:4562 ui/app.slint:4884
+msgid "Recent"
+msgstr "Recientes"
+
+#: ui/app.slint:4562 ui/app.slint:4885
+msgid "Downloads"
+msgstr "Descargas"
+
+#: ui/app.slint:4582 src/main.rs:11523
+msgid "Clear"
+msgstr "Borrar"
+
+#: ui/app.slint:4619
+msgid "Finding on Spotify"
+msgstr "Buscando en Spotify"
+
+#: ui/app.slint:4667 src/main.rs:12144 src/main.rs:15671
+msgid "No downloads queued"
+msgstr "No hay descargas en cola"
+
+#: ui/app.slint:4668
+msgid "Right-click a song or playlist and choose Download."
+msgstr "Haz clic derecho en una canción o playlist y elige Descargar."
+
+#: ui/app.slint:4702
+msgid "Click a track to play it — the rest of its list follows here. Right-click a track and choose Add to queue to play it next."
+msgstr "Haz clic en una canción para reproducirla — el resto de su lista sigue aquí. Haz clic derecho en una canción y elige Añadir a la cola para que suene a continuación."
+
+#: ui/app.slint:4725
+msgid "No local tracks played yet"
+msgstr "Aún no has reproducido canciones locales"
+
+#: ui/app.slint:4727
+msgid "Files you play in Local mode will show up here."
+msgstr "Aquí aparecerán los archivos que reproduzcas en modo Local."
+
+#: ui/app.slint:4798
+msgid "Create playlist from queue"
+msgstr "Crear playlist con la cola"
+
+#: ui/app.slint:4820
+msgid "Right-click any song and choose Add to queue."
+msgstr "Haz clic derecho en cualquier canción y elige Añadir a la cola."
+
+#: ui/app.slint:4821
+msgid "Songs you play will show up here."
+msgstr "Aquí aparecerán las canciones que reproduzcas."
+
+#: ui/app.slint:4907
+msgid "{} ready"
+msgstr "{} lista"
+
+#: ui/app.slint:4915 ui/app.slint:5162
+msgid "Restart"
+msgstr "Reiniciar"
+
+#: ui/app.slint:4925
+msgid "updating… {}%"
+msgstr "actualizando… {}%"
+
+#: ui/app.slint:5124
+msgid "Settings"
+msgstr "Ajustes"
+
+#: ui/app.slint:5161
+msgid "// playback engine"
+msgstr "// motor de reproducción"
+
+#: ui/app.slint:5170
+msgid "Lightify decodes audio itself and registers as a Spotify Connect device — the Spotify app is never required."
+msgstr "Lightify decodifica el audio por sí mismo y se registra como dispositivo de Spotify Connect — nunca necesitas la app de Spotify."
+
+#: ui/app.slint:5177
+msgid "// audio output"
+msgstr "// salida de audio"
+
+#: ui/app.slint:5217
+msgid "No audio outputs found"
+msgstr "No se encontraron salidas de audio"
+
+#: ui/app.slint:5229
+msgid "// playback device"
+msgstr "// dispositivo de reproducción"
+
+#: ui/app.slint:5230
+msgid "Refresh"
+msgstr "Actualizar"
+
+#: ui/app.slint:5262
+msgid "Select"
+msgstr "Elegir"
+
+#: ui/app.slint:5278
+msgid "// ascii lava"
+msgstr "// lava ascii"
+
+#: ui/app.slint:5284
+msgid "Lava behind now playing"
+msgstr "Lava detrás de lo que suena"
+
+#: ui/app.slint:5285
+msgid "Right-click the lava for the screensaver."
+msgstr "Haz clic derecho en la lava para el salvapantallas."
+
+#: ui/app.slint:5313
+msgid "// language"
+msgstr "// idioma"
+
+#: ui/app.slint:5356
+msgid "// poll rate"
+msgstr "// frecuencia de consulta"
+
+#: ui/app.slint:5362
+msgid "Slow"
+msgstr "Lenta"
+
+#: ui/app.slint:5363
+msgid "Normal"
+msgstr "Normal"
+
+#: ui/app.slint:5364
+msgid "Fast"
+msgstr "Rápida"
+
+#: ui/app.slint:5375
+msgid "// downloader"
+msgstr "// descargador"
+
+#: ui/app.slint:5381
+msgid "Waiting… (retry)"
+msgstr "Esperando… (reintentar)"
+
+#: ui/app.slint:5381
+msgid "Connect Spotify Downloader"
+msgstr "Conectar descargador de Spotify"
+
+#: ui/app.slint:5396
+msgid "download folder"
+msgstr "carpeta de descargas"
+
+#: ui/app.slint:5421
+msgid "Download folder"
+msgstr "Carpeta de descargas"
+
+#: ui/app.slint:5427 ui/app.slint:5826
+msgid "Save"
+msgstr "Guardar"
+
+#: ui/app.slint:5436
+msgid "// updates"
+msgstr "// actualizaciones"
+
+#: ui/app.slint:5438
+msgid "Restart now"
+msgstr "Reiniciar ahora"
+
+#: ui/app.slint:5439 src/main.rs:14663 src/main.rs:14694 src/main.rs:14716
+#: src/main.rs:14729 src/main.rs:14817 src/main.rs:14853 src/main.rs:14874
+#: src/main.rs:14891
+msgid "Download"
+msgstr "Descargar"
+
+#: ui/app.slint:5441
+msgid "Downloading…"
+msgstr "Descargando…"
+
+#: ui/app.slint:5442
+msgid "Check now"
+msgstr "Comprobar ahora"
+
+#: ui/app.slint:5454
+msgid "Lightify {} downloaded — restart to finish"
+msgstr "Lightify {} descargado — reinicia para terminar"
+
+#: ui/app.slint:5455
+msgid "Lightify {} is available"
+msgstr "Lightify {} está disponible"
+
+#: ui/app.slint:5456
+msgid "Checking lightify.stream…"
+msgstr "Comprobando lightify.stream…"
+
+#: ui/app.slint:5457
+msgid "Downloading Lightify {}"
+msgstr "Descargando Lightify {}"
+
+#: ui/app.slint:5459
+msgid "Lightify {} is up to date"
+msgstr "Lightify {} está actualizado"
+
+#: ui/app.slint:5477
+msgid "Mark seen"
+msgstr "Marcar como visto"
+
+#: ui/app.slint:5495
+msgid "Install updates automatically"
+msgstr "Instalar actualizaciones automáticamente"
+
+#: ui/app.slint:5516
+msgid "// account"
+msgstr "// cuenta"
+
+#: ui/app.slint:5517
+msgid "Not connected"
+msgstr "No conectado"
+
+#: ui/app.slint:5522
+msgid "// about"
+msgstr "// acerca de"
+
+#: ui/app.slint:5595
+msgid "Search actions, playlists…"
+msgstr "Buscar acciones, playlists…"
+
+#: ui/app.slint:5625
+msgid "No matches"
+msgstr "Sin coincidencias"
+
+#: ui/app.slint:5716
+msgid "No"
+msgstr "No"
+
+#: ui/app.slint:5726
+msgid "Yes"
+msgstr "Sí"
+
+#: ui/app.slint:5767
+msgid "// new playlist"
+msgstr "// nueva playlist"
+
+#: ui/app.slint:5805
+msgid "Playlist name"
+msgstr "Nombre de la playlist"
+
+#: ui/app.slint:5814 src/main.rs:14908
+msgid "Cancel"
+msgstr "Cancelar"
+
+#: ui/app.slint:5858
+msgid "// first run"
+msgstr "// primer inicio"
+
+#: ui/app.slint:5859
+msgid "Connect Spotify"
+msgstr "Conectar Spotify"
+
+#: ui/app.slint:5870
+msgid "Go to"
+msgstr "Ve a"
+
+#: ui/app.slint:5884
+msgid "Create an app — set the redirect URI to"
+msgstr "Crea una app — establece la URI de redirección en"
+
+#: ui/app.slint:5894
+msgid "Paste your Client ID below and authorise"
+msgstr "Pega tu Client ID abajo y autoriza"
+
+#: ui/app.slint:5915
+msgid "paste your Spotify Client ID here"
+msgstr "pega aquí tu Client ID de Spotify"
+
+#: ui/app.slint:5935
+msgid "Authorise"
+msgstr "Autorizar"
+
+#: ui/app.slint:5940 src/main.rs:14906
+msgid "Retry"
+msgstr "Reintentar"
+
+#: src/downloader.rs:353
+msgid "Download path cannot be empty"
+msgstr "La ruta de descarga no puede estar vacía"
+
+#: src/local_ui.rs:753 src/local_ui.rs:2037
+msgid "{n} audio file"
+msgid_plural "{n} audio files"
+msgstr[0] "{n} archivo de audio"
+msgstr[1] "{n} archivos de audio"
+
+#: src/local_ui.rs:756 src/local_ui.rs:1051 src/local_ui.rs:1482
+#: src/local_ui.rs:2038
+msgid "{n} folder"
+msgid_plural "{n} folders"
+msgstr[0] "{n} carpeta"
+msgstr[1] "{n} carpetas"
+
+#: src/local_ui.rs:759 src/local_ui.rs:2039
+msgid "{n} skipped (not audio)"
+msgid_plural "{n} skipped (not audio)"
+msgstr[0] "{n} omitido (no es audio)"
+msgstr[1] "{n} omitidos (no son audio)"
+
+#: src/local_ui.rs:836
+msgid "Added {n} track to the queue"
+msgid_plural "Added {n} tracks to the queue"
+msgstr[0] "Se añadió {n} canción a la cola"
+msgstr[1] "Se añadieron {n} canciones a la cola"
+
+#: src/local_ui.rs:915
+msgid "Created “{}”"
+msgstr "Creada: “{}”"
+
+#: src/local_ui.rs:969
+msgid "Play {n} track"
+msgid_plural "Play {n} tracks"
+msgstr[0] "Reproducir {n} canción"
+msgstr[1] "Reproducir {n} canciones"
+
+#: src/local_ui.rs:969 src/local_ui.rs:1014 src/main.rs:13484 src/main.rs:14661
+#: src/main.rs:14684 src/main.rs:14706 src/main.rs:14725 src/main.rs:14736
+#: src/main.rs:14815 src/main.rs:14843 src/main.rs:14864 src/main.rs:14884
+msgid "Play"
+msgstr "Reproducir"
+
+#: src/local_ui.rs:972 src/main.rs:14686 src/main.rs:14708 src/main.rs:14726
+#: src/main.rs:14737 src/main.rs:14816 src/main.rs:14845 src/main.rs:14866
+#: src/main.rs:14886
+msgid "Add to queue"
+msgstr "Añadir a la cola"
+
+#: src/local_ui.rs:975
+msgid "Add to “{}”"
+msgstr "Añadir a “{}”"
+
+#: src/local_ui.rs:979
+msgid "New playlist from {n} track"
+msgid_plural "New playlist from {n} tracks"
+msgstr[0] "Nueva playlist con {n} canción"
+msgstr[1] "Nueva playlist con {n} canciones"
+
+#: src/local_ui.rs:981
+msgid "New playlist from track"
+msgstr "Nueva playlist con la canción"
+
+#: src/local_ui.rs:986 src/local_ui.rs:1003 src/local_ui.rs:1020
+msgid "Show in folder"
+msgstr "Mostrar en carpeta"
+
+#: src/local_ui.rs:990
+msgid "Remove {n} from playlist"
+msgid_plural "Remove {n} from playlist"
+msgstr[0] "Quitar {n} de la playlist"
+msgstr[1] "Quitar {n} de la playlist"
+
+#: src/local_ui.rs:990
+msgid "Remove from playlist"
+msgstr "Quitar de la playlist"
+
+#: src/local_ui.rs:1001
+msgid "Play now"
+msgstr "Reproducir ahora"
+
+#: src/local_ui.rs:1005
+msgid "Remove from queue"
+msgstr "Quitar de la cola"
+
+#: src/local_ui.rs:1016
+msgid "Rename"
+msgstr "Cambiar nombre"
+
+#: src/local_ui.rs:1017
+msgid "Delete playlist"
+msgstr "Eliminar playlist"
+
+#: src/local_ui.rs:1021
+msgid "Remove folder from library"
+msgstr "Quitar carpeta de la biblioteca"
+
+#: src/local_ui.rs:1024 src/local_ui.rs:1347
+msgid "New playlist"
+msgstr "Nueva playlist"
+
+#: src/local_ui.rs:1053
+msgid "Nothing to add — only audio files and folders are taken"
+msgstr "Nada que añadir — solo se aceptan archivos de audio y carpetas"
+
+#: src/local_ui.rs:1054
+msgid "Added {0} and {1} — scanning…"
+msgstr "Se añadieron {0} y {1} — analizando…"
+
+#: src/local_ui.rs:1055 src/local_ui.rs:1056
+msgid "Added {} — scanning…"
+msgstr "Has añadido {} — analizando…"
+
+#: src/local_ui.rs:1157
+msgid "{} h {} m"
+msgstr "{} h {} min"
+
+#: src/local_ui.rs:1157
+msgid "{} m"
+msgstr "{} min"
+
+#: src/local_ui.rs:1161
+msgid "{n} track"
+msgid_plural "{n} tracks"
+msgstr[0] "{n} canción"
+msgstr[1] "{n} canciones"
+
+#: src/local_ui.rs:1166
+msgid "Added {n} track to “{0}”"
+msgid_plural "Added {n} tracks to “{0}”"
+msgstr[0] "Se añadió {n} canción a “{0}”"
+msgstr[1] "Se añadieron {n} canciones a “{0}”"
+
+#: src/local_ui.rs:1173
+msgid "// local · scanning {}…"
+msgstr "// local · analizando {}…"
+
+#: src/local_ui.rs:1174
+msgid "// local · scanning…"
+msgstr "// local · analizando…"
+
+#: src/local_ui.rs:1175
+msgid "// local · {} of {}"
+msgstr "// local · {} de {}"
+
+#: src/local_ui.rs:1176
+msgid "// local · {}"
+msgstr "// local · {}"
+
+#: src/local_ui.rs:1179
+msgid "{0} of {1} hidden"
+msgid_plural "{0} of {1} hidden"
+msgstr[0] "{0} de {1} oculta"
+msgstr[1] "{0} de {1} ocultas"
+
+#: src/local_ui.rs:1181
+msgid "nothing hidden"
+msgstr "nada oculto"
+
+#: src/local_ui.rs:1284 src/local_ui.rs:1361
+msgid "All music"
+msgstr "Toda la música"
+
+#: src/local_ui.rs:1320
+msgid "Genres"
+msgstr "Géneros"
+
+#: src/local_ui.rs:1329
+msgid "Folders"
+msgstr "Carpetas"
+
+#: src/local_ui.rs:1339 src/local_ui.rs:1366
+msgid "Recently added"
+msgstr "Añadidos recientemente"
+
+#: src/local_ui.rs:1341
+msgid "Local playlists"
+msgstr "Playlists locales"
+
+#: src/local_ui.rs:1398
+msgid "{n} album"
+msgid_plural "{n} albums"
+msgstr[0] "{n} álbum"
+msgstr[1] "{n} álbumes"
+
+#: src/local_ui.rs:1408
+msgid "Looking for music…"
+msgstr "Buscando música…"
+
+#: src/local_ui.rs:1410
+msgid "No music yet. Click + (top left) to find music on this PC, or drop audio files and folders here."
+msgstr "Aún no hay música. Haz clic en + (arriba a la izquierda) para buscar música en este PC, o suelta aquí archivos de audio y carpetas."
+
+#: src/local_ui.rs:1413
+msgid "Nothing here matches the filter."
+msgstr "Nada de aquí coincide con el filtro."
+
+#: src/local_ui.rs:1415
+msgid "This playlist is empty — drag tracks onto it in the list on the left, or right-click a track."
+msgstr "Esta playlist está vacía — arrastra canciones hasta ella en la lista de la izquierda, o haz clic derecho en una canción."
+
+#: src/local_ui.rs:1417
+msgid "Nothing here."
+msgstr "Aquí no hay nada."
+
+#: src/local_ui.rs:1467
+msgid "{}{} tracks"
+msgid_plural "{}{} tracks"
+msgstr[0] "{}{} canción"
+msgstr[1] "{}{} canciones"
+
+#: src/local_ui.rs:1482
+msgid "Add {} · {}"
+msgstr "Añadir {} · {}"
+
+#: src/local_ui.rs:1543
+msgid "A new local playlist"
+msgstr "Una nueva playlist local"
+
+#: src/local_ui.rs:1545
+msgid "{n} track for a new local playlist"
+msgid_plural "{n} tracks for a new local playlist"
+msgstr[0] "{n} canción para una nueva playlist local"
+msgstr[1] "{n} canciones para una nueva playlist local"
+
+#: src/local_ui.rs:1547
+msgid "Rename the playlist"
+msgstr "Cambiar el nombre de la playlist"
+
+#: src/local_ui.rs:1737
+msgid "Can’t play “{}” — {}"
+msgstr "No se puede reproducir “{}” — {}"
+
+#: src/local_ui.rs:1894
+msgid "Add a music folder to Lightify"
+msgstr "Añadir una carpeta de música a Lightify"
+
+#: src/local_ui.rs:1896
+msgid "Add music files to Lightify"
+msgstr "Añadir archivos de música a Lightify"
+
+#: src/local_ui.rs:1896
+msgid "Audio files"
+msgstr "Archivos de audio"
+
+#: src/main.rs:1465
+msgid "Playlists error — {}"
+msgstr "Error de playlists — {}"
+
+#: src/main.rs:1655 src/main.rs:1754 src/main.rs:1824 src/main.rs:1900
+msgid "Spotify rate limit — pausing polling for {}"
+msgstr "Límite de peticiones de Spotify — consultas en pausa durante {}"
+
+#: src/main.rs:1857 src/main.rs:1989 src/main.rs:4868
+msgid "Spotify rate limit — resuming in {}"
+msgstr "Límite de peticiones de Spotify — se reanuda en {}"
+
+#: src/main.rs:1885
+msgid "Offline — reconnecting (next try in {})"
+msgstr "Sin conexión — reconectando (próximo intento en {})"
+
+#: src/main.rs:2029 src/main.rs:4892
+msgid "Spotify rate limit — pausing for {}"
+msgstr "Límite de peticiones de Spotify — en pausa durante {}"
+
+#: src/main.rs:2031 src/main.rs:4412 src/main.rs:4894
+msgid "Search — {}"
+msgstr "Búsqueda — {}"
+
+#: src/main.rs:2102
+msgid "Give the playlist a name"
+msgstr "Ponle un nombre a la playlist"
+
+#: src/main.rs:2134 src/main.rs:8482
+msgid "That list just changed — try again"
+msgstr "Esa lista acaba de cambiar — inténtalo de nuevo"
+
+#: src/main.rs:2161 src/main.rs:3284 src/main.rs:3299 src/main.rs:11732
+#: src/main.rs:11758 src/main.rs:11837 src/main.rs:15663
+msgid "No recent tracks yet"
+msgstr "Aún no hay canciones recientes"
+
+#: src/main.rs:2183 src/main.rs:4798 src/main.rs:15761
+msgid "Delete “{}” from your Spotify library?"
+msgstr "¿Eliminar “{}” de tu biblioteca de Spotify?"
+
+#: src/main.rs:2192 src/main.rs:4800 src/main.rs:15759
+msgid "DELETE PLAYLIST"
+msgstr "ELIMINAR PLAYLIST"
+
+#: src/main.rs:2204
+msgid "Resuming {}…"
+msgstr "Reanudando {}…"
+
+#: src/main.rs:2206 src/main.rs:4954
+msgid "Resume — {}"
+msgstr "Reanudar — {}"
+
+#: src/main.rs:2225
+msgid "Playback — {}"
+msgstr "Reproducción — {}"
+
+#: src/main.rs:2259
+msgid "Next — {}"
+msgstr "Siguiente — {}"
+
+#: src/main.rs:2276
+msgid "Prev — {}"
+msgstr "Anterior — {}"
+
+#: src/main.rs:2299
+msgid "Loading Liked Songs…"
+msgstr "Cargando Tus me gusta…"
+
+#: src/main.rs:2317
+msgid "Loading {}…"
+msgstr "Cargando {}…"
+
+#: src/main.rs:2346
+msgid "That track is no longer in the list"
+msgstr "Esa canción ya no está en la lista"
+
+#: src/main.rs:2436 src/main.rs:2546 src/main.rs:3476 src/main.rs:3602
+#: src/main.rs:3668 src/main.rs:4036 src/main.rs:4219 src/main.rs:4367
+#: src/main.rs:4444 src/main.rs:4488 src/main.rs:4655 src/main.rs:4768
+msgid "Play — {}"
+msgstr "Reproducir — {}"
+
+#: src/main.rs:2576
+msgid "Album — {}"
+msgstr "Álbum — {}"
+
+#: src/main.rs:2635
+msgid "Shuffle — {}"
+msgstr "Aleatorio — {}"
+
+#: src/main.rs:2663
+msgid "Repeat — {}"
+msgstr "Repetir — {}"
+
+#: src/main.rs:2681 src/main.rs:4000 src/main.rs:4312 src/main.rs:4457
+#: src/main.rs:4845
+msgid "Added to queue"
+msgstr "Añadido a la cola"
+
+#: src/main.rs:2683 src/main.rs:3304
+msgid "Queue — {}"
+msgstr "Cola — {}"
+
+#: src/main.rs:2786
+msgid "No track playing"
+msgstr "No se está reproduciendo nada"
+
+#: src/main.rs:2797 src/main.rs:4009
+msgid "Saved to Liked Songs"
+msgstr "Añadida a Tus me gusta"
+
+#: src/main.rs:2797
+msgid "Removed from Liked Songs"
+msgstr "Eliminada de Tus me gusta"
+
+#: src/main.rs:2802
+msgid "Like — {}"
+msgstr "Me gusta — {}"
+
+#: src/main.rs:2823
+msgid "Seek — {}"
+msgstr "Posición — {}"
+
+#: src/main.rs:2840
+msgid "Volume — {}"
+msgstr "Volumen — {}"
+
+#: src/main.rs:2883
+msgid "Loading recent…"
+msgstr "Cargando recientes…"
+
+#: src/main.rs:2891 src/main.rs:2964
+msgid "Loading downloads…"
+msgstr "Cargando descargas…"
+
+#: src/main.rs:2924 src/main.rs:2940
+msgid "Nothing to download on that row"
+msgstr "No hay nada que descargar en esa fila"
+
+#: src/main.rs:2947 src/main.rs:3521
+msgid "Matching “{}” on Spotify…"
+msgstr "Buscando “{}” en Spotify…"
+
+#: src/main.rs:2953
+msgid "No Spotify match to download for {}"
+msgstr "No hay coincidencia en Spotify que descargar para {}"
+
+#: src/main.rs:2954 src/main.rs:4141
+msgid "Beatport — {}"
+msgstr "Beatport — {}"
+
+#: src/main.rs:2985 src/main.rs:2997 src/main.rs:3009
+msgid "That download is no longer listed"
+msgstr "Esa descarga ya no está en la lista"
+
+#: src/main.rs:3020
+msgid "Waiting…"
+msgstr "Esperando…"
+
+#: src/main.rs:3035
+msgid "Downloader sign-in started — open Spotify and pick OnTheSpot in the device list. If Windows asked about the firewall, make sure both Private and Public networks are allowed — it only checks Private by default."
+msgstr "Inicio de sesión del descargador en marcha — abre Spotify y elige OnTheSpot en la lista de dispositivos. Si Windows preguntó por el firewall, asegúrate de permitir las redes privadas y las públicas — por defecto solo marca las privadas."
+
+#: src/main.rs:3045
+msgid "Downloader setup failed — {}"
+msgstr "Falló la configuración del descargador — {}"
+
+#: src/main.rs:3103
+msgid "Download path saved"
+msgstr "Ruta de descarga guardada"
+
+#: src/main.rs:3105
+msgid "Failed to set download path — {}"
+msgstr "No se pudo establecer la ruta de descarga — {}"
+
+#: src/main.rs:3124 src/main.rs:3329
+msgid "Lightify isn’t the active Spotify player right now — Settings → Restart, then try again."
+msgstr "Lightify no es el reproductor activo de Spotify ahora mismo — Ajustes → Reiniciar y vuelve a intentarlo."
+
+#: src/main.rs:3154
+msgid "Clearing the queue…"
+msgstr "Borrando la cola…"
+
+#: src/main.rs:3170
+msgid "Cleared queue"
+msgstr "Cola borrada"
+
+#: src/main.rs:3173
+msgid "Cleared the queue, but {n} queued tracks are still there"
+msgid_plural "Cleared the queue, but {n} queued tracks are still there"
+msgstr[0] "Se borró la cola, pero aún queda {n} canción en ella"
+msgstr[1] "Se borró la cola, pero aún quedan {n} canciones en ella"
+
+#: src/main.rs:3189
+msgid "Couldn’t confirm the queue was cleared — try again"
+msgstr "No se pudo confirmar que la cola se borrara — inténtalo de nuevo"
+
+#: src/main.rs:3300
+msgid "Recent — other devices’ plays didn’t load: {}"
+msgstr "Recientes — no se cargaron las reproducciones de otros dispositivos: {}"
+
+#: src/main.rs:3304
+msgid "Recent — {}"
+msgstr "Recientes — {}"
+
+#: src/main.rs:3369
+msgid "Removed “{}” from the queue"
+msgstr "Has quitado “{}” de la cola"
+
+#: src/main.rs:3570
+msgid "Match — {}"
+msgstr "Coincidencia — {}"
+
+#: src/main.rs:3579
+msgid "No Spotify match for “{}”"
+msgstr "No hay coincidencia en Spotify para “{}”"
+
+#: src/main.rs:3610
+msgid "Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "Reproduciendo — preparando el resto de la lista (falta {n})"
+msgstr[1] "Reproduciendo — preparando el resto de la lista (faltan {n})"
+
+#: src/main.rs:3615 src/main.rs:3672
+msgid "Playing {} — {}"
+msgstr "Reproduciendo {} — {}"
+
+#: src/main.rs:3616
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — preparando el resto de la lista (falta {n})"
+msgstr[1] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — preparando el resto de la lista (faltan {n})"
+
+#: src/main.rs:3621
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing {1} — {2}"
+msgstr "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo {1} — {2}"
+
+#: src/main.rs:3694
+msgid "Playing — {0} queued, {n} left to match"
+msgid_plural "Playing — {0} queued, {n} left to match"
+msgstr[0] "Reproduciendo — {0} en cola, falta {n} por encontrar"
+msgstr[1] "Reproduciendo — {0} en cola, faltan {n} por encontrar"
+
+#: src/main.rs:3699
+msgid "Playing — {n} queued"
+msgid_plural "Playing — {n} queued"
+msgstr[0] "Reproduciendo — {n} en cola"
+msgstr[1] "Reproduciendo — {n} en cola"
+
+#: src/main.rs:3700
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgstr[0] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — {2} en cola, falta {n} por encontrar"
+msgstr[1] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — {2} en cola, faltan {n} por encontrar"
+
+#: src/main.rs:3705
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgstr[0] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — {n} en cola"
+msgstr[1] "“{0}” no está en Spotify — en su lugar suena “{1}”. Reproduciendo — {n} en cola"
+
+#: src/main.rs:3726
+msgid "Opened the chart in your browser"
+msgstr "La lista se abrió en tu navegador"
+
+#: src/main.rs:3728
+msgid "Open this in your browser: {}"
+msgstr "Abre esto en tu navegador: {}"
+
+#: src/main.rs:3767
+msgid "Playing the chart — {} of {n} tracks found on Spotify"
+msgid_plural "Playing the chart — {} of {n} tracks found on Spotify"
+msgstr[0] "Reproduciendo la lista — {} de {n} canción encontrada en Spotify"
+msgstr[1] "Reproduciendo la lista — {} de {n} canciones encontradas en Spotify"
+
+#: src/main.rs:3775
+msgid "Lining up the chart — {} so far; retrying ({})"
+msgstr "Preparando la lista — {} hasta ahora; reintentando ({})"
+
+#: src/main.rs:3776
+msgid "Playing the chart — {} lined up…"
+msgstr "Reproduciendo la lista — {} preparadas…"
+
+#: src/main.rs:3804 src/main.rs:12242 src/main.rs:12250
+msgid "Beatport queue refill — {}"
+msgstr "Recarga de la cola de Beatport — {}"
+
+#: src/main.rs:3827 src/main.rs:5274
+msgid "Not running"
+msgstr "Detenido"
+
+#: src/main.rs:3845 src/main.rs:15707
+msgid "No devices yet — Lightify’s own player is still starting."
+msgstr "Aún no hay dispositivos — el reproductor de Lightify todavía se está iniciando."
+
+#: src/main.rs:3853
+msgid "Devices — {}"
+msgstr "Dispositivos — {}"
+
+#: src/main.rs:3863
+msgid "Playing on {}"
+msgstr "Reproduciendo en {}"
+
+#: src/main.rs:3868
+msgid "Transfer — {}"
+msgstr "Transferir — {}"
+
+#: src/main.rs:3967 src/main.rs:16038
+msgid "ASCII lava screensaver"
+msgstr "Salvapantallas de lava ASCII"
+
+#: src/main.rs:4032
+msgid "Nothing to play here"
+msgstr "No hay nada que reproducir aquí"
+
+#: src/main.rs:4043
+msgid "Getting tracks…"
+msgstr "Obteniendo canciones…"
+
+#: src/main.rs:4047 src/main.rs:4081
+msgid "Add to queue — {}"
+msgstr "Añadir a la cola — {}"
+
+#: src/main.rs:4052
+msgid "Nothing playable in “{}”"
+msgstr "Nada reproducible en “{}”"
+
+#: src/main.rs:4066
+msgid "Adding to queue… {}/{}"
+msgstr "Añadiendo a la cola… {}/{}"
+
+#: src/main.rs:4084
+msgid "Added {n} track to queue, then stopped — {0}"
+msgid_plural "Added {n} tracks to queue, then stopped — {0}"
+msgstr[0] "Se añadió {n} canción a la cola y se interrumpió — {0}"
+msgstr[1] "Se añadieron {n} canciones a la cola y se interrumpió — {0}"
+
+#: src/main.rs:4092
+msgid "Added the first {0} of {n} tracks from “{1}” to queue"
+msgid_plural "Added the first {0} of {n} tracks from “{1}” to queue"
+msgstr[0] "Se añadieron a la cola las primeras {0} de {n} canción de “{1}”"
+msgstr[1] "Se añadieron a la cola las primeras {0} de {n} canciones de “{1}”"
+
+#: src/main.rs:4100
+msgid "Added {n} track from “{0}” to queue"
+msgid_plural "Added {n} tracks from “{0}” to queue"
+msgstr[0] "Se añadió {n} canción de “{0}” a la cola"
+msgstr[1] "Se añadieron {n} canciones de “{0}” a la cola"
+
+#: src/main.rs:4111
+msgid "Playlist saved"
+msgstr "Playlist guardada"
+
+#: src/main.rs:4114
+msgid "Album saved"
+msgstr "Álbum guardado"
+
+#: src/main.rs:4131
+msgid "Added to queue: {}"
+msgstr "Añadido a la cola: {}"
+
+#: src/main.rs:4140
+msgid "No Spotify match for {}"
+msgstr "No hay coincidencia en Spotify para {}"
+
+#: src/main.rs:4171 src/main.rs:4189
+msgid "No Beatport tracks selected"
+msgstr "No hay canciones de Beatport seleccionadas"
+
+#: src/main.rs:4191
+msgid "Matching {n} Beatport tracks…"
+msgid_plural "Matching {n} Beatport tracks…"
+msgstr[0] "Buscando {n} canción de Beatport…"
+msgstr[1] "Buscando {n} canciones de Beatport…"
+
+#: src/main.rs:4205
+msgid "No Spotify matches for the selection"
+msgstr "No hay coincidencias en Spotify para la selección"
+
+#: src/main.rs:4224
+msgid "Playing {n} selected ({} unmatched)"
+msgid_plural "Playing {n} selected ({} unmatched)"
+msgstr[0] "Reproduciendo {n} seleccionada ({} sin coincidencia)"
+msgstr[1] "Reproduciendo {n} seleccionadas ({} sin coincidencia)"
+
+#: src/main.rs:4230 src/main.rs:4664
+msgid "Playing {n} selected"
+msgid_plural "Playing {n} selected"
+msgstr[0] "Reproduciendo {n} seleccionada"
+msgstr[1] "Reproduciendo {n} seleccionadas"
+
+#: src/main.rs:4254 src/main.rs:4703
+msgid "Added {n} to queue, then stopped — {}"
+msgid_plural "Added {n} to queue, then stopped — {}"
+msgstr[0] "Se añadió {n} canción a la cola y se interrumpió — {}"
+msgstr[1] "Se añadieron {n} canciones a la cola y se interrumpió — {}"
+
+#: src/main.rs:4262
+msgid "Added {n} to queue ({} unmatched)"
+msgid_plural "Added {n} to queue ({} unmatched)"
+msgstr[0] "Se añadió {n} canción a la cola ({} sin coincidencia)"
+msgstr[1] "Se añadieron {n} canciones a la cola ({} sin coincidencia)"
+
+#: src/main.rs:4268 src/main.rs:4709
+msgid "Added {n} to queue"
+msgid_plural "Added {n} to queue"
+msgstr[0] "Se añadió {n} canción a la cola"
+msgstr[1] "Se añadieron {n} canciones a la cola"
+
+#: src/main.rs:4272
+msgid "BP Selection"
+msgstr "Selección BP"
+
+#: src/main.rs:4278
+msgid "Created: {} ({n} unmatched)"
+msgid_plural "Created: {} ({n} unmatched)"
+msgstr[0] "Creada: {} ({n} sin coincidencia)"
+msgstr[1] "Creada: {} ({n} sin coincidencia)"
+
+#: src/main.rs:4284 src/main.rs:4338 src/main.rs:4728
+msgid "Created: {}"
+msgstr "Creada: {}"
+
+#: src/main.rs:4295 src/main.rs:4741
+msgid "Create playlist — {}"
+msgstr "Crear playlist — {}"
+
+#: src/main.rs:4333
+msgid "Queue is empty"
+msgstr "La cola está vacía"
+
+#: src/main.rs:4347
+msgid "Failed: {}"
+msgstr "Error: {}"
+
+#: src/main.rs:4371
+msgid "Nothing selected"
+msgstr "No hay nada seleccionado"
+
+#: src/main.rs:4651 src/main.rs:4675
+msgid "Selection has no playable tracks"
+msgstr "La selección no tiene canciones reproducibles"
+
+#: src/main.rs:4658
+msgid "Playing the first {0} of {n} selected"
+msgid_plural "Playing the first {0} of {n} selected"
+msgstr[0] "Reproduciendo las primeras {0} de {n} seleccionada"
+msgstr[1] "Reproduciendo las primeras {0} de {n} seleccionadas"
+
+#: src/main.rs:4723
+msgid "Selection has no playlist tracks"
+msgstr "La selección no tiene canciones para la playlist"
+
+#: src/main.rs:4725
+msgid "Selection"
+msgstr "Selección"
+
+#: src/main.rs:4764
+msgid "Play — playlist has no URI"
+msgstr "Reproducir — la playlist no tiene URI"
+
+#: src/main.rs:4781
+msgid "Playlist saved to library"
+msgstr "Playlist guardada en la biblioteca"
+
+#: src/main.rs:4828
+msgid "Playlists — {}"
+msgstr "Playlists — {}"
+
+#: src/main.rs:4830
+msgid "Deleted playlist: {}"
+msgstr "Playlist eliminada: {}"
+
+#: src/main.rs:4832
+msgid "Failed to delete playlist: {}"
+msgstr "No se pudo eliminar la playlist: {}"
+
+#: src/main.rs:4905 src/main.rs:5340
+msgid "Audio output → {}"
+msgstr "Salida de audio → {}"
+
+#: src/main.rs:4912
+msgid "Running · Lightify"
+msgstr "En ejecución · Lightify"
+
+#: src/main.rs:4925
+msgid "Playing through {}"
+msgstr "Reproduciendo a través de {}"
+
+#: src/main.rs:4953
+msgid "Playback engine restarted — resumed"
+msgstr "Motor de reproducción reiniciado — reanudado"
+
+#: src/main.rs:4962
+msgid "Playback device — {}"
+msgstr "Dispositivo de reproducción — {}"
+
+#: src/main.rs:5133
+msgid "Error — {}"
+msgstr "Error — {}"
+
+#: src/main.rs:5134 src/main.rs:10064
+msgid "Playback engine — {}"
+msgstr "Motor de reproducción — {}"
+
+#: src/main.rs:5140
+msgid "Ignored a station that was no longer wanted"
+msgstr "Se ignoró una radio que ya no se necesitaba"
+
+#: src/main.rs:5158
+msgid "Station — {n} similar tracks after this one"
+msgid_plural "Station — {n} similar tracks after this one"
+msgstr[0] "Radio — {n} canción similar después de esta"
+msgstr[1] "Radio — {n} canciones similares después de esta"
+
+#: src/main.rs:5186
+msgid "Station had no tracks to queue"
+msgstr "La radio no tenía canciones para la cola"
+
+#: src/main.rs:5217 src/main.rs:5254
+msgid "Station — {}"
+msgstr "Radio — {}"
+
+#: src/main.rs:5222
+msgid "Station queued — {n} tracks after this one"
+msgid_plural "Station queued — {n} tracks after this one"
+msgstr[0] "Radio en cola — {n} canción después de esta"
+msgstr[1] "Radio en cola — {n} canciones después de esta"
+
+#: src/main.rs:5242 src/main.rs:11832
+msgid "Loading queue…"
+msgstr "Cargando la cola…"
+
+#: src/main.rs:5258
+msgid "Station started — {n} tracks"
+msgid_plural "Station started — {n} tracks"
+msgstr[0] "Radio iniciada — {n} canción"
+msgstr[1] "Radio iniciada — {n} canciones"
+
+#: src/main.rs:5298
+msgid "Playback moved to another Spotify device — Lightify’s player stopped. Settings → Restart to play here again."
+msgstr "La reproducción pasó a otro dispositivo de Spotify — el reproductor de Lightify se detuvo. Ajustes → Reiniciar para volver a reproducir aquí."
+
+#: src/main.rs:5306
+msgid "Playback engine stopped (audio device lost?) — restarting…"
+msgstr "El motor de reproducción se detuvo (¿se perdió el dispositivo de audio?) — reiniciando…"
+
+#: src/main.rs:5308 src/main.rs:5360 src/main.rs:5378
+msgid "Restarting…"
+msgstr "Reiniciando…"
+
+#: src/main.rs:5316
+msgid "Playback engine keeps stopping — check the audio output in Settings, then Restart"
+msgstr "El motor de reproducción se sigue deteniendo — revisa la salida de audio en Ajustes y luego Reiniciar"
+
+#: src/main.rs:5332
+msgid "That output list changed — pick again"
+msgstr "La lista de salidas cambió — elige de nuevo"
+
+#: src/main.rs:5356
+msgid "Settings — {}"
+msgstr "Ajustes — {}"
+
+#: src/main.rs:5377
+msgid "Reclaiming playback after downloader sign-in…"
+msgstr "Recuperando la reproducción tras el inicio de sesión del descargador…"
+
+#: src/main.rs:9465
+msgid "Playback error — {}"
+msgstr "Error de reproducción — {}"
+
+#: src/main.rs:9773
+msgid "Cleared the queued-ahead tracks"
+msgstr "Se borraron las siguientes canciones de la cola"
+
+#: src/main.rs:10017
+msgid "Not found"
+msgstr "No encontrado"
+
+#: src/main.rs:10050
+msgid "Audio output “{}” isn’t available — playing on the system default"
+msgstr "La salida de audio “{}” no está disponible — se usa la predeterminada del sistema"
+
+#: src/main.rs:10052
+msgid "Starting Lightify playback…"
+msgstr "Iniciando la reproducción de Lightify…"
+
+#: src/main.rs:10054
+msgid "One-time Spotify streaming sign-in — finish it in your browser"
+msgstr "Inicio de sesión único para el streaming de Spotify — termínalo en tu navegador"
+
+#: src/main.rs:10063
+msgid "Failed — {}"
+msgstr "Falló — {}"
+
+#: src/main.rs:10091 src/main.rs:15718
+msgid "System default"
+msgstr "Predeterminada del sistema"
+
+#: src/main.rs:10096 src/main.rs:15725
+msgid "Configured output “{}” isn’t connected — playing on the system default."
+msgstr "La salida configurada “{}” no está conectada — se usa la predeterminada del sistema."
+
+#: src/main.rs:10231 src/main.rs:12525
+msgid "{}m"
+msgstr "{}min"
+
+#: src/main.rs:10233
+msgid "{}s"
+msgstr "{}s"
+
+#: src/main.rs:10275
+msgid "Your saved Spotify tracks"
+msgstr "Tus canciones guardadas de Spotify"
+
+#: src/main.rs:10284
+msgid "{} tracks"
+msgid_plural "{} tracks"
+msgstr[0] "{} canción"
+msgstr[1] "{} canciones"
+
+#: src/main.rs:10286
+msgid "{} tracks • {}"
+msgid_plural "{} tracks • {}"
+msgstr[0] "{} canción • {}"
+msgstr[1] "{} canciones • {}"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected"
+msgstr "Conectado"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected as {}"
+msgstr "Conectado como {}"
+
+#: src/main.rs:11244
+msgid "Artist • {} followers"
+msgid_plural "Artist • {} followers"
+msgstr[0] "Artista • {} seguidor"
+msgstr[1] "Artista • {} seguidores"
+
+#: src/main.rs:11246
+msgid "Artist"
+msgstr "Artista"
+
+#: src/main.rs:11265
+msgid "Album • {}"
+msgstr "Álbum • {}"
+
+#: src/main.rs:11278
+msgid "Playlist • {} tracks"
+msgid_plural "Playlist • {} tracks"
+msgstr[0] "Playlist • {} canción"
+msgstr[1] "Playlist • {} canciones"
+
+#: src/main.rs:11280
+msgid "Playlist • {} tracks • {}"
+msgid_plural "Playlist • {} tracks • {}"
+msgstr[0] "Playlist • {} canción • {}"
+msgstr[1] "Playlist • {} canciones • {}"
+
+#: src/main.rs:11454
+msgid "See all"
+msgstr "Ver todo"
+
+#: src/main.rs:11518
+msgid "Recent searches"
+msgstr "Búsquedas recientes"
+
+#: src/main.rs:11685
+msgid "All {n} found on Spotify"
+msgid_plural "All {n} found on Spotify"
+msgstr[0] "{n} encontrada en Spotify"
+msgstr[1] "Las {n} encontradas en Spotify"
+
+#: src/main.rs:11689
+msgid "{} of {} found · {n} not on Spotify"
+msgid_plural "{} of {} found · {n} not on Spotify"
+msgstr[0] "{} de {} encontradas · falta {n}"
+msgstr[1] "{} de {} encontradas · faltan {n}"
+
+#: src/main.rs:12186
+msgid "Queueing download: {}…"
+msgstr "Poniendo en cola la descarga: {}…"
+
+#: src/main.rs:12190
+msgid "Download queued: {}"
+msgstr "Descarga en cola: {}"
+
+#: src/main.rs:12523
+msgid "just now"
+msgstr "ahora mismo"
+
+#: src/main.rs:12527
+msgid "{}h"
+msgstr "{}h"
+
+#: src/main.rs:12529
+msgid "{}d"
+msgstr "{}d"
+
+#: src/main.rs:12630
+msgid "Fetching {} — {}…"
+msgstr "Obteniendo {} — {}…"
+
+#: src/main.rs:12636 src/main.rs:15693
+msgid "{n} tracks — {} {}"
+msgid_plural "{n} tracks — {} {}"
+msgstr[0] "{n} canción — {} {}"
+msgstr[1] "{n} canciones — {} {}"
+
+#: src/main.rs:12703 src/main.rs:15560
+msgid "Your Spotify sign-in has expired or was revoked — authorise again. ({})"
+msgstr "Tu sesión de Spotify caducó o se revocó — vuelve a autorizar. ({})"
+
+#: src/main.rs:12717 src/main.rs:15566
+msgid "Sign in to Spotify to start"
+msgstr "Inicia sesión en Spotify para empezar"
+
+#: src/main.rs:12732
+msgid "Signed in as {}"
+msgstr "Sesión iniciada como {}"
+
+#: src/main.rs:12758
+msgid "Opening browser — complete the login…"
+msgstr "Abriendo el navegador — completa el inicio de sesión…"
+
+#: src/main.rs:12773
+msgid "Re-opening browser — complete the login…"
+msgstr "Reabriendo el navegador — completa el inicio de sesión…"
+
+#: src/main.rs:13021
+msgid "Automatic (Windows language)"
+msgstr "Automático (idioma de Windows)"
+
+#: src/main.rs:13023
+msgid "{} (preview)"
+msgstr "{} (vista previa)"
+
+#: src/main.rs:13161
+msgid "The downloaded update is gone — check again"
+msgstr "La actualización descargada ya no está — vuelve a comprobar"
+
+#: src/main.rs:13176
+msgid "Couldn't start the update: {}"
+msgstr "No se pudo iniciar la actualización: {}"
+
+#: src/main.rs:13415
+msgid "Restored queue — {n} track"
+msgid_plural "Restored queue — {n} tracks"
+msgstr[0] "Cola restaurada — {n} canción"
+msgstr[1] "Cola restaurada — {n} canciones"
+
+#: src/main.rs:13484
+msgid "Pause"
+msgstr "Pausar"
+
+#: src/main.rs:13484 src/main.rs:13485 src/main.rs:13486 src/main.rs:13487
+#: src/main.rs:13488
+msgid "Playback"
+msgstr "Reproducción"
+
+#: src/main.rs:13485
+msgid "Next track"
+msgstr "Siguiente canción"
+
+#: src/main.rs:13486
+msgid "Previous track"
+msgstr "Canción anterior"
+
+#: src/main.rs:13487
+msgid "Toggle shuffle"
+msgstr "Activar/desactivar aleatorio"
+
+#: src/main.rs:13488
+msgid "Cycle repeat"
+msgstr "Cambiar modo de repetición"
+
+#: src/main.rs:13489
+msgid "Open settings"
+msgstr "Abrir ajustes"
+
+#: src/main.rs:13489
+msgid "App"
+msgstr "App"
+
+#: src/main.rs:13490
+msgid "Show queue"
+msgstr "Mostrar cola"
+
+#: src/main.rs:13490 src/main.rs:13491
+msgid "Panel"
+msgstr "Panel"
+
+#: src/main.rs:13491
+msgid "Show recent"
+msgstr "Mostrar recientes"
+
+#: src/main.rs:13492
+msgid "Collapse left panel"
+msgstr "Contraer panel izquierdo"
+
+#: src/main.rs:13492 src/main.rs:13493 src/main.rs:13494 src/main.rs:13495
+#: src/main.rs:13496
+msgid "Window"
+msgstr "Ventana"
+
+#: src/main.rs:13493
+msgid "Mini player: square"
+msgstr "Minirreproductor: cuadrado"
+
+#: src/main.rs:13494
+msgid "Mini player: bar"
+msgstr "Minirreproductor: barra"
+
+#: src/main.rs:13495
+msgid "Mini player: nano (cover only)"
+msgstr "Minirreproductor: nano (solo portada)"
+
+#: src/main.rs:13496
+msgid "Exit mini player"
+msgstr "Salir del minirreproductor"
+
+#: src/main.rs:13505
+msgid "Playlist"
+msgstr "Playlist"
+
+#: src/main.rs:13593
+msgid "Search for “{}”"
+msgstr "Buscar “{}”"
+
+#: src/main.rs:13960 src/main.rs:14032
+msgid "Loading “{}”…"
+msgstr "Cargando “{}”…"
+
+#: src/main.rs:13966 src/main.rs:14087 src/main.rs:15269 src/main.rs:15417
+msgid "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgid_plural "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgstr[0] "Se cargó {n} canción de “{0}” — solo vista previa; Spotify no entrega esta playlist a esta app"
+msgstr[1] "Se cargaron {n} canciones de “{0}” — solo vista previa; Spotify no entrega esta playlist a esta app"
+
+#: src/main.rs:13973 src/main.rs:14094 src/main.rs:15424
+msgid "Loaded {n} tracks from “{0}”"
+msgid_plural "Loaded {n} tracks from “{0}”"
+msgstr[0] "Se cargó {n} canción de “{0}”"
+msgstr[1] "Se cargaron {n} canciones de “{0}”"
+
+#: src/main.rs:13977 src/main.rs:15405
+msgid "Loaded {n} tracks from “{0}”…"
+msgid_plural "Loaded {n} tracks from “{0}”…"
+msgstr[0] "Se cargó {n} canción de “{0}”…"
+msgstr[1] "Se cargaron {n} canciones de “{0}”…"
+
+#: src/main.rs:13987 src/main.rs:14115
+msgid "“{}” failed: {}"
+msgstr "“{}” falló: {}"
+
+#: src/main.rs:13991 src/main.rs:14119
+msgid "“{}” stopped after {n} tracks: {}"
+msgid_plural "“{}” stopped after {n} tracks: {}"
+msgstr[0] "“{}” se detuvo tras {n} canción: {}"
+msgstr[1] "“{}” se detuvo tras {n} canciones: {}"
+
+#: src/main.rs:14100
+msgid "Loaded {0} / {1} tracks from “{2}”"
+msgid_plural "Loaded {0} / {1} tracks from “{2}”"
+msgstr[0] "Se cargaron {0} / {1} canción de “{2}”"
+msgstr[1] "Se cargaron {0} / {1} canciones de “{2}”"
+
+#: src/main.rs:14106
+msgid "Loaded {0} tracks from “{1}”"
+msgid_plural "Loaded {0} tracks from “{1}”"
+msgstr[0] "Se cargó {0} canción de “{1}”"
+msgstr[1] "Se cargaron {0} canciones de “{1}”"
+
+#: src/main.rs:14581
+msgid "Start station needs a Spotify track"
+msgstr "Iniciar radio requiere una canción de Spotify"
+
+#: src/main.rs:14587
+msgid "Start station needs Lightify’s own player — Settings → Restart"
+msgstr "Iniciar radio requiere el reproductor de Lightify — Ajustes → Reiniciar"
+
+#: src/main.rs:14607
+msgid "Building station…"
+msgstr "Creando la radio…"
+
+#: src/main.rs:14614
+msgid "Follow artist needs the user-follow-modify scope, which this token doesn’t carry"
+msgstr "Seguir artista requiere el permiso user-follow-modify, que este token no tiene"
+
+#: src/main.rs:14643 src/main.rs:14824
+msgid "Play {n} selected"
+msgid_plural "Play {n} selected"
+msgstr[0] "Reproducir {n} seleccionada"
+msgstr[1] "Reproducir {n} seleccionadas"
+
+#: src/main.rs:14644 src/main.rs:14825 src/main.rs:14835
+msgid "Add {n} to queue"
+msgid_plural "Add {n} to queue"
+msgstr[0] "Añadir {n} a la cola"
+msgstr[1] "Añadir {n} a la cola"
+
+#: src/main.rs:14645 src/main.rs:14826
+msgid "Create playlist from selection"
+msgstr "Crear playlist con la selección"
+
+#: src/main.rs:14652
+msgid "Open"
+msgstr "Abrir"
+
+#: src/main.rs:14653
+msgid "Download liked songs"
+msgstr "Descargar Tus me gusta"
+
+#: src/main.rs:14662
+msgid "Save to library"
+msgstr "Guardar en la biblioteca"
+
+#: src/main.rs:14664
+msgid "Delete"
+msgstr "Eliminar"
+
+#: src/main.rs:14689 src/main.rs:14714 src/main.rs:14848 src/main.rs:14869
+#: src/main.rs:14889
+msgid "Share"
+msgstr "Compartir"
+
+#: src/main.rs:14690 src/main.rs:14715 src/main.rs:14849 src/main.rs:14870
+#: src/main.rs:14890
+msgid "Start station"
+msgstr "Iniciar radio"
+
+#: src/main.rs:14692 src/main.rs:14851 src/main.rs:14872
+msgid "Follow artist"
+msgstr "Seguir artista"
+
+#: src/main.rs:14712
+msgid "Like"
+msgstr "Me gusta"
+
+#: src/main.rs:14727 src/main.rs:14738 src/main.rs:14747
+msgid "Show tracks"
+msgstr "Ver canciones"
+
+#: src/main.rs:14728
+msgid "Save playlist"
+msgstr "Guardar playlist"
+
+#: src/main.rs:14739
+msgid "Save album"
+msgstr "Guardar álbum"
+
+#: src/main.rs:14748
+msgid "Add top songs to queue"
+msgstr "Añadir canciones populares a la cola"
+
+#: src/main.rs:14834
+msgid "Play first selected"
+msgstr "Reproducir la primera seleccionada"
+
+#: src/main.rs:14911
+msgid "Open download folder"
+msgstr "Abrir carpeta de descargas"
+
+#: src/main.rs:14911
+msgid "Open folder"
+msgstr "Abrir carpeta"
+
+#: src/main.rs:14915
+msgid "Delete file"
+msgstr "Eliminar archivo"
+
+#: src/main.rs:14929
+msgid "{n} track from your queue"
+msgid_plural "{n} tracks from your queue"
+msgstr[0] "{n} canción de tu cola"
+msgstr[1] "{n} canciones de tu cola"
+
+#: src/main.rs:14933
+msgid "{n} track selected"
+msgid_plural "{n} tracks selected"
+msgstr[0] "{n} canción seleccionada"
+msgstr[1] "{n} canciones seleccionadas"
+
+#: src/main.rs:14989
+msgid "Share — no Spotify id"
+msgstr "Compartir — sin ID de Spotify"
+
+#: src/main.rs:14994
+msgid "Copied Spotify link"
+msgstr "Enlace de Spotify copiado"
+
+#: src/main.rs:14995
+msgid "Share — {}"
+msgstr "Compartir — {}"
+
+#: src/main.rs:15047
+msgid "could not set the clipboard: {}"
+msgstr "no se pudo usar el portapapeles: {}"
+
+#: src/main.rs:15404
+msgid "Artist — {}"
+msgstr "Artista — {}"
+
+#: src/tray.rs:68 src/tray.rs:80
+msgid "Show Lightify"
+msgstr "Mostrar Lightify"
+
+#: src/tray.rs:69 src/tray.rs:81
+msgid "Quit"
+msgstr "Salir"

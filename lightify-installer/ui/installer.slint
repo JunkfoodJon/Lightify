@@ -32,6 +32,8 @@ global Ico {
     out property <string> close: "M6.5 6.5l11 11M17.5 6.5l-11 11";
     out property <string> minimize: "M6 12h12";
     out property <string> logo: "M7 4.5v15h10";
+    out property <string> globe: "M3.5 12a8.5 8.5 0 1 0 17 0a8.5 8.5 0 1 0 -17 0M3.5 12h17M12 3.5c-2.6 2.4-3.9 5.2-3.9 8.5s1.3 6.1 3.9 8.5M12 3.5c2.6 2.4 3.9 5.2 3.9 8.5s-1.3 6.1-3.9 8.5";
+    out property <string> chevron: "M7.5 10l4.5 4.5 4.5-4.5";
 }
 
 export struct Step {
@@ -44,6 +46,16 @@ export struct LicLine {
     // 0 = paragraph, 1 = heading, 2 = sub-heading, 3 = bullet
     kind: int,
     text: string,
+}
+
+// A translated sentence around one link ("I accept the <a>licence</a>", split by
+// main.rs split_link); a gap is the 4 px space next to the link.
+export struct LinkText {
+    before: string,
+    gap-before: bool,
+    link: string,
+    gap-after: bool,
+    after: string,
 }
 
 // A neon word, as the app's titlebar wordmark: the text over a soft glow of itself
@@ -244,6 +256,42 @@ component Seg inherits Rectangle {
     }
 }
 
+// The language list's button: the active language in its own name; opens the list.
+component LangPill inherits Rectangle {
+    in property <string> text;
+    in property <bool> open;
+    callback clicked <=> ta.clicked;
+    height: 32px;
+    width: min(row.preferred-width, 260px);
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: ta.has-hover || root.open ? Pal.line3 : Pal.line;
+    background: ta.has-hover || root.open ? Pal.s2 : Pal.surface;
+    animate background, border-color { duration: 150ms; }
+    ta := TouchArea { mouse-cursor: pointer; }
+    row := HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 10px;
+        spacing: 7px;
+        VerticalLayout {
+            alignment: center;
+            Icon { size: 14px; commands: Ico.globe; stroke: Pal.dim; }
+        }
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: Pal.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon { size: 12px; weight: 2; commands: Ico.chevron; stroke: Pal.dim; }
+        }
+    }
+}
+
 component Bar inherits Rectangle {
     in property <float> value;
     height: 6px;
@@ -423,6 +471,13 @@ export component InstallerWindow inherits Window {
     in-out property <bool> accepted: false;
     in property <string> welcome-note;
     in property <[LicLine]> licence;
+    in property <LinkText> accept;
+
+    // Language list (LANGUAGE-PLAN.md): English first, then each bundled language in its
+    // own name; hidden while English is the only one.
+    in property <[string]> languages: [];
+    in property <int> language-index: 0;
+    in-out property <bool> lang-open: false;
 
     // Progress
     in property <float> progress: 0;
@@ -438,19 +493,20 @@ export component InstallerWindow inherits Window {
     in property <string> closeapp-note;
 
     // Error page
-    in property <string> error-title: "Setup couldn't finish";
+    in property <string> error-title: @tr("Setup couldn't finish");
     in property <string> error-text;
     in property <bool> error-can-back: false;
 
     // Update window
     in property <string> update-from: "2.2.4";
     in property <string> update-to: "2.3.0";
-    in property <string> update-note: "Lightify reopens where you left off.";
+    in property <string> update-note: @tr("Lightify reopens where you left off.");
 
     callback start-drag();
     callback minimize();
     callback close-window();
     callback scope-changed(bool);
+    callback language-picked(int);
     callback change-path();
     callback install();
     callback finish();
@@ -461,7 +517,7 @@ export component InstallerWindow inherits Window {
     callback remove();
     callback error-back();
 
-    title: root.mode == "uninstall" ? "Uninstall Lightify" : (root.mode == "update" ? "Updating Lightify" : "Lightify Setup");
+    title: root.mode == "uninstall" ? @tr("Uninstall Lightify") : (root.mode == "update" ? @tr("Updating Lightify") : @tr("Lightify Setup"));
     icon: @image-url("../../lightify-shell/assets/lightify-icon.png");
     no-frame: true;
     background: Pal.bg;
@@ -495,13 +551,15 @@ export component InstallerWindow inherits Window {
                 VerticalLayout {
                     spacing: 2px;
                     Text {
-                        text: root.page == "error" ? "Update didn't finish" : "Updating Lightify";
+                        text: root.page == "error" ? @tr("Update didn't finish") : @tr("Updating Lightify");
                         font-size: 16px;
                         font-weight: 600;
                         color: Pal.text;
                     }
                     Text {
-                        text: root.update-from + " \u{2192} " + root.update-to + " \u{00b7} signature checked";
+                        // An install that recorded no version says "installed".
+                        text: root.update-from == "" ? @tr("installed \u{2192} {} \u{00b7} signature checked", root.update-to)
+                            : @tr("{} \u{2192} {} \u{00b7} signature checked", root.update-from, root.update-to);
                         font-family: "JetBrains Mono";
                         font-size: 11.5px;
                         color: Pal.dim;
@@ -546,7 +604,7 @@ export component InstallerWindow inherits Window {
                     }
                 }
                 Text {
-                    text: root.mode == "uninstall" ? "uninstall" : "setup";
+                    text: root.mode == "uninstall" ? @tr("uninstall") : @tr("setup");
                     font-size: 13.5px;
                     font-weight: 600;
                     letter-spacing: -0.27px;
@@ -585,14 +643,37 @@ export component InstallerWindow inherits Window {
             padding-top: 28px;
             padding-bottom: 24px;
             spacing: 20px;
-            VerticalLayout {
-                spacing: 6px;
-                Lbl { text: "// welcome"; }
-                H1 { text: "Install Lightify"; }
+            HorizontalLayout {
+                spacing: 16px;
+                VerticalLayout {
+                    spacing: 6px;
+                    horizontal-stretch: 1;
+                    Lbl { text: @tr("// welcome"); }
+                    H1 { text: @tr("Install Lightify"); }
+                }
+                // The language list, once a language besides English is bundled. The
+                // list itself opens over the page (lang-open, at the end of the window).
+                if root.languages.length > 1 : VerticalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    horizontal-stretch: 0;
+                    Lbl {
+                        text: @tr("language");
+                        horizontal-alignment: right;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        LangPill {
+                            text: root.languages[root.language-index];
+                            open: root.lang-open;
+                            clicked => { root.lang-open = !root.lang-open; }
+                        }
+                    }
+                }
             }
             VerticalLayout {
                 spacing: 8px;
-                Lbl { text: "install for"; }
+                Lbl { text: @tr("install for"); }
                 HorizontalLayout {
                     alignment: start;
                     Rectangle {
@@ -608,7 +689,7 @@ export component InstallerWindow inherits Window {
                             padding-right: 4px;
                             spacing: 2px;
                             Seg {
-                                text: "Just me";
+                                text: @tr("Just me");
                                 selected: !root.for-all;
                                 enabled: !root.scope-locked;
                                 clicked => {
@@ -619,7 +700,7 @@ export component InstallerWindow inherits Window {
                                 }
                             }
                             Seg {
-                                text: "Everyone on this PC";
+                                text: @tr("Everyone on this PC");
                                 selected: root.for-all;
                                 enabled: !root.scope-locked;
                                 clicked => {
@@ -635,7 +716,7 @@ export component InstallerWindow inherits Window {
             }
             VerticalLayout {
                 spacing: 8px;
-                Lbl { text: "install to"; }
+                Lbl { text: @tr("install to"); }
                 HorizontalLayout {
                     spacing: 8px;
                     PathField {
@@ -643,7 +724,7 @@ export component InstallerWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                     Btn {
-                        text: "Change";
+                        text: @tr("Change");
                         font-size: 13px;
                         font-weight: 500;
                         clicked => { root.change-path(); }
@@ -653,11 +734,12 @@ export component InstallerWindow inherits Window {
             VerticalLayout {
                 spacing: 12px;
                 Check {
-                    text: "Desktop shortcut";
+                    text: @tr("Desktop shortcut");
                     checked: root.desktop;
                     toggled => { root.desktop = !root.desktop; }
                 }
-                // "I accept the licence": the row toggles, the word opens the text.
+                // "I accept the licence": the row toggles, the link opens the text. One
+                // translated sentence (accept), so the link sits where each language puts it.
                 Rectangle {
                     height: 20px;
                     TouchArea {
@@ -672,15 +754,15 @@ export component InstallerWindow inherits Window {
                             CheckBox { checked: root.accepted; }
                         }
                         HorizontalLayout {
-                            spacing: 4px;
-                            Text {
-                                text: "I accept the";
+                            if root.accept.before != "" : Text {
+                                text: root.accept.before;
                                 font-size: 13.5px;
                                 color: Pal.text-ck;
                                 vertical-alignment: center;
                             }
+                            if root.accept.gap-before : Rectangle { width: 4px; }
                             link := Text {
-                                text: "licence";
+                                text: root.accept.link;
                                 font-size: 13.5px;
                                 color: link-ta.has-hover ? Pal.muted : Pal.text;
                                 vertical-alignment: center;
@@ -693,6 +775,13 @@ export component InstallerWindow inherits Window {
                                     height: 1px;
                                     background: link.color;
                                 }
+                            }
+                            if root.accept.gap-after : Rectangle { width: 4px; }
+                            if root.accept.after != "" : Text {
+                                text: root.accept.after;
+                                font-size: 13.5px;
+                                color: Pal.text-ck;
+                                vertical-alignment: center;
                             }
                         }
                     }
@@ -711,11 +800,11 @@ export component InstallerWindow inherits Window {
                 }
                 if root.welcome-note == "" : Rectangle { horizontal-stretch: 1; }
                 Btn {
-                    text: "Cancel";
+                    text: @tr("Cancel");
                     clicked => { root.close-window(); }
                 }
                 Btn {
-                    text: "Install";
+                    text: @tr("Install");
                     primary: true;
                     enabled: root.accepted && root.install-path != "";
                     clicked => { root.install(); }
@@ -732,8 +821,8 @@ export component InstallerWindow inherits Window {
             spacing: 16px;
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// licence"; }
-                H1 { text: "Licence"; }
+                Lbl { text: @tr("// licence"); }
+                H1 { text: @tr("Licence"); }
             }
             LicenceView {
                 lines: root.licence;
@@ -743,11 +832,11 @@ export component InstallerWindow inherits Window {
                 spacing: 10px;
                 alignment: end;
                 Btn {
-                    text: "Back";
+                    text: @tr("Back");
                     clicked => { root.hide-licence(); }
                 }
                 Btn {
-                    text: "I accept";
+                    text: @tr("I accept");
                     primary: true;
                     clicked => {
                         root.accepted = true;
@@ -766,8 +855,8 @@ export component InstallerWindow inherits Window {
             spacing: 20px;
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// lightify is open"; }
-                H1 { text: "Close Lightify first"; }
+                Lbl { text: @tr("// lightify is open"); }
+                H1 { text: @tr("Close Lightify first"); }
             }
             Text {
                 text: root.closeapp-note;
@@ -780,12 +869,12 @@ export component InstallerWindow inherits Window {
                 spacing: 10px;
                 alignment: end;
                 Btn {
-                    text: "Cancel";
+                    text: @tr("Cancel");
                     enabled: !root.closing;
                     clicked => { root.cancel-close-app(); }
                 }
                 Btn {
-                    text: root.closing ? "Closing\u{2026}" : "Close Lightify";
+                    text: root.closing ? @tr("Closing\u{2026}") : @tr("Close Lightify");
                     primary: true;
                     enabled: !root.closing;
                     clicked => { root.close-app(); }
@@ -802,8 +891,8 @@ export component InstallerWindow inherits Window {
             spacing: 22px;
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: root.page == "removing" ? "// uninstalling" : "// installing"; }
-                H1 { text: root.page == "removing" ? "Removing Lightify" : "Installing Lightify"; }
+                Lbl { text: root.page == "removing" ? @tr("// uninstalling") : @tr("// installing"); }
+                H1 { text: root.page == "removing" ? @tr("Removing Lightify") : @tr("Installing Lightify"); }
             }
             VerticalLayout {
                 spacing: 10px;
@@ -818,7 +907,7 @@ export component InstallerWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                     Text {
-                        text: round(clamp(root.progress, 0, 1) * 100) + "%";
+                        text: @tr("{}%", round(clamp(root.progress, 0, 1) * 100));
                         font-family: "JetBrains Mono";
                         font-size: 11.5px;
                         color: Pal.dim;
@@ -833,7 +922,7 @@ export component InstallerWindow inherits Window {
             HorizontalLayout {
                 alignment: end;
                 Btn {
-                    text: "Cancel";
+                    text: @tr("Cancel");
                     enabled: false;
                 }
             }
@@ -852,16 +941,16 @@ export component InstallerWindow inherits Window {
             }
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// done"; }
-                H1 { text: "Lightify is installed"; }
+                Lbl { text: @tr("// done"); }
+                H1 { text: @tr("Lightify is installed"); }
                 Text {
-                    text: "It keeps itself up to date from lightify.stream.";
+                    text: @tr("It keeps itself up to date from lightify.stream.");
                     font-size: 13.5px;
                     color: Pal.muted;
                 }
             }
             Check {
-                text: "Launch Lightify";
+                text: @tr("Launch Lightify");
                 checked: root.launch;
                 toggled => { root.launch = !root.launch; }
             }
@@ -869,7 +958,7 @@ export component InstallerWindow inherits Window {
             HorizontalLayout {
                 alignment: end;
                 Btn {
-                    text: "Finish";
+                    text: @tr("Finish");
                     primary: true;
                     clicked => { root.finish(); }
                 }
@@ -885,17 +974,17 @@ export component InstallerWindow inherits Window {
             spacing: 20px;
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// uninstall"; }
-                H1 { text: "Remove Lightify?"; }
+                Lbl { text: @tr("// uninstall"); }
+                H1 { text: @tr("Remove Lightify?"); }
             }
             Text {
-                text: "Removes the app, its shortcuts and the downloader bridge. Your downloaded music is never touched.";
+                text: @tr("Removes the app, its shortcuts and the downloader bridge. Your downloaded music is never touched.");
                 font-size: 13.5px;
                 color: Pal.muted;
                 wrap: word-wrap;
             }
             Check {
-                text: "Also remove my settings and Spotify sign-in";
+                text: @tr("Also remove my settings and Spotify sign-in");
                 checked: root.wipe;
                 toggled => { root.wipe = !root.wipe; }
             }
@@ -904,11 +993,11 @@ export component InstallerWindow inherits Window {
                 spacing: 10px;
                 alignment: end;
                 Btn {
-                    text: "Cancel";
+                    text: @tr("Cancel");
                     clicked => { root.close-window(); }
                 }
                 Btn {
-                    text: "Remove";
+                    text: @tr("Remove");
                     primary: true;
                     clicked => { root.remove(); }
                 }
@@ -928,10 +1017,10 @@ export component InstallerWindow inherits Window {
             }
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// removed"; }
-                H1 { text: "Lightify is removed"; }
+                Lbl { text: @tr("// removed"); }
+                H1 { text: @tr("Lightify is removed"); }
                 Text {
-                    text: root.wipe ? "Settings and sign-in were removed too. Your downloaded music was left where it is." : "Your settings and downloaded music were left where they are.";
+                    text: root.wipe ? @tr("Settings and sign-in were removed too. Your downloaded music was left where it is.") : @tr("Your settings and downloaded music were left where they are.");
                     font-size: 13.5px;
                     color: Pal.muted;
                     wrap: word-wrap;
@@ -941,7 +1030,7 @@ export component InstallerWindow inherits Window {
             HorizontalLayout {
                 alignment: end;
                 Btn {
-                    text: "Close";
+                    text: @tr("Close");
                     primary: true;
                     clicked => { root.finish(); }
                 }
@@ -957,7 +1046,7 @@ export component InstallerWindow inherits Window {
             spacing: 20px;
             VerticalLayout {
                 spacing: 6px;
-                Lbl { text: "// something went wrong"; }
+                Lbl { text: @tr("// something went wrong"); }
                 H1 { text: root.error-title; }
             }
             Rectangle {
@@ -982,14 +1071,97 @@ export component InstallerWindow inherits Window {
                 spacing: 10px;
                 alignment: end;
                 if root.error-can-back : Btn {
-                    text: "Back";
+                    text: @tr("Back");
                     clicked => { root.error-back(); }
                 }
                 Btn {
-                    text: "Close";
+                    text: @tr("Close");
                     primary: true;
                     clicked => { root.finish(); }
                 }
+            }
+        }
+    }
+
+    // ── Language list, open over the welcome page ───────────────────────────
+    // A list of our own (themed, and drawn in --shot renders), hung under its button;
+    // a click anywhere else closes it. It scrolls when the languages outgrow the window.
+    lang-probe := Lbl { visible: false; text: "language"; }
+    if root.lang-open && root.mode == "install" && root.page == "welcome" && root.languages.length > 1 : Rectangle {
+        // Under the button: title strip, page padding, the "language" label, its
+        // spacing, the button (the welcome page's layout).
+        property <length> top: 38px + 28px + lang-probe.preferred-height + 8px + 32px + 6px;
+        TouchArea {
+            clicked => { root.lang-open = false; }
+        }
+        lang-panel := Rectangle {
+            width: min(max(lang-list.preferred-width, 180px), root.width - 64px);
+            height: min(lang-list.preferred-height, root.height - parent.top - 16px);
+            x: root.width - 32px - self.width;
+            y: parent.top;
+            border-radius: 10px;
+            background: Pal.s2;
+            border-width: 1px;
+            border-color: Pal.line2;
+            clip: true;
+            TouchArea { }
+            lang-flick := Flickable {
+                width: parent.width;
+                height: parent.height;
+                viewport-width: self.width;
+                viewport-height: lang-list.preferred-height;
+                lang-list := VerticalLayout {
+                    width: lang-flick.width;
+                    padding: 4px;
+                    for name[i] in root.languages : Rectangle {
+                        height: 30px;
+                        border-radius: 7px;
+                        background: row-ta.has-hover ? Pal.s3 : transparent;
+                        row-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.lang-open = false;
+                                root.language-picked(i);
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 14px;
+                            Text {
+                                text: name;
+                                font-size: 12.5px;
+                                font-weight: i == root.language-index ? 600 : 400;
+                                color: i == root.language-index ? Pal.text : Pal.muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            Rectangle {
+                                width: 14px;
+                                if i == root.language-index : Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    size: 14px;
+                                    weight: 2;
+                                    commands: Ico.check;
+                                    stroke: Pal.accent;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Scroll thumb, when the list is taller than the window allows.
+            property <length> over: max(0px, lang-flick.viewport-height - lang-flick.height);
+            if lang-panel.over > 0 : Rectangle {
+                property <length> track: lang-panel.height - 12px;
+                property <length> thumb: max(24px, self.track * lang-flick.height / lang-flick.viewport-height);
+                x: lang-panel.width - 7px;
+                y: 6px + (self.track - self.thumb) * (-lang-flick.viewport-y / lang-panel.over);
+                width: 3px;
+                height: self.thumb;
+                border-radius: 1.5px;
+                background: Pal.line3;
             }
         }
     }

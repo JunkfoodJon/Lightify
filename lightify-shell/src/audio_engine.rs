@@ -99,6 +99,10 @@ pub enum Cmd {
     /// librespot's `Spirc::append_tracks`). Dropped unless the playing list still
     /// holds `anchor`, so a late append never lands in something loaded since.
     #[serde(rename = "appendtracks")] AppendTracks { anchor: String, uris: Vec<String> },
+    /// Make `uris` everything after the current track, which keeps playing (the vendored
+    /// `Spirc::replace_next_tracks`): what a station does to the list it starts on.
+    /// Hand-queued tracks survive, as on any load.
+    #[serde(rename = "replacenext")] ReplaceNext { uris: Vec<String> },
     /// Add to the user queue on the device itself (the vendored `Spirc::add_to_queue`):
     /// the local twin of `POST me/player/queue`, without its one request per track.
     #[serde(rename = "addtoqueue")] AddToQueue { uris: Vec<String> },
@@ -333,6 +337,15 @@ impl log::Log for LibrespotLog {
     }
 
     fn flush(&self) {}
+}
+
+/// One line from the app into the engine's log (`lightify-shell-audio.log`), once the
+/// engine has opened it — e.g. what RECENT counted (play_history.rs).
+pub fn note(msg: &str) {
+    let sink = LIBRESPOT_LOG_SINK.lock().ok().and_then(|g| g.clone());
+    if let Some(sink) = sink {
+        sink.line(msg);
+    }
 }
 
 /// Point librespot's log at this engine's `Log` (installed once per process).
@@ -1078,6 +1091,13 @@ fn command_loop(
                 match spirc.append_tracks(anchor, uris) {
                     Ok(()) => log.line(&format!("appendtracks: {n} tracks")),
                     Err(e) => log.line(&format!("appendtracks failed: {e}")),
+                }
+            }
+            Cmd::ReplaceNext { uris } => {
+                let n = uris.len();
+                match spirc.replace_next_tracks(uris) {
+                    Ok(()) => log.line(&format!("replacenext: {n} tracks")),
+                    Err(e) => log.line(&format!("replacenext failed: {e}")),
                 }
             }
             Cmd::RemoveFromQueue { uri, nth } => match spirc.remove_from_queue(uri, nth) {

@@ -19,7 +19,8 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use crate::MainWindow;
 
-/// Same artwork the window and the .exe use, decoded at startup.
+/// Same artwork the window uses, decoded at startup — the fallback when the exe's
+/// icon resource can't be loaded (and the only source off Windows).
 const ICON_PNG: &[u8] = include_bytes!("../assets/lightify-icon.png");
 
 /// Live tray state. The `TrayIcon` must be kept alive — dropping it removes the
@@ -29,6 +30,17 @@ pub struct Tray {
 }
 
 fn load_icon() -> Option<Icon> {
+    // The exe's own icon resource (id 1, see build.rs) at the tray's size, so Windows
+    // picks the hand-tuned small cut out of lightify.ico (16–32 px) instead of
+    // shrinking the 256 px artwork.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+        let px = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
+        if let Ok(icon) = Icon::from_resource(1, Some((px, px))) {
+            return Some(icon);
+        }
+    }
     let img = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     Icon::from_rgba(img.into_raw(), w, h).ok()
@@ -44,6 +56,40 @@ pub fn restore(app: &MainWindow) {
     app.window().show().ok();
 }
 
+thread_local! {
+    /// The menu's items, kept so a language switch can say them again (`relabel`). The
+    /// tray belongs to the UI thread, and so do these.
+    static ITEMS: std::cell::RefCell<Option<(MenuItem, MenuItem)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The menu's two items, in the active language.
+fn menu_items() -> (MenuItem, MenuItem) {
+    (
+        MenuItem::new(lightify_i18n::tr!("Show Lightify"), true, None),
+        MenuItem::new(lightify_i18n::tr!("Quit"), true, None),
+    )
+}
+
+/// After a language switch: the menu in the new language. A headless run (a self-test)
+/// has no tray icon, so it gets the items alone, to read back with `labels`.
+pub fn relabel() {
+    ITEMS.with(|i| {
+        let mut i = i.borrow_mut();
+        match i.as_ref() {
+            Some((show, quit)) => {
+                show.set_text(lightify_i18n::tr!("Show Lightify"));
+                quit.set_text(lightify_i18n::tr!("Quit"));
+            }
+            None => *i = Some(menu_items()),
+        }
+    });
+}
+
+/// What the menu says now (for `--selftest-language`).
+pub fn labels() -> Vec<String> {
+    ITEMS.with(|i| i.borrow().as_ref().map(|(s, q)| vec![s.text(), q.text()]).unwrap_or_default())
+}
+
 /// Install the tray icon. Returns `None` (and leaves the app perfectly usable) if
 /// the shell refuses the icon — a missing tray is not worth failing startup over.
 ///
@@ -52,10 +98,10 @@ pub fn restore(app: &MainWindow) {
 /// Slint's event loop does.
 pub fn install(weak: slint::Weak<MainWindow>) -> Option<Tray> {
     let menu = Menu::new();
-    let show = MenuItem::new("Show Lightify", true, None);
-    let quit = MenuItem::new("Quit", true, None);
+    let (show, quit) = menu_items();
     menu.append_items(&[&show, &PredefinedMenuItem::separator(), &quit]).ok()?;
     let (show_id, quit_id) = (show.id().clone(), quit.id().clone());
+    ITEMS.with(|i| *i.borrow_mut() = Some((show, quit)));
 
     let icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))

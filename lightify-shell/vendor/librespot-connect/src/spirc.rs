@@ -139,6 +139,8 @@ enum SpircCommand {
     AddToQueue { uris: Vec<String> },
     // Lightify patch: see `Spirc::remove_from_queue`.
     RemoveFromQueue { uri: String, nth: usize },
+    // Lightify patch: see `Spirc::replace_next_tracks`.
+    ReplaceNextTracks { uris: Vec<String> },
 }
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
@@ -422,6 +424,15 @@ impl Spirc {
     /// Does nothing if we are not the active device.
     pub fn remove_from_queue(&self, uri: String, nth: usize) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::RemoveFromQueue { uri, nth })?)
+    }
+
+    /// Lightify patch: make `uris` everything that plays after the current track — a
+    /// new track-list context of the current track followed by `uris` — without
+    /// reloading the current track, so the music doesn't stop. The old context's
+    /// remainder (and its autoplay) is gone; the user queue is spared, as on any load.
+    /// Does nothing if we are not the active device or nothing is loaded.
+    pub fn replace_next_tracks(&self, uris: Vec<String>) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::ReplaceNextTracks { uris })?)
     }
 
     /// Disconnects the current device and pauses the playback according the value.
@@ -718,6 +729,7 @@ impl SpircTask {
             SpircCommand::AppendTracks { anchor, uris } => self.handle_append_tracks(&anchor, uris)?,
             SpircCommand::AddToQueue { uris } => self.handle_add_to_queue(uris),
             SpircCommand::RemoveFromQueue { uri, nth } => self.handle_remove_from_queue(&uri, nth)?,
+            SpircCommand::ReplaceNextTracks { uris } => self.handle_replace_next_tracks(uris)?,
         };
 
         self.notify().await
@@ -1512,6 +1524,38 @@ impl SpircTask {
         self.connect_state.update_queue_revision();
         self.handle_preload_next_track();
         debug!("appended {n} tracks to the playing list");
+        Ok(())
+    }
+
+    // Lightify patch: see `Spirc::replace_next_tracks`. The context half of
+    // `handle_load` for a track list, minus `load_track`: the player keeps the track it
+    // has, only what follows it changes.
+    fn handle_replace_next_tracks(&mut self, uris: Vec<String>) -> Result<(), Error> {
+        let current = self.connect_state.current_track(|t| t.uri.clone());
+        if uris.is_empty() || current.is_empty() {
+            warn!("replace ignored: no current track to keep");
+            return Ok(());
+        }
+        let n = uris.len();
+        let mut tracks = Vec::with_capacity(n + 1);
+        tracks.push(current);
+        tracks.extend(uris);
+        // A page of the old context still being fetched must not land in the new list.
+        self.context_resolver.clear();
+        self.connect_state.reset_context(ResetContext::Completely);
+        self.load_context_from_tracks(tracks)?;
+        self.connect_state.set_active_context(ContextType::Default);
+        self.connect_state.clear_restrictions();
+        // Index 0 is the track already playing; the next tracks are refilled from the new
+        // list behind the user queue, which `clear_next_tracks` spares.
+        let shuffled = self.connect_state.shuffling_context() && self.connect_state.shuffle_new().is_ok();
+        if !shuffled {
+            self.connect_state.reset_playback_to_position(Some(0))?;
+        }
+        self.add_autoplay_resolving_when_required();
+        self.connect_state.update_queue_revision();
+        self.handle_preload_next_track();
+        debug!("replaced the next tracks with {n} tracks");
         Ok(())
     }
 

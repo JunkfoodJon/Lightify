@@ -1,0 +1,376 @@
+# lightify-installer — ko translation. MACHINE DRAFT: needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-installer\n"
+"Language: ko\n"
+"Language-Team: machine draft — needs native review\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: ui/installer.slint:496 src/main.rs:538 src/main.rs:1352
+msgid "Setup couldn't finish"
+msgstr "설치를 완료하지 못했습니다"
+
+#: ui/installer.slint:503
+msgid "Lightify reopens where you left off."
+msgstr "Lightify는 마지막으로 사용하던 상태로 다시 열립니다."
+
+#: ui/installer.slint:520
+msgid "Uninstall Lightify"
+msgstr "Lightify 제거"
+
+#: ui/installer.slint:520 ui/installer.slint:554
+msgid "Updating Lightify"
+msgstr "Lightify 업데이트 중"
+
+#: ui/installer.slint:520
+msgid "Lightify Setup"
+msgstr "Lightify 설치"
+
+#: ui/installer.slint:554
+msgid "Update didn't finish"
+msgstr "업데이트를 완료하지 못했습니다"
+
+#: ui/installer.slint:561
+msgid "installed → {} · signature checked"
+msgstr "설치된 버전 → {} · 서명 확인됨"
+
+#: ui/installer.slint:562
+msgid "{} → {} · signature checked"
+msgstr "{} → {} · 서명 확인됨"
+
+#: ui/installer.slint:607
+msgid "uninstall"
+msgstr "제거"
+
+#: ui/installer.slint:607
+msgid "setup"
+msgstr "설치"
+
+#: ui/installer.slint:651
+msgid "// welcome"
+msgstr "// 환영합니다"
+
+#: ui/installer.slint:652
+msgid "Install Lightify"
+msgstr "Lightify 설치"
+
+#: ui/installer.slint:661
+msgid "language"
+msgstr "언어"
+
+#: ui/installer.slint:676
+msgid "install for"
+msgstr "설치 대상"
+
+#: ui/installer.slint:692
+msgid "Just me"
+msgstr "나만"
+
+#: ui/installer.slint:703
+msgid "Everyone on this PC"
+msgstr "이 PC의 모든 사용자"
+
+#: ui/installer.slint:719
+msgid "install to"
+msgstr "설치 위치"
+
+#: ui/installer.slint:727
+msgid "Change"
+msgstr "변경"
+
+#: ui/installer.slint:737
+msgid "Desktop shortcut"
+msgstr "바탕 화면 바로 가기"
+
+#: ui/installer.slint:803 ui/installer.slint:872 ui/installer.slint:925
+#: ui/installer.slint:996
+msgid "Cancel"
+msgstr "취소"
+
+#: ui/installer.slint:807
+msgid "Install"
+msgstr "설치"
+
+#: ui/installer.slint:824
+msgid "// licence"
+msgstr "// 라이선스"
+
+#: ui/installer.slint:825
+msgid "Licence"
+msgstr "라이선스"
+
+#: ui/installer.slint:835 ui/installer.slint:1074
+msgid "Back"
+msgstr "뒤로"
+
+#: ui/installer.slint:839
+msgid "I accept"
+msgstr "동의"
+
+#: ui/installer.slint:858
+msgid "// lightify is open"
+msgstr "// lightify 실행 중"
+
+#: ui/installer.slint:859
+msgid "Close Lightify first"
+msgstr "먼저 Lightify를 닫으세요"
+
+#: ui/installer.slint:877
+msgid "Closing…"
+msgstr "닫는 중…"
+
+#: ui/installer.slint:877
+msgid "Close Lightify"
+msgstr "Lightify 닫기"
+
+#: ui/installer.slint:894
+msgid "// uninstalling"
+msgstr "// 제거 중"
+
+#: ui/installer.slint:894
+msgid "// installing"
+msgstr "// 설치 중"
+
+#: ui/installer.slint:895
+msgid "Removing Lightify"
+msgstr "Lightify 제거 중"
+
+#: ui/installer.slint:895
+msgid "Installing Lightify"
+msgstr "Lightify 설치 중"
+
+#: ui/installer.slint:910
+msgid "{}%"
+msgstr "{}%"
+
+#: ui/installer.slint:944
+msgid "// done"
+msgstr "// 완료"
+
+#: ui/installer.slint:945
+msgid "Lightify is installed"
+msgstr "Lightify가 설치되었습니다"
+
+#: ui/installer.slint:947
+msgid "It keeps itself up to date from lightify.stream."
+msgstr "lightify.stream에서 자동으로 최신 상태를 유지합니다."
+
+#: ui/installer.slint:953
+msgid "Launch Lightify"
+msgstr "Lightify 실행"
+
+#: ui/installer.slint:961
+msgid "Finish"
+msgstr "마침"
+
+#: ui/installer.slint:977
+msgid "// uninstall"
+msgstr "// 제거"
+
+#: ui/installer.slint:978
+msgid "Remove Lightify?"
+msgstr "Lightify를 제거할까요?"
+
+#: ui/installer.slint:981
+msgid "Removes the app, its shortcuts and the downloader bridge. Your downloaded music is never touched."
+msgstr "앱, 바로 가기, 다운로더 브리지를 제거합니다. 다운로드한 음악은 건드리지 않습니다."
+
+#: ui/installer.slint:987
+msgid "Also remove my settings and Spotify sign-in"
+msgstr "내 설정과 Spotify 로그인 정보도 제거"
+
+#: ui/installer.slint:1000
+msgid "Remove"
+msgstr "제거"
+
+#: ui/installer.slint:1020
+msgid "// removed"
+msgstr "// 제거됨"
+
+#: ui/installer.slint:1021
+msgid "Lightify is removed"
+msgstr "Lightify가 제거되었습니다"
+
+#: ui/installer.slint:1023
+msgid "Settings and sign-in were removed too. Your downloaded music was left where it is."
+msgstr "설정과 로그인 정보도 제거되었습니다. 다운로드한 음악은 그대로 남아 있습니다."
+
+#: ui/installer.slint:1023
+msgid "Your settings and downloaded music were left where they are."
+msgstr "설정과 다운로드한 음악은 그대로 남아 있습니다."
+
+#: ui/installer.slint:1033 ui/installer.slint:1078
+msgid "Close"
+msgstr "닫기"
+
+#: ui/installer.slint:1049
+msgid "// something went wrong"
+msgstr "// 문제가 발생했습니다"
+
+#: src/main.rs:106
+msgid "I accept the <a>licence</a>"
+msgstr "<a>라이선스</a>에 동의합니다"
+
+#: src/main.rs:145
+msgid "{} (preview)"
+msgstr "{}(미리 보기)"
+
+#: src/main.rs:328 src/ops.rs:406
+msgid "this Setup file is damaged ({}) - download it again"
+msgstr "이 설치 파일이 손상되었습니다({}) - 다시 다운로드하세요"
+
+#: src/main.rs:472
+msgid "Setup can't start"
+msgstr "설치를 시작할 수 없습니다"
+
+#: src/main.rs:520
+msgid "preparing"
+msgstr "준비 중"
+
+#: src/main.rs:552 src/main.rs:1335
+msgid "Lightify is open. Setup can close it for you — your settings are kept, and you can reopen it when setup finishes."
+msgstr "Lightify가 실행 중입니다. 설치 프로그램이 대신 닫을 수 있습니다 — 설정은 유지되며, 설치가 끝나면 다시 열 수 있습니다."
+
+#: src/main.rs:644
+msgid "Setup can't write to that folder. Pick another one, or install for everyone on this PC."
+msgstr "설치 프로그램이 해당 폴더에 쓸 수 없습니다. 다른 폴더를 선택하거나 이 PC의 모든 사용자용으로 설치하세요."
+
+#: src/main.rs:698
+msgid "Installing for everyone needs administrator approval."
+msgstr "모든 사용자용으로 설치하려면 관리자 승인이 필요합니다."
+
+#: src/main.rs:735 src/main.rs:1230
+msgid "Lightify is still open. Quit it from its tray icon (right-click → Quit), then press Close Lightify again."
+msgstr "Lightify가 아직 실행 중입니다. 트레이 아이콘에서 종료한 다음(마우스 오른쪽 클릭 → 종료) ‘Lightify 닫기’를 다시 누르세요."
+
+#: src/main.rs:891
+msgid "Lightify isn't installed"
+msgstr "Lightify가 설치되어 있지 않습니다"
+
+#: src/main.rs:892
+msgid "There is no Lightify install on this PC to update. Download Setup from lightify.stream."
+msgstr "이 PC에 업데이트할 Lightify가 설치되어 있지 않습니다. lightify.stream에서 설치 프로그램을 다운로드하세요."
+
+#: src/main.rs:1119
+msgid "There is no Lightify install in {}."
+msgstr "{}에 설치된 Lightify가 없습니다."
+
+#: src/main.rs:1121
+msgid "Nothing to remove"
+msgstr "제거할 항목이 없습니다"
+
+#: src/main.rs:1186
+msgid "Lightify wasn't fully removed"
+msgstr "Lightify가 완전히 제거되지 않았습니다"
+
+#: src/main.rs:1198
+msgid "Lightify is open. Setup can close it for you, then remove it."
+msgstr "Lightify가 실행 중입니다. 설치 프로그램이 닫은 후 제거할 수 있습니다."
+
+#: src/main.rs:1330 src/ops.rs:90
+msgid "Pick a folder, not the root of a drive."
+msgstr "드라이브의 루트가 아닌 폴더를 선택하세요."
+
+#: src/main.rs:1342 src/ops.rs:443
+msgid "copying {}"
+msgstr "{} 복사 중"
+
+#: src/main.rs:1365 src/ops.rs:639 src/ops.rs:677
+msgid "removing {}"
+msgstr "{} 제거 중"
+
+#: src/ops.rs:87
+msgid "Choose a full folder path, like C:\\Programs\\Lightify."
+msgstr "C:\\Programs\\Lightify처럼 전체 폴더 경로를 지정하세요."
+
+#: src/ops.rs:94
+msgid "Lightify can't be installed inside the Windows folder."
+msgstr "Lightify는 Windows 폴더 안에 설치할 수 없습니다."
+
+#: src/ops.rs:98
+msgid "That folder name has characters Windows doesn't allow."
+msgstr "폴더 이름에 Windows에서 허용하지 않는 문자가 있습니다."
+
+#: src/ops.rs:260
+msgid "could not start {}: {}"
+msgstr "{} 시작 실패: {}"
+
+#: src/ops.rs:283
+msgid "Downloader bridge"
+msgstr "다운로더 브리지"
+
+#: src/ops.rs:285
+msgid "Shortcuts and uninstall entry"
+msgstr "바로 가기 및 제거 항목"
+
+#: src/ops.rs:338
+msgid "{} is in use"
+msgstr "{} 사용 중"
+
+#: src/ops.rs:376
+msgid "{}: access denied"
+msgstr "{}: 액세스 거부됨"
+
+#: src/ops.rs:388
+msgid "could not run the old uninstaller {}: {}"
+msgstr "이전 제거 프로그램 {} 실행 실패: {}"
+
+#: src/ops.rs:390
+msgid "the old uninstaller {} failed ({})"
+msgstr "이전 제거 프로그램 {} 실패({})"
+
+#: src/ops.rs:407
+msgid "this copy of Setup has no files in it (it is the uninstaller) - download Setup from lightify.stream"
+msgstr "이 설치 프로그램에는 파일이 없습니다(제거 프로그램입니다) - lightify.stream에서 설치 프로그램을 다운로드하세요"
+
+#: src/ops.rs:414
+msgid "removing the previous installer"
+msgstr "이전 설치 프로그램 제거 중"
+
+#: src/ops.rs:468
+msgid "writing {}"
+msgstr "{} 쓰는 중"
+
+#: src/ops.rs:477
+msgid "creating shortcuts"
+msgstr "바로 가기 만드는 중"
+
+#: src/ops.rs:480
+msgid "registering with Windows"
+msgstr "Windows에 등록 중"
+
+#: src/ops.rs:496 src/ops.rs:685
+msgid "done"
+msgstr "완료"
+
+#: src/ops.rs:503
+msgid "could not find the Start menu folder"
+msgstr "시작 메뉴 폴더를 찾을 수 없습니다"
+
+#: src/ops.rs:507
+msgid "could not find the desktop folder"
+msgstr "바탕 화면 폴더를 찾을 수 없습니다"
+
+#: src/ops.rs:544
+msgid "App files"
+msgstr "앱 파일"
+
+#: src/ops.rs:546
+msgid "Settings and Spotify sign-in"
+msgstr "설정 및 Spotify 로그인 정보"
+
+#: src/ops.rs:650
+msgid "removing shortcuts"
+msgstr "바로 가기 제거 중"
+
+#: src/ops.rs:662
+msgid "removing the Apps entry"
+msgstr "앱 목록 항목 제거 중"
+
+#: src/win.rs:223
+msgid "could not start the elevated installer: {}"
+msgstr "관리자 권한 설치 프로그램 시작 실패: {}"

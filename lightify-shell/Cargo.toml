@@ -1,6 +1,6 @@
 [package]
 name = "lightify-shell"
-version = "2.3.12"
+version = "2.3.13"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 description = "Tier 2 spike: native Slint UI shell for Lightify (software renderer, no WebView2)."
@@ -13,9 +13,13 @@ name = "Lightify"
 path = "src/main.rs"
 
 [dependencies]
-slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030"] }
+# unstable-fontique-010: the font fallback list, so Chinese text finds a font that has
+# every character (`cjk_font_fallback`).
+slint = { version = "1", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030", "unstable-fontique-010"] }
 png = "0.17"
 lightify-core = { path = "../lightify-core" }
+# Translations, Rust side (LANGUAGE-PLAN.md): the same catalogs Slint bundles.
+lightify-i18n = { path = "../lightify-i18n" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # Command/event plumbing for the in-process playback engine (src/audio_engine.rs) —
@@ -102,6 +106,7 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 slint-build = "1"
+lightify-i18n = { path = "../lightify-i18n" }
 
 
 # librespot-connect 0.8.0 with a fix for playlists that stop early (X of Y): the

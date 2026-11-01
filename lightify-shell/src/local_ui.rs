@@ -13,6 +13,7 @@ use std::rc::Rc;
 use crate::local_library::{self, Candidate, LocalPlaylist, LocalTrack};
 use crate::local_player;
 use crate::{CtxItem, Cmd, LocalCand, LocalNode, LocalRow, MainWindow};
+use lightify_i18n::tr;
 use slint::ComponentHandle;
 
 #[derive(Clone)]
@@ -50,6 +51,10 @@ pub enum LocalCmd {
     QueuePlay(usize),
     QueueRemove(usize),
     QueueClear,
+    // RECENT in Local mode: rows of `local_recent_rows`; refresh when the drawer opens
+    // (its "5m" times move on).
+    RecentPlay(usize),
+    RecentRefresh,
     // Explorer drag-over / drop (only acted on in Local mode)
     DropHover(Vec<PathBuf>),
     DropCancel,
@@ -81,6 +86,8 @@ pub enum LocalCmd {
     Named(Option<String>),
     Player(local_player::Event),
     Cover(PathBuf, Option<(Vec<u8>, u32, u32, slint::Color)>),
+    /// The language changed: everything this view built in Rust, said again.
+    Relabel,
 }
 
 /// What the track list shows.
@@ -273,6 +280,9 @@ pub struct LocalState {
     qview: Vec<(QSrc, PathBuf)>,
     // playback
     order: Vec<PathBuf>,
+    /// The list playback was started from, in its own order (`order` is it shuffled).
+    /// Shuffle off goes back to this, not to whatever list is on screen by then.
+    source: Vec<PathBuf>,
     pos: usize,
     user_queue: VecDeque<PathBuf>,
     now: Option<PathBuf>,
@@ -286,6 +296,12 @@ pub struct LocalState {
     cands: Vec<Candidate>,
     cand_on: Vec<bool>,
     pending: Option<Pending>,
+    // RECENT: the local files played (newest first, with when), each added the moment it
+    // starts — only from the local player, never Spotify. Read from disk on first use.
+    history: Vec<(PathBuf, String)>,
+    history_loaded: bool,
+    /// What the Recent drawer shows, row by row.
+    rview: Vec<PathBuf>,
 }
 
 impl Default for LocalState {
@@ -311,6 +327,7 @@ impl Default for LocalState {
             filters: Filters::default(),
             qview: Vec::new(),
             order: Vec::new(),
+            source: Vec::new(),
             pos: 0,
             user_queue: VecDeque::new(),
             now: None,
@@ -323,6 +340,9 @@ impl Default for LocalState {
             cands: Vec::new(),
             cand_on: Vec::new(),
             pending: None,
+            history: Vec::new(),
+            history_loaded: false,
+            rview: Vec::new(),
         }
     }
 }
@@ -412,6 +432,7 @@ pub fn install(app: &MainWindow, tx: Tx) {
     wire!(on_local_queue_play, |i| LocalCmd::QueuePlay(i.max(0) as usize));
     wire!(on_local_queue_remove, |i| LocalCmd::QueueRemove(i.max(0) as usize));
     wire!(on_local_queue_clear, | | LocalCmd::QueueClear);
+    wire!(on_local_recent_play, |i| LocalCmd::RecentPlay(i.max(0) as usize));
 }
 
 /// Should play/pause, next and previous (media keys, tray, palette) drive local
@@ -523,7 +544,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                     }
                     push_tree(st, weak);
                 }
-                NodeAct::NewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new()), "A new local playlist"),
+                NodeAct::NewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new())),
             }
         }
         LocalCmd::RowActivate(row) => play_from(st, row, weak),
@@ -594,6 +615,14 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 filters_changed(st, weak);
             }
         }
+        // A Recent row plays, with the rest of Recent following it.
+        LocalCmd::RecentPlay(i) => {
+            if i < st.rview.len() {
+                let list = st.rview.clone();
+                play_list(st, list, i, weak);
+            }
+        }
+        LocalCmd::RecentRefresh => push_recent(st, weak),
         LocalCmd::QueuePlay(i) => match st.qview.get(i).cloned() {
             Some((QSrc::Current, _)) => local_player::seek(0),
             Some((QSrc::User(k), _)) => {
@@ -619,7 +648,11 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                     st.user_queue.remove(k);
                 }
                 Some((QSrc::Order(k), _)) if k > st.pos => {
-                    st.order.remove(k);
+                    let gone = st.order.remove(k);
+                    // ...and out of the list shuffle-off goes back to, so it stays gone.
+                    if let Some(at) = st.source.iter().position(|p| *p == gone) {
+                        st.source.remove(at);
+                    }
                 }
                 _ => return,
             }
@@ -629,6 +662,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::QueueClear => {
             st.user_queue.clear();
             st.order.truncate(st.pos + 1);
+            st.source = st.order.clone();
             set_next(st);
             push_now(st, weak);
         }
@@ -693,7 +727,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::CarryBegin(row) => {
             st.carry = rows_or_selection(st, row);
             let n = st.carry.len();
-            let what = if n == 1 { "1 track".to_string() } else { format!("{n} tracks") };
+            let what = plural(n);
             ui(weak, move |a| a.set_local_carry_what(what.into()));
         }
         LocalCmd::CarryEnd(target) => {
@@ -704,7 +738,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 if !paths.is_empty() {
                     local_library::add_to_playlist(&id, &paths);
                     st.playlists = local_library::playlists();
-                    crate::set_status(weak, format!("Added {} to \u{201c}{name}\u{201d}", plural(paths.len())));
+                    crate::set_status(weak, added_to(paths.len(), &name));
                     refresh(st, weak);
                 }
             }
@@ -716,13 +750,13 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             let (audio, folders, skipped) = classify(&paths);
             let mut parts = Vec::new();
             if audio > 0 {
-                parts.push(format!("{audio} audio {}", if audio == 1 { "file" } else { "files" }));
+                parts.push(lightify_i18n::trn!("{n} audio file", "{n} audio files", audio));
             }
             if folders > 0 {
-                parts.push(format!("{folders} {}", if folders == 1 { "folder" } else { "folders" }));
+                parts.push(lightify_i18n::trn!("{n} folder", "{n} folders", folders));
             }
             if skipped > 0 {
-                parts.push(format!("{skipped} skipped (not audio)"));
+                parts.push(lightify_i18n::trn!("{n} skipped (not audio)", "{n} skipped (not audio)", skipped));
             }
             let detail = parts.join(" \u{00b7} ");
             ui(weak, move |a| {
@@ -789,9 +823,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::MenuPlay(row) => {
             let paths = rows_or_selection(st, row);
             if paths.len() > 1 {
-                st.order = paths;
-                st.pos = 0;
-                start_current(st, weak);
+                play_list(st, paths, 0, weak);
             } else {
                 play_from(st, row, weak);
             }
@@ -801,20 +833,19 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             let n = paths.len();
             st.user_queue.extend(paths);
             set_next(st);
-            crate::set_status(weak, format!("Added {} to the queue", plural(n)));
+            crate::set_status(weak, lightify_i18n::trn!("Added {n} track to the queue", "Added {n} tracks to the queue", n));
         }
         LocalCmd::MenuAddTo(row, id) => {
             let paths = rows_or_selection(st, row);
             local_library::add_to_playlist(&id, &paths);
             st.playlists = local_library::playlists();
             let name = st.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
-            crate::set_status(weak, format!("Added {} to \u{201c}{name}\u{201d}", plural(paths.len())));
+            crate::set_status(weak, added_to(paths.len(), &name));
             refresh(st, weak);
         }
         LocalCmd::MenuNewPlaylist(row) => {
             let paths = rows_or_selection(st, row);
-            let note = format!("{} for a new local playlist", plural(paths.len()));
-            ask_name(st, weak, Pending::NewPlaylist(paths), &note);
+            ask_name(st, weak, Pending::NewPlaylist(paths));
         }
         LocalCmd::MenuShowInFolder(row) => {
             if let Some(t) = st.shown.get(row).and_then(|&k| st.tracks.get(k)) {
@@ -842,7 +873,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         }
         LocalCmd::NodeRename(i) => {
             if let Some((_, _, Some(id))) = st.nodes.get(i).cloned() {
-                ask_name(st, weak, Pending::Rename(id), "Rename the playlist");
+                ask_name(st, weak, Pending::Rename(id));
             }
         }
         LocalCmd::NodeDelete(i) => {
@@ -855,7 +886,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 refresh(st, weak);
             }
         }
-        LocalCmd::NodeNewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new()), "A new local playlist"),
+        LocalCmd::NodeNewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new())),
         LocalCmd::NodeRemoveFolder(i) => {
             if let Some((_, NodeAct::View(View::Folder(p)), _)) = st.nodes.get(i).cloned() {
                 local_library::remove_folder(&p);
@@ -881,7 +912,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                     if paths.is_empty() {
                         st.view = View::Playlist(id);
                     }
-                    crate::set_status(weak, format!("Created \u{201c}{name}\u{201d}"));
+                    crate::set_status(weak, tr!("Created \u{201c}{}\u{201d}", name));
                 }
                 Pending::Rename(id) => {
                     local_library::rename_playlist(&id, &name);
@@ -890,6 +921,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             }
             refresh(st, weak);
         }
+        LocalCmd::Relabel => relabel(st, weak),
         LocalCmd::Player(ev) => on_player(st, ev, weak, tx),
         LocalCmd::Cover(path, px) => {
             if st.now.as_deref() != Some(path.as_path()) {
@@ -933,22 +965,29 @@ pub fn row_menu(st: &LocalState, row: usize) -> Vec<CtxItem> {
     let many = st.selected.contains(&row) && st.selected.len() > 1;
     let n = if many { st.selected.len() } else { 1 };
     let mut items = vec![
-        CtxItem::new(if many { format!("Play {n} tracks") } else { "Play".to_string() }, Cmd::Local(LocalCmd::MenuPlay(row))),
-        CtxItem::new("Add to queue", Cmd::Local(LocalCmd::MenuQueue(row))),
+        CtxItem::new(
+            if many { lightify_i18n::trn!("Play {n} track", "Play {n} tracks", n) } else { tr!("Play") },
+            Cmd::Local(LocalCmd::MenuPlay(row)),
+        ),
+        CtxItem::new(tr!("Add to queue"), Cmd::Local(LocalCmd::MenuQueue(row))),
     ];
     for p in &st.playlists {
-        items.push(CtxItem::new(format!("Add to \u{201c}{}\u{201d}", p.name), Cmd::Local(LocalCmd::MenuAddTo(row, p.id.clone()))));
+        items.push(CtxItem::new(tr!("Add to \u{201c}{}\u{201d}", p.name), Cmd::Local(LocalCmd::MenuAddTo(row, p.id.clone()))));
     }
     items.push(CtxItem::new(
-        if many { format!("New playlist from {n} tracks") } else { "New playlist from track".to_string() },
+        if many {
+            lightify_i18n::trn!("New playlist from {n} track", "New playlist from {n} tracks", n)
+        } else {
+            tr!("New playlist from track")
+        },
         Cmd::Local(LocalCmd::MenuNewPlaylist(row)),
     ));
     if !many {
-        items.push(CtxItem::new("Show in folder", Cmd::Local(LocalCmd::MenuShowInFolder(row))));
+        items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::MenuShowInFolder(row))));
     }
     if matches!(st.view, View::Playlist(_)) {
         items.push(CtxItem::danger(
-            if many { format!("Remove {n} from playlist") } else { "Remove from playlist".to_string() },
+            if many { lightify_i18n::trn!("Remove {n} from playlist", "Remove {n} from playlist", n) } else { tr!("Remove from playlist") },
             Cmd::Local(LocalCmd::MenuRemoveFromPlaylist(row)),
         ));
     }
@@ -959,11 +998,11 @@ pub fn queue_menu(st: &LocalState, i: usize) -> Vec<CtxItem> {
     let Some((src, _)) = st.qview.get(i) else { return Vec::new() };
     let mut items = Vec::new();
     if *src != QSrc::Current {
-        items.push(CtxItem::new("Play now", Cmd::Local(LocalCmd::QueuePlay(i))));
+        items.push(CtxItem::new(tr!("Play now"), Cmd::Local(LocalCmd::QueuePlay(i))));
     }
-    items.push(CtxItem::new("Show in folder", Cmd::Local(LocalCmd::QueueShowInFolder(i))));
+    items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::QueueShowInFolder(i))));
     if *src != QSrc::Current {
-        items.push(CtxItem::danger("Remove from queue", Cmd::Local(LocalCmd::QueueRemove(i))));
+        items.push(CtxItem::danger(tr!("Remove from queue"), Cmd::Local(LocalCmd::QueueRemove(i))));
     }
     items
 }
@@ -972,17 +1011,17 @@ pub fn node_menu(st: &LocalState, i: usize) -> Vec<CtxItem> {
     let Some((node, act, pl)) = st.nodes.get(i) else { return Vec::new() };
     let mut items = Vec::new();
     if let NodeAct::View(v) = act {
-        items.push(CtxItem::new("Play", Cmd::Local(LocalCmd::NodePlay(i))));
+        items.push(CtxItem::new(tr!("Play"), Cmd::Local(LocalCmd::NodePlay(i))));
         if pl.is_some() {
-            items.push(CtxItem::new("Rename", Cmd::Local(LocalCmd::NodeRename(i))));
-            items.push(CtxItem::danger("Delete playlist", Cmd::Local(LocalCmd::NodeDelete(i))));
+            items.push(CtxItem::new(tr!("Rename"), Cmd::Local(LocalCmd::NodeRename(i))));
+            items.push(CtxItem::danger(tr!("Delete playlist"), Cmd::Local(LocalCmd::NodeDelete(i))));
         }
         if let View::Folder(_) = v {
-            items.push(CtxItem::new("Show in folder", Cmd::Local(LocalCmd::NodeShowInFolder(i))));
-            items.push(CtxItem::danger("Remove folder from library", Cmd::Local(LocalCmd::NodeRemoveFolder(i))));
+            items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::NodeShowInFolder(i))));
+            items.push(CtxItem::danger(tr!("Remove folder from library"), Cmd::Local(LocalCmd::NodeRemoveFolder(i))));
         }
     } else if node.kind == 0 && matches!(act, NodeAct::Toggle(Section::Playlists)) {
-        items.push(CtxItem::new("New playlist", Cmd::Local(LocalCmd::NodeNewPlaylist)));
+        items.push(CtxItem::new(tr!("New playlist"), Cmd::Local(LocalCmd::NodeNewPlaylist)));
     }
     items
 }
@@ -1009,17 +1048,12 @@ fn start_scan(st: &mut LocalState, weak: &slint::Weak<MainWindow>, tx: &Tx) {
 
 fn add_and_rescan(st: &mut LocalState, paths: &[PathBuf], weak: &slint::Weak<MainWindow>, tx: &Tx) {
     let r = local_library::add_paths(paths);
-    let mut parts = Vec::new();
-    if r.audio_files > 0 {
-        parts.push(plural(r.audio_files));
-    }
-    if r.folders > 0 {
-        parts.push(format!("{} {}", r.folders, if r.folders == 1 { "folder" } else { "folders" }));
-    }
-    let msg = if parts.is_empty() {
-        "Nothing to add \u{2014} only audio files and folders are taken".to_string()
-    } else {
-        format!("Added {} \u{2014} scanning\u{2026}", parts.join(" and "))
+    let folders = || lightify_i18n::trn!("{n} folder", "{n} folders", r.folders);
+    let msg = match (r.audio_files > 0, r.folders > 0) {
+        (false, false) => tr!("Nothing to add \u{2014} only audio files and folders are taken"),
+        (true, true) => tr!("Added {0} and {1} \u{2014} scanning\u{2026}", plural(r.audio_files), folders()),
+        (true, false) => tr!("Added {} \u{2014} scanning\u{2026}", plural(r.audio_files)),
+        (false, true) => tr!("Added {} \u{2014} scanning\u{2026}", folders()),
     };
     crate::set_status(weak, msg);
     start_scan(st, weak, tx);
@@ -1120,23 +1154,32 @@ fn fmt_time(ms: u64) -> String {
 
 fn fmt_total(ms: u64) -> String {
     let m = ms / 60_000;
-    if m >= 60 { format!("{} h {:02} m", m / 60, m % 60) } else { format!("{m} m") }
+    if m >= 60 { tr!("{} h {} m", m / 60, format!("{:02}", m % 60)) } else { tr!("{} m", m) }
 }
 
 fn plural(n: usize) -> String {
-    if n == 1 { "1 track".to_string() } else { format!("{n} tracks") }
+    lightify_i18n::trn!("{n} track", "{n} tracks", n)
+}
+
+/// "Added 3 tracks to “Focus”".
+fn added_to(n: usize, playlist: &str) -> String {
+    lightify_i18n::trn!("Added {n} track to \u{201c}{0}\u{201d}", "Added {n} tracks to \u{201c}{0}\u{201d}", n, playlist)
 }
 
 fn push_kicker(st: &LocalState, weak: &slint::Weak<MainWindow>) {
     let n = st.tracks.len();
     let hidden = st.tracks.iter().filter(|t| !st.filters.passes(t)).count();
     let k = match st.scanning {
-        Some(done) if done > 0 => format!("// local \u{00b7} scanning {done}\u{2026}"),
-        Some(_) => "// local \u{00b7} scanning\u{2026}".to_string(),
-        None if hidden > 0 => format!("// local \u{00b7} {} of {}", thousands(n - hidden), thousands(n)),
-        None => format!("// local \u{00b7} {}", thousands(n)),
+        Some(done) if done > 0 => tr!("// local \u{00b7} scanning {}\u{2026}", done),
+        Some(_) => tr!("// local \u{00b7} scanning\u{2026}"),
+        None if hidden > 0 => tr!("// local \u{00b7} {} of {}", thousands(n - hidden), thousands(n)),
+        None => tr!("// local \u{00b7} {}", thousands(n)),
     };
-    let note = if hidden > 0 { format!("{} of {} hidden", thousands(hidden), thousands(n)) } else { "nothing hidden".to_string() };
+    let note = if hidden > 0 {
+        lightify_i18n::trn!("{0} of {1} hidden", "{0} of {1} hidden", hidden, thousands(hidden), thousands(n))
+    } else {
+        tr!("nothing hidden")
+    };
     let flags: Vec<crate::LocalFlag> = present_types(st)
         .iter()
         .map(|t| crate::LocalFlag { label: t.to_uppercase().into(), on: !st.filters.hidden_types.contains(t) })
@@ -1219,8 +1262,9 @@ fn thousands(n: usize) -> String {
 
 fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     let mut nodes: Vec<(LocalNode, NodeAct, Option<String>)> = Vec::new();
+    // Section labels are translated here, where they're shown.
     let head = |label: &str, count: usize, kind: i32, open: bool, sel: bool| LocalNode {
-        label: label.into(),
+        label: lightify_i18n::translate(label).into(),
         count: thousands(count).into(),
         kind,
         open,
@@ -1237,7 +1281,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     };
     let flt = st.filters.clone();
     let lib: Vec<&LocalTrack> = st.tracks.iter().filter(|t| flt.passes(t)).collect();
-    nodes.push((head("All music", lib.len(), 3, false, st.view == View::All), NodeAct::View(View::All), None));
+    nodes.push((head(lightify_i18n::tr_noop!("All music"), lib.len(), 3, false, st.view == View::All), NodeAct::View(View::All), None));
 
     let mut artists: BTreeMap<String, usize> = BTreeMap::new();
     let mut albums: BTreeMap<(String, String), usize> = BTreeMap::new();
@@ -1253,7 +1297,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     let mut a: Vec<(String, usize)> = artists.into_iter().collect();
     a.sort_by_key(|x| ci(&x.0));
     let open = st.open.contains(&Section::Artists);
-    nodes.push((head("Artists", a.len(), 0, open, false), NodeAct::Toggle(Section::Artists), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Artists"), a.len(), 0, open, false), NodeAct::Toggle(Section::Artists), None));
     if open {
         for (name, n) in &a {
             let v = View::Artist(name.clone());
@@ -1263,7 +1307,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     let mut al: Vec<((String, String), usize)> = albums.into_iter().collect();
     al.sort_by_key(|x| ci(&x.0 .0));
     let open = st.open.contains(&Section::Albums);
-    nodes.push((head("Albums", al.len(), 0, open, false), NodeAct::Toggle(Section::Albums), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Albums"), al.len(), 0, open, false), NodeAct::Toggle(Section::Albums), None));
     if open {
         for ((album, aa), n) in &al {
             let v = View::Album(album.clone(), aa.clone());
@@ -1273,7 +1317,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     let mut g: Vec<(String, usize)> = genres.into_iter().collect();
     g.sort_by_key(|x| ci(&x.0));
     let open = st.open.contains(&Section::Genres);
-    nodes.push((head("Genres", g.len(), 0, open, false), NodeAct::Toggle(Section::Genres), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Genres"), g.len(), 0, open, false), NodeAct::Toggle(Section::Genres), None));
     if open {
         for (name, n) in &g {
             let v = View::Genre(name.clone());
@@ -1282,7 +1326,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     }
     let folders = st.folders.clone();
     let open = st.open.contains(&Section::Folders);
-    nodes.push((head("Folders", folders.len(), 0, open, false), NodeAct::Toggle(Section::Folders), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Folders"), folders.len(), 0, open, false), NodeAct::Toggle(Section::Folders), None));
     if open {
         for f in &folders {
             let n = lib.iter().filter(|t| t.path.starts_with(f)).count();
@@ -1292,15 +1336,15 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
         }
     }
     let recent = lib.len().min(200);
-    nodes.push((head("Recently added", recent, 3, false, st.view == View::Recent), NodeAct::View(View::Recent), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Recently added"), recent, 3, false, st.view == View::Recent), NodeAct::View(View::Recent), None));
     let open = st.open.contains(&Section::Playlists);
-    nodes.push((head("Local playlists", st.playlists.len(), 0, open, false), NodeAct::Toggle(Section::Playlists), None));
+    nodes.push((head(lightify_i18n::tr_noop!("Local playlists"), st.playlists.len(), 0, open, false), NodeAct::Toggle(Section::Playlists), None));
     if open {
         for p in &st.playlists {
             let v = View::Playlist(p.id.clone());
             nodes.push((sub(&p.name, p.tracks.len(), st.view == v, true), NodeAct::View(v), Some(p.id.clone())));
         }
-        let mut add = head("New playlist", 0, 2, false, false);
+        let mut add = head(lightify_i18n::tr_noop!("New playlist"), 0, 2, false, false);
         add.count = "".into();
         nodes.push((add, NodeAct::NewPlaylist, None));
     }
@@ -1314,12 +1358,12 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
 
 fn view_title(st: &LocalState) -> String {
     match &st.view {
-        View::All => "All music".into(),
+        View::All => tr!("All music"),
         View::Artist(a) => a.clone(),
         View::Album(al, _) => al.clone(),
         View::Genre(g) => g.clone(),
         View::Folder(p) => p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
-        View::Recent => "Recently added".into(),
+        View::Recent => tr!("Recently added"),
         View::Playlist(id) => st.playlists.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
     }
 }
@@ -1349,23 +1393,28 @@ fn push_rows(st: &LocalState, weak: &slint::Weak<MainWindow>) {
     let stats = if st.shown.is_empty() {
         String::new()
     } else if matches!(st.view, View::Artist(_)) {
-        format!("{} {} \u{00b7} {} \u{00b7} {}", albums.len(), if albums.len() == 1 { "album" } else { "albums" }, plural(st.shown.len()), fmt_total(total))
+        format!(
+            "{} \u{00b7} {} \u{00b7} {}",
+            lightify_i18n::trn!("{n} album", "{n} albums", albums.len()),
+            plural(st.shown.len()),
+            fmt_total(total)
+        )
     } else {
         format!("{} \u{00b7} {}", plural(st.shown.len()), fmt_total(total))
     };
     let title = view_title(st);
     let empty = if st.tracks.is_empty() {
         if st.scanning.is_some() {
-            "Looking for music\u{2026}".to_string()
+            tr!("Looking for music\u{2026}")
         } else {
-            "No music yet. Click + (top left) to find music on this PC, or drop audio files and folders here.".to_string()
+            tr!("No music yet. Click + (top left) to find music on this PC, or drop audio files and folders here.")
         }
     } else if !st.filter.is_empty() {
-        "Nothing here matches the filter.".to_string()
+        tr!("Nothing here matches the filter.")
     } else if matches!(st.view, View::Playlist(_)) {
-        "This playlist is empty \u{2014} drag tracks onto it in the list on the left, or right-click a track.".to_string()
+        tr!("This playlist is empty \u{2014} drag tracks onto it in the list on the left, or right-click a track.")
     } else {
-        "Nothing here.".to_string()
+        tr!("Nothing here.")
     };
     let (sc, sd, nsel) = (st.sort.0, st.sort.1, st.selected.len() as i32);
     ui(weak, move |a| {
@@ -1397,6 +1446,17 @@ pub(crate) fn apply_rows(a: &MainWindow, rows: Vec<LocalRow>) {
 }
 
 fn push_find(st: &LocalState, weak: &slint::Weak<MainWindow>, open: bool, busy: bool) {
+    let (cands, confirm) = find_rows(st);
+    ui(weak, move |a| {
+        a.set_local_cands(slint::ModelRc::from(Rc::new(slint::VecModel::from(cands))));
+        a.set_local_find_busy(busy);
+        a.set_local_find_confirm(confirm.into());
+        a.set_local_find_open(open);
+    });
+}
+
+/// The Find dialog's rows and its Add button's label.
+fn find_rows(st: &LocalState) -> (Vec<LocalCand>, String) {
     let cands: Vec<LocalCand> = st
         .cands
         .iter()
@@ -1404,7 +1464,8 @@ fn push_find(st: &LocalState, weak: &slint::Weak<MainWindow>, open: bool, busy: 
         .map(|(c, on)| LocalCand {
             name: c.name.clone().into(),
             path: c.path.display().to_string().into(),
-            count: format!("{}{} tracks", thousands(c.count), if c.capped { "+" } else { "" }).into(),
+            count: lightify_i18n::trn!("{}{} tracks", "{}{} tracks", c.count, thousands(c.count), if c.capped { "+" } else { "" })
+                .into(),
             on: *on,
             added: c.already_added,
         })
@@ -1418,14 +1479,37 @@ fn push_find(st: &LocalState, weak: &slint::Weak<MainWindow>, open: bool, busy: 
     let confirm = if nf == 0 {
         String::new()
     } else {
-        format!("Add {nf} {} \u{00b7} {}", if nf == 1 { "folder" } else { "folders" }, plural(nt))
+        tr!("Add {} \u{00b7} {}", lightify_i18n::trn!("{n} folder", "{n} folders", nf), plural(nt))
     };
-    ui(weak, move |a| {
-        a.set_local_cands(slint::ModelRc::from(Rc::new(slint::VecModel::from(cands))));
-        a.set_local_find_busy(busy);
-        a.set_local_find_confirm(confirm.into());
-        a.set_local_find_open(open);
-    });
+    (cands, confirm)
+}
+
+/// After a language switch: the tree, the list's title, stats and empty line, the
+/// kicker, Recent's times, and an open Find dialog or name prompt, in the new language.
+fn relabel(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
+    if st.on || st.scanned_once || !st.tracks.is_empty() {
+        push_tree(st, weak);
+        push_rows(st, weak);
+    }
+    if st.history_loaded {
+        push_recent(st, weak);
+    }
+    if !st.cands.is_empty() {
+        let (cands, confirm) = find_rows(st);
+        ui(weak, move |a| {
+            if a.get_local_find_open() {
+                a.set_local_cands(slint::ModelRc::from(Rc::new(slint::VecModel::from(cands))));
+                a.set_local_find_confirm(confirm.into());
+            }
+        });
+    }
+    if let Some(note) = st.pending.as_ref().map(pending_note) {
+        ui(weak, move |a| {
+            if a.get_name_prompt_open() {
+                a.set_name_prompt_note(note.into());
+            }
+        });
+    }
 }
 
 fn clear_selection(st: &mut LocalState) {
@@ -1453,9 +1537,20 @@ fn classify(paths: &[PathBuf]) -> (usize, usize, usize) {
     (audio, folders, skipped)
 }
 
-fn ask_name(st: &mut LocalState, weak: &slint::Weak<MainWindow>, p: Pending, note: &str) {
+/// What the name prompt says above the field for `p`.
+fn pending_note(p: &Pending) -> String {
+    match p {
+        Pending::NewPlaylist(paths) if paths.is_empty() => tr!("A new local playlist"),
+        Pending::NewPlaylist(paths) => {
+            lightify_i18n::trn!("{n} track for a new local playlist", "{n} tracks for a new local playlist", paths.len())
+        }
+        Pending::Rename(_) => tr!("Rename the playlist"),
+    }
+}
+
+fn ask_name(st: &mut LocalState, weak: &slint::Weak<MainWindow>, p: Pending) {
+    let note = pending_note(&p);
     st.pending = Some(p);
-    let note = note.to_string();
     ui(weak, move |a| {
         a.set_name_prompt_side(0);
         a.set_name_prompt_note(note.into());
@@ -1491,10 +1586,16 @@ fn shuffled(mut v: Vec<PathBuf>, first: Option<&Path>) -> Vec<PathBuf> {
 /// Play the shown list from display row `row` (shuffled behind it when shuffle is on).
 fn play_from(st: &mut LocalState, row: usize, weak: &slint::Weak<MainWindow>) {
     let list: Vec<PathBuf> = st.shown.iter().map(|&k| st.tracks[k].path.clone()).collect();
+    play_list(st, list, row, weak);
+}
+
+/// Play `list` from `row`, the rest following (shuffled when shuffle is on).
+fn play_list(st: &mut LocalState, list: Vec<PathBuf>, row: usize, weak: &slint::Weak<MainWindow>) {
     if list.is_empty() {
         return;
     }
     let row = row.min(list.len() - 1);
+    st.source = list.clone();
     if st.shuffle {
         let first = list[row].clone();
         st.order = shuffled(list, Some(&first));
@@ -1519,13 +1620,16 @@ fn start_current(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
 
 fn rebuild_order_keep_current(st: &mut LocalState) {
     let Some(cur) = st.now.clone() else { return };
+    // A song from the user queue isn't in the order; the order's own place is where
+    // the list resumes after it.
+    let anchor = if st.order.contains(&cur) { Some(cur) } else { st.order.get(st.pos).cloned() };
     if st.shuffle {
-        st.order = shuffled(st.order.clone(), Some(&cur));
+        st.order = shuffled(st.order.clone(), anchor.as_deref());
         st.pos = 0;
     } else {
-        let list: Vec<PathBuf> = st.shown.iter().map(|&k| st.tracks[k].path.clone()).collect();
-        st.pos = list.iter().position(|p| *p == cur).unwrap_or(0);
-        st.order = list;
+        // Back to the list that was playing, not whatever list is on screen now.
+        st.pos = anchor.and_then(|a| st.source.iter().position(|p| *p == a)).unwrap_or(0);
+        st.order = st.source.clone();
     }
     set_next(st);
 }
@@ -1593,6 +1697,7 @@ fn on_player(st: &mut LocalState, ev: local_player::Event, weak: &slint::Weak<Ma
             st.dur_ms = duration_ms;
             st.now_ms = 0;
             st.playing = true;
+            add_local_play(st, path.clone(), weak);
             set_next(st);
             push_rows(st, weak);
             push_now(st, weak);
@@ -1629,11 +1734,68 @@ fn on_player(st: &mut LocalState, ev: local_player::Event, weak: &slint::Weak<Ma
         }
         local_player::Event::Error { path, msg } => {
             let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            crate::set_status(weak, format!("Can\u{2019}t play \u{201c}{name}\u{201d} \u{2014} {msg}"));
+            crate::set_status(weak, tr!("Can\u{2019}t play \u{201c}{}\u{201d} \u{2014} {}", name, msg));
             st.playing = false;
             push_now(st, weak);
         }
     }
+}
+
+// ── Recent (Local mode) ──────────────────────────────────────────────────────
+
+const HISTORY_KEEP: usize = 100;
+
+fn history_path() -> PathBuf {
+    lightify_core::config::data_dir().join("lightify_shell_local_history.json")
+}
+
+fn ensure_history(st: &mut LocalState) {
+    if !st.history_loaded {
+        st.history_loaded = true;
+        st.history = std::fs::read(history_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    }
+}
+
+/// A local file just started playing (`local_player::Event::Track`): to the top of
+/// Local's Recent, at once.
+fn add_local_play(st: &mut LocalState, path: PathBuf, weak: &slint::Weak<MainWindow>) {
+    ensure_history(st);
+    // Lightify reopened and resumed the file already at the top: the same listen.
+    if st.history.first().is_some_and(|(p, at)| *p == path && crate::play_history::continues(at, st.dur_ms)) {
+        return;
+    }
+    st.history.insert(0, (path, crate::play_history::now_iso()));
+    st.history.truncate(HISTORY_KEEP);
+    if let Ok(b) = serde_json::to_vec(&st.history) {
+        let _ = lightify_core::config::write_atomic(&history_path(), &b);
+    }
+    push_recent(st, weak);
+}
+
+/// The Recent drawer in Local mode: the files played, newest first (files that have
+/// gone missing are left out).
+fn push_recent(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
+    ensure_history(st);
+    let by_path: std::collections::HashMap<&Path, &LocalTrack> = st.tracks.iter().map(|t| (t.path.as_path(), t)).collect();
+    let mut view = Vec::new();
+    let mut rows = Vec::new();
+    for (p, at) in &st.history {
+        let t = by_path.get(p.as_path());
+        if t.is_none() && !p.is_file() {
+            continue;
+        }
+        view.push(p.clone());
+        rows.push(crate::SideRow {
+            name: t.map(|t| t.title.clone()).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()).into(),
+            artist: t.map(|t| t.artist.clone()).unwrap_or_default().into(),
+            time: crate::rel_time(at).into(),
+            playing: st.playing && st.now.as_deref() == Some(p.as_path()),
+            selected: false,
+            pending: 0,
+        });
+    }
+    st.rview = view;
+    ui(weak, move |a| a.set_local_recent_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows)))));
 }
 
 /// The Queue drawer in Local mode: now playing, then the user queue, then the rest of
@@ -1721,24 +1883,30 @@ fn show_in_folder(p: &Path) {
 /// The native picker: a folder (`folder`) or audio files. Empty when cancelled.
 #[cfg(windows)]
 fn pick(folder: bool) -> Vec<PathBuf> {
-    use windows::core::{w, PCWSTR};
+    use windows::core::{w, HSTRING, PCWSTR};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
     let mut out = Vec::new();
+    // The dialog's own text in the active language (runtime strings, kept alive until
+    // it closes); the file pattern is not text.
+    let (title, kind) = if folder {
+        (HSTRING::from(tr!("Add a music folder to Lightify")), HSTRING::new())
+    } else {
+        (HSTRING::from(tr!("Add music files to Lightify")), HSTRING::from(tr!("Audio files")))
+    };
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let Ok(dlg) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return out };
         let Ok(mut opts) = dlg.GetOptions() else { return out };
         opts |= FOS_FORCEFILESYSTEM;
+        let _ = dlg.SetTitle(&title);
         if folder {
             opts |= FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT;
-            let _ = dlg.SetTitle(w!("Add a music folder to Lightify"));
         } else {
             opts |= FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST;
-            let _ = dlg.SetTitle(w!("Add music files to Lightify"));
             let spec = [COMDLG_FILTERSPEC {
-                pszName: w!("Audio files"),
+                pszName: PCWSTR(kind.as_ptr()),
                 pszSpec: w!("*.mp3;*.flac;*.wav;*.aif;*.aiff;*.aifc;*.m4a;*.m4b;*.aac;*.ogg;*.oga;*.caf;*.mp2;*.mp1"),
             }];
             let _ = dlg.SetFileTypes(&spec);
@@ -1865,7 +2033,12 @@ pub fn shot(app: &MainWindow, variant: &str) {
             push_find(&st, &weak, true, false);
         }
         "drop" => {
-            app.set_local_drop_detail("3 audio files \u{00b7} 1 folder \u{00b7} 1 skipped (not audio)".into());
+            let detail = [
+                lightify_i18n::trn!("{n} audio file", "{n} audio files", 3),
+                lightify_i18n::trn!("{n} folder", "{n} folders", 1),
+                lightify_i18n::trn!("{n} skipped (not audio)", "{n} skipped (not audio)", 1),
+            ];
+            app.set_local_drop_detail(detail.join(" \u{00b7} ").into());
             app.set_local_drop_active(true);
         }
         "now" => app.set_local_now_open(true),
@@ -1874,11 +2047,37 @@ pub fn shot(app: &MainWindow, variant: &str) {
             app.set_local_filters_open(true);
         }
         "queue" => app.set_sidebar_mode(1),
+        "recent" => {
+            // Sample plays (never the user's history file): 2 min, 40 min, 3 h, 2 days ago.
+            let ago = |secs: i64| {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                crate::play_history::iso_from_unix(now - secs)
+            };
+            st.history_loaded = true;
+            st.history = [(3, 120), (1, 2_400), (6, 10_800), (9, 172_800)]
+                .iter()
+                .map(|&(i, secs)| (st.tracks[i].path.clone(), ago(secs)))
+                .collect();
+            push_recent(&mut st, &weak);
+            app.set_sidebar_mode(2);
+        }
+        // Both histories present, in the Spotify view: RECENT must show only Spotify's.
+        "recent-spotify" => {
+            st.history_loaded = true;
+            st.history = vec![(st.tracks[3].path.clone(), crate::play_history::now_iso())];
+            push_recent(&mut st, &weak);
+            let row = |n: &str, a: &str, t: &str| crate::SideRow { name: n.into(), artist: a.into(), time: t.into(), playing: false, selected: false, pending: 0 };
+            app.set_sidebar_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(vec![
+                row("Spotify song one", "Spotify artist", "just now"),
+                row("Spotify song two", "Spotify artist", "3m"),
+            ]))));
+            app.set_sidebar_mode(2);
+        }
         "collapsed" => app.set_left_collapsed(true),
         "mini" => app.set_mini_mode("square".into()),
         "minibar" => app.set_mini_mode("bar".into()),
         "carry" => {
-            app.set_local_carry_what("2 tracks".into());
+            app.set_local_carry_what(plural(2).into());
             app.set_local_carry_active(true);
             app.set_local_carry_x(118.0);
             app.set_local_carry_y(420.0);
@@ -1889,7 +2088,8 @@ pub fn shot(app: &MainWindow, variant: &str) {
     }
     // A cover tint unlike the default teal, so a shot shows the accent following it.
     app.set_local_now_glow(slint::Color::from_argb_u8(0x55, 0xe0, 0x60, 0x7a));
-    app.set_local_mode(true);
+    // Every Local shot is in Local mode — except the one checking the Spotify view.
+    app.set_local_mode(variant != "recent-spotify");
 }
 
 #[cfg(test)]
@@ -1982,5 +2182,31 @@ mod tests {
         );
         // What plays after "b" is the user's queue first.
         assert_eq!(peek_next(&st), Some(p("q")));
+    }
+
+    #[test]
+    fn shuffle_off_returns_to_the_list_that_was_playing() {
+        let mut st = LocalState::default();
+        let p = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        st.source = vec![p("a"), p("b"), p("c"), p("d")];
+        st.shuffle = true;
+        st.order = vec![p("c"), p("a"), p("d"), p("b")];
+        st.pos = 1;
+        st.now = Some(p("a"));
+        // Browsing elsewhere since: the shown list must not become the queue.
+        st.shown.clear();
+        st.shuffle = false;
+        rebuild_order_keep_current(&mut st);
+        assert_eq!(st.order, st.source);
+        assert_eq!((st.pos, peek_next(&st)), (0, Some(p("b"))));
+
+        // Playing a hand-queued song: the list resumes after the order's own place.
+        st.shuffle = true;
+        st.order = vec![p("c"), p("a"), p("d"), p("b")];
+        st.pos = 0;
+        st.now = Some(p("q"));
+        st.shuffle = false;
+        rebuild_order_keep_current(&mut st);
+        assert_eq!((st.pos, peek_next(&st)), (2, Some(p("d"))));
     }
 }

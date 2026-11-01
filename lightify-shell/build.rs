@@ -1,5 +1,16 @@
 fn main() {
-    slint_build::compile("ui/app.slint").unwrap();
+    // Translations (LANGUAGE-PLAN.md): one catalog per language in translations/, read by
+    // Slint (bundled) and by the Rust side (languages.rs). No context on `@tr`, so a
+    // string has one entry shared by both halves. Slint refuses to bundle an empty
+    // folder, so with no catalogs the UI compiles as plain English. LIGHTIFY_PSEUDO=1
+    // adds the test-only pseudo language (lightify-i18n/src/build.rs).
+    let bundle = lightify_i18n::build::emit("lightify-shell");
+    let mut config = slint_build::CompilerConfiguration::new()
+        .with_default_translation_context(slint_build::DefaultTranslationContext::None);
+    if let Some(dir) = bundle {
+        config = config.with_bundled_translations(dir);
+    }
+    slint_build::compile_with_config("ui/app.slint", config).unwrap();
 
     // Embed the app manifest (per-monitor-v2 DPI awareness) via the MSVC linker —
     // no external resource compiler needed. Ensures the window renders at native

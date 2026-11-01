@@ -1,0 +1,1771 @@
+# lightify-shell — zh-CN translation. MACHINE DRAFT: needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-shell\n"
+"Language: zh-CN\n"
+"Language-Team: machine draft — needs native review\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: ui/app.slint:715
+msgid "finding"
+msgstr "查找中"
+
+#: ui/app.slint:897
+msgctxt "sort order"
+msgid "Recent"
+msgstr "最近"
+
+#: ui/app.slint:1007
+msgid "artist · top result"
+msgstr "艺人 · 最佳结果"
+
+#: ui/app.slint:1007
+msgid "song · top result"
+msgstr "歌曲 · 最佳结果"
+
+#: ui/app.slint:1008
+msgid "album · top result"
+msgstr "专辑 · 最佳结果"
+
+#: ui/app.slint:1008
+msgid "playlist · top result"
+msgstr "歌单 · 最佳结果"
+
+#: ui/app.slint:1009
+msgid "artist"
+msgstr "艺人"
+
+#: ui/app.slint:1009
+msgid "song"
+msgstr "歌曲"
+
+#: ui/app.slint:1009
+msgid "album"
+msgstr "专辑"
+
+#: ui/app.slint:1009
+msgid "playlist"
+msgstr "歌单"
+
+#: ui/app.slint:1206 ui/app.slint:2229
+msgid "All"
+msgstr "全部"
+
+#: ui/app.slint:1207 src/main.rs:11463
+msgid "Songs"
+msgstr "歌曲"
+
+#: ui/app.slint:1208 src/local_ui.rs:1300 src/main.rs:11465
+msgid "Artists"
+msgstr "艺人"
+
+#: ui/app.slint:1209 src/local_ui.rs:1310 src/main.rs:11467
+msgid "Albums"
+msgstr "专辑"
+
+#: ui/app.slint:1210 src/main.rs:11469
+msgid "Playlists"
+msgstr "歌单"
+
+#: ui/app.slint:1463
+msgid "Local"
+msgstr "本地"
+
+#: ui/app.slint:1842
+msgid "any"
+msgstr "不限"
+
+#: ui/app.slint:2197
+msgid "Filter the library"
+msgstr "筛选音乐库"
+
+#: ui/app.slint:2215
+msgid "Filters"
+msgstr "筛选"
+
+#: ui/app.slint:2223
+msgid "Reset"
+msgstr "重置"
+
+#: ui/app.slint:2226
+msgid "SHOW"
+msgstr "显示"
+
+#: ui/app.slint:2229
+msgid "Music only"
+msgstr "仅音乐"
+
+#: ui/app.slint:2229
+msgid "Long sets"
+msgstr "长曲目"
+
+#: ui/app.slint:2232
+msgid "Hides clips under 1:00 — songs, long tracks and sets stay."
+msgstr "隐藏短于 1:00 的片段 — 歌曲、长曲目和 DJ Set 均会保留。"
+
+#: ui/app.slint:2232
+msgid "Only tracks of 20:00 or more (mixes, sets)."
+msgstr "仅显示 20:00 及以上的曲目（混音、DJ Set）。"
+
+#: ui/app.slint:2235
+msgid "LENGTH"
+msgstr "时长"
+
+#: ui/app.slint:2240
+msgid "Shortest"
+msgstr "最短"
+
+#: ui/app.slint:2245
+msgid "Longest"
+msgstr "最长"
+
+#: ui/app.slint:2250
+msgid "Couldn't read that — try 90, 1:30, 5m or 1:02:00."
+msgstr "无法识别 — 请尝试 90、1:30、5m 或 1:02:00。"
+
+#: ui/app.slint:2250
+msgid "Type 90, 1:30, 5m or 1:02:00 · empty = any."
+msgstr "输入 90、1:30、5m 或 1:02:00 · 留空 = 不限。"
+
+#: ui/app.slint:2254
+msgid "FILE TYPES"
+msgstr "文件类型"
+
+#: ui/app.slint:2308
+msgid "TITLE"
+msgstr "标题"
+
+#: ui/app.slint:2309
+msgid "ARTIST"
+msgstr "艺人"
+
+#: ui/app.slint:2310
+msgid "ALBUM"
+msgstr "专辑"
+
+#: ui/app.slint:2311
+msgid "TIME"
+msgstr "时长"
+
+#: ui/app.slint:2377 ui/app.slint:2485 ui/app.slint:4293 ui/app.slint:4294
+#: ui/app.slint:4700 src/main.rs:10890 src/main.rs:15602
+msgid "Nothing playing"
+msgstr "未在播放"
+
+#: ui/app.slint:2519
+msgid "Drop to add to your local library"
+msgstr "拖放到此处以添加到本地音乐库"
+
+#: ui/app.slint:2521
+msgid "Files stay where they are — Lightify only indexes them. Drop a folder to add everything in it."
+msgstr "文件保留在原位置 — Lightify 只会为其建立索引。拖放文件夹即可添加其中的全部内容。"
+
+#: ui/app.slint:2568
+msgid "Find music on this PC"
+msgstr "查找此电脑上的音乐"
+
+#: ui/app.slint:2576
+msgid "// looking in the usual places…"
+msgstr "// 正在常用位置查找…"
+
+#: ui/app.slint:2576
+msgid "// found in the usual places"
+msgstr "// 在常用位置中找到"
+
+#: ui/app.slint:2577
+msgid "No music found in the usual folders — add a folder or files below."
+msgstr "常用文件夹中未找到音乐 — 请在下方添加文件夹或文件。"
+
+#: ui/app.slint:2599
+msgid "added"
+msgstr "已添加"
+
+#: ui/app.slint:2607
+msgid "Add a folder…"
+msgstr "添加文件夹…"
+
+#: ui/app.slint:2608
+msgid "Add files…"
+msgstr "添加文件…"
+
+#: ui/app.slint:2661
+msgid "Connecting…"
+msgstr "正在连接…"
+
+#: ui/app.slint:2762 src/main.rs:2161 src/main.rs:2430 src/main.rs:3184
+#: src/main.rs:3284 src/main.rs:3367 src/main.rs:3652 src/main.rs:3760
+#: src/main.rs:11758 src/main.rs:11817 src/main.rs:11905 src/main.rs:15662
+msgid "No queued tracks"
+msgstr "播放队列中没有歌曲"
+
+#: ui/app.slint:2780
+msgid "Select a genre to load a Beatport chart"
+msgstr "选择一个流派以加载 Beatport 榜单"
+
+#: ui/app.slint:2785 src/main.rs:3840
+msgid "Loading…"
+msgstr "正在加载…"
+
+#: ui/app.slint:2788
+msgid "Starting…"
+msgstr "正在启动…"
+
+#: ui/app.slint:2798 ui/app.slint:5440 src/main.rs:3838
+msgid "Checking…"
+msgstr "正在检查…"
+
+#: ui/app.slint:2901 src/main.rs:2141 src/main.rs:2298 src/main.rs:2304
+#: src/main.rs:2911 src/main.rs:7233 src/main.rs:7411 src/main.rs:8763
+#: src/main.rs:10274 src/main.rs:13497 src/main.rs:15260
+msgid "Liked Songs"
+msgstr "已点赞的歌曲"
+
+#: ui/app.slint:3430 src/main.rs:13497
+msgid "Library"
+msgstr "音乐库"
+
+#: ui/app.slint:3431 src/main.rs:13594
+msgid "Search"
+msgstr "搜索"
+
+#: ui/app.slint:3438
+msgid "// library · {}"
+msgstr "// 音乐库 · {}"
+
+#: ui/app.slint:3494
+msgid "// tracks"
+msgstr "// 歌曲"
+
+#: ui/app.slint:3567 ui/app.slint:3741 src/main.rs:13962 src/main.rs:14080
+msgid "No tracks to show"
+msgstr "没有可显示的歌曲"
+
+#: ui/app.slint:3626
+msgid "What do you want to hear?"
+msgstr "想听什么？"
+
+#: ui/app.slint:3757
+msgid "Searching…"
+msgstr "正在搜索…"
+
+#: ui/app.slint:3758
+msgid "Search Spotify"
+msgstr "搜索 Spotify"
+
+#: ui/app.slint:3759
+msgid "No results for “{}”"
+msgstr "未找到“{}”的相关结果"
+
+#: ui/app.slint:3768
+msgid "Songs, artists, albums and playlists. Your recent searches will show up here."
+msgstr "歌曲、艺人、专辑和歌单。你最近的搜索会显示在这里。"
+
+#: ui/app.slint:3769
+msgid "Check the spelling, or try fewer or different words."
+msgstr "请检查拼写，或尝试减少或更换关键词。"
+
+#: ui/app.slint:3972
+msgid "Select all"
+msgstr "全选"
+
+#: ui/app.slint:3977
+msgid "Create playlist"
+msgstr "创建歌单"
+
+#: ui/app.slint:4010
+msgid "OPEN ↗"
+msgstr "打开 ↗"
+
+#: ui/app.slint:4055
+msgid "{n} match"
+msgid_plural "{n} matches"
+msgstr[0] "{n} 个匹配项"
+
+#: ui/app.slint:4295
+msgid "Pick a playlist or a song to start"
+msgstr "选择一个歌单或一首歌曲开始播放"
+
+#: ui/app.slint:4562 ui/app.slint:4883 src/main.rs:4335
+msgid "Queue"
+msgstr "播放队列"
+
+#: ui/app.slint:4562 ui/app.slint:4884
+msgid "Recent"
+msgstr "最近"
+
+#: ui/app.slint:4562 ui/app.slint:4885
+msgid "Downloads"
+msgstr "下载"
+
+#: ui/app.slint:4582 src/main.rs:11523
+msgid "Clear"
+msgstr "清空"
+
+#: ui/app.slint:4619
+msgid "Finding on Spotify"
+msgstr "正在 Spotify 上查找"
+
+#: ui/app.slint:4667 src/main.rs:12144 src/main.rs:15671
+msgid "No downloads queued"
+msgstr "没有排队的下载"
+
+#: ui/app.slint:4668
+msgid "Right-click a song or playlist and choose Download."
+msgstr "右键单击歌曲或歌单，然后选择“下载”。"
+
+#: ui/app.slint:4702
+msgid "Click a track to play it — the rest of its list follows here. Right-click a track and choose Add to queue to play it next."
+msgstr "单击歌曲即可播放，列表中的其余歌曲会接着显示在这里。右键单击歌曲并选择“添加到播放队列”，即可在下一首播放。"
+
+#: ui/app.slint:4725
+msgid "No local tracks played yet"
+msgstr "尚未播放过本地歌曲"
+
+#: ui/app.slint:4727
+msgid "Files you play in Local mode will show up here."
+msgstr "你在本地模式下播放的文件会显示在这里。"
+
+#: ui/app.slint:4798
+msgid "Create playlist from queue"
+msgstr "从播放队列创建歌单"
+
+#: ui/app.slint:4820
+msgid "Right-click any song and choose Add to queue."
+msgstr "右键单击任意歌曲，然后选择“添加到播放队列”。"
+
+#: ui/app.slint:4821
+msgid "Songs you play will show up here."
+msgstr "你播放的歌曲会显示在这里。"
+
+#: ui/app.slint:4907
+msgid "{} ready"
+msgstr "{} 已就绪"
+
+#: ui/app.slint:4915 ui/app.slint:5162
+msgid "Restart"
+msgstr "重启"
+
+#: ui/app.slint:4925
+msgid "updating… {}%"
+msgstr "正在更新… {}%"
+
+#: ui/app.slint:5124
+msgid "Settings"
+msgstr "设置"
+
+#: ui/app.slint:5161
+msgid "// playback engine"
+msgstr "// 播放引擎"
+
+#: ui/app.slint:5170
+msgid "Lightify decodes audio itself and registers as a Spotify Connect device — the Spotify app is never required."
+msgstr "Lightify 自行解码音频，并注册为 Spotify Connect 设备 — 完全不需要 Spotify 应用。"
+
+#: ui/app.slint:5177
+msgid "// audio output"
+msgstr "// 音频输出"
+
+#: ui/app.slint:5217
+msgid "No audio outputs found"
+msgstr "未找到音频输出设备"
+
+#: ui/app.slint:5229
+msgid "// playback device"
+msgstr "// 播放设备"
+
+#: ui/app.slint:5230
+msgid "Refresh"
+msgstr "刷新"
+
+#: ui/app.slint:5262
+msgid "Select"
+msgstr "选择"
+
+#: ui/app.slint:5278
+msgid "// ascii lava"
+msgstr "// ascii 熔岩"
+
+#: ui/app.slint:5284
+msgid "Lava behind now playing"
+msgstr "在正在播放界面后显示熔岩"
+
+#: ui/app.slint:5285
+msgid "Right-click the lava for the screensaver."
+msgstr "右键单击熔岩可打开屏幕保护程序。"
+
+#: ui/app.slint:5313
+msgid "// language"
+msgstr "// 语言"
+
+#: ui/app.slint:5356
+msgid "// poll rate"
+msgstr "// 轮询频率"
+
+#: ui/app.slint:5362
+msgid "Slow"
+msgstr "慢"
+
+#: ui/app.slint:5363
+msgid "Normal"
+msgstr "正常"
+
+#: ui/app.slint:5364
+msgid "Fast"
+msgstr "快"
+
+#: ui/app.slint:5375
+msgid "// downloader"
+msgstr "// 下载器"
+
+#: ui/app.slint:5381
+msgid "Waiting… (retry)"
+msgstr "等待中…（重试）"
+
+#: ui/app.slint:5381
+msgid "Connect Spotify Downloader"
+msgstr "连接 Spotify 下载器"
+
+#: ui/app.slint:5396
+msgid "download folder"
+msgstr "下载文件夹"
+
+#: ui/app.slint:5421
+msgid "Download folder"
+msgstr "下载文件夹"
+
+#: ui/app.slint:5427 ui/app.slint:5826
+msgid "Save"
+msgstr "保存"
+
+#: ui/app.slint:5436
+msgid "// updates"
+msgstr "// 更新"
+
+#: ui/app.slint:5438
+msgid "Restart now"
+msgstr "立即重启"
+
+#: ui/app.slint:5439 src/main.rs:14663 src/main.rs:14694 src/main.rs:14716
+#: src/main.rs:14729 src/main.rs:14817 src/main.rs:14853 src/main.rs:14874
+#: src/main.rs:14891
+msgid "Download"
+msgstr "下载"
+
+#: ui/app.slint:5441
+msgid "Downloading…"
+msgstr "正在下载…"
+
+#: ui/app.slint:5442
+msgid "Check now"
+msgstr "立即检查"
+
+#: ui/app.slint:5454
+msgid "Lightify {} downloaded — restart to finish"
+msgstr "Lightify {} 已下载 — 重启以完成更新"
+
+#: ui/app.slint:5455
+msgid "Lightify {} is available"
+msgstr "Lightify {} 可供更新"
+
+#: ui/app.slint:5456
+msgid "Checking lightify.stream…"
+msgstr "正在检查 lightify.stream…"
+
+#: ui/app.slint:5457
+msgid "Downloading Lightify {}"
+msgstr "正在下载 Lightify {}"
+
+#: ui/app.slint:5459
+msgid "Lightify {} is up to date"
+msgstr "Lightify {} 已是最新版本"
+
+#: ui/app.slint:5477
+msgid "Mark seen"
+msgstr "标为已读"
+
+#: ui/app.slint:5495
+msgid "Install updates automatically"
+msgstr "自动安装更新"
+
+#: ui/app.slint:5516
+msgid "// account"
+msgstr "// 账户"
+
+#: ui/app.slint:5517
+msgid "Not connected"
+msgstr "未连接"
+
+#: ui/app.slint:5522
+msgid "// about"
+msgstr "// 关于"
+
+#: ui/app.slint:5595
+msgid "Search actions, playlists…"
+msgstr "搜索操作、歌单…"
+
+#: ui/app.slint:5625
+msgid "No matches"
+msgstr "无匹配项"
+
+#: ui/app.slint:5716
+msgid "No"
+msgstr "否"
+
+#: ui/app.slint:5726
+msgid "Yes"
+msgstr "是"
+
+#: ui/app.slint:5767
+msgid "// new playlist"
+msgstr "// 新建歌单"
+
+#: ui/app.slint:5805
+msgid "Playlist name"
+msgstr "歌单名称"
+
+#: ui/app.slint:5814 src/main.rs:14908
+msgid "Cancel"
+msgstr "取消"
+
+#: ui/app.slint:5858
+msgid "// first run"
+msgstr "// 首次运行"
+
+#: ui/app.slint:5859
+msgid "Connect Spotify"
+msgstr "连接 Spotify"
+
+#: ui/app.slint:5870
+msgid "Go to"
+msgstr "前往"
+
+#: ui/app.slint:5884
+msgid "Create an app — set the redirect URI to"
+msgstr "创建一个应用 — 将重定向 URI 设置为"
+
+#: ui/app.slint:5894
+msgid "Paste your Client ID below and authorise"
+msgstr "在下方粘贴你的 Client ID 并授权"
+
+#: ui/app.slint:5915
+msgid "paste your Spotify Client ID here"
+msgstr "在此粘贴你的 Spotify Client ID"
+
+#: ui/app.slint:5935
+msgid "Authorise"
+msgstr "授权"
+
+#: ui/app.slint:5940 src/main.rs:14906
+msgid "Retry"
+msgstr "重试"
+
+#: src/downloader.rs:353
+msgid "Download path cannot be empty"
+msgstr "下载路径不能为空"
+
+#: src/local_ui.rs:753 src/local_ui.rs:2037
+msgid "{n} audio file"
+msgid_plural "{n} audio files"
+msgstr[0] "{n} 个音频文件"
+
+#: src/local_ui.rs:756 src/local_ui.rs:1051 src/local_ui.rs:1482
+#: src/local_ui.rs:2038
+msgid "{n} folder"
+msgid_plural "{n} folders"
+msgstr[0] "{n} 个文件夹"
+
+#: src/local_ui.rs:759 src/local_ui.rs:2039
+msgid "{n} skipped (not audio)"
+msgid_plural "{n} skipped (not audio)"
+msgstr[0] "已跳过 {n} 个（非音频）"
+
+#: src/local_ui.rs:836
+msgid "Added {n} track to the queue"
+msgid_plural "Added {n} tracks to the queue"
+msgstr[0] "已将 {n} 首歌曲添加到播放队列"
+
+#: src/local_ui.rs:915
+msgid "Created “{}”"
+msgstr "已创建“{}”"
+
+#: src/local_ui.rs:969
+msgid "Play {n} track"
+msgid_plural "Play {n} tracks"
+msgstr[0] "播放 {n} 首歌曲"
+
+#: src/local_ui.rs:969 src/local_ui.rs:1014 src/main.rs:13484 src/main.rs:14661
+#: src/main.rs:14684 src/main.rs:14706 src/main.rs:14725 src/main.rs:14736
+#: src/main.rs:14815 src/main.rs:14843 src/main.rs:14864 src/main.rs:14884
+msgid "Play"
+msgstr "播放"
+
+#: src/local_ui.rs:972 src/main.rs:14686 src/main.rs:14708 src/main.rs:14726
+#: src/main.rs:14737 src/main.rs:14816 src/main.rs:14845 src/main.rs:14866
+#: src/main.rs:14886
+msgid "Add to queue"
+msgstr "添加到播放队列"
+
+#: src/local_ui.rs:975
+msgid "Add to “{}”"
+msgstr "添加到“{}”"
+
+#: src/local_ui.rs:979
+msgid "New playlist from {n} track"
+msgid_plural "New playlist from {n} tracks"
+msgstr[0] "用 {n} 首歌曲新建歌单"
+
+#: src/local_ui.rs:981
+msgid "New playlist from track"
+msgstr "用此歌曲新建歌单"
+
+#: src/local_ui.rs:986 src/local_ui.rs:1003 src/local_ui.rs:1020
+msgid "Show in folder"
+msgstr "在文件夹中显示"
+
+#: src/local_ui.rs:990
+msgid "Remove {n} from playlist"
+msgid_plural "Remove {n} from playlist"
+msgstr[0] "从歌单中移除 {n} 首歌曲"
+
+#: src/local_ui.rs:990
+msgid "Remove from playlist"
+msgstr "从歌单中移除"
+
+#: src/local_ui.rs:1001
+msgid "Play now"
+msgstr "立即播放"
+
+#: src/local_ui.rs:1005
+msgid "Remove from queue"
+msgstr "从播放队列中移除"
+
+#: src/local_ui.rs:1016
+msgid "Rename"
+msgstr "重命名"
+
+#: src/local_ui.rs:1017
+msgid "Delete playlist"
+msgstr "删除歌单"
+
+#: src/local_ui.rs:1021
+msgid "Remove folder from library"
+msgstr "从音乐库中移除文件夹"
+
+#: src/local_ui.rs:1024 src/local_ui.rs:1347
+msgid "New playlist"
+msgstr "新建歌单"
+
+#: src/local_ui.rs:1053
+msgid "Nothing to add — only audio files and folders are taken"
+msgstr "没有可添加的内容 — 仅接受音频文件和文件夹"
+
+#: src/local_ui.rs:1054
+msgid "Added {0} and {1} — scanning…"
+msgstr "已添加 {0}和 {1} — 正在扫描…"
+
+#: src/local_ui.rs:1055 src/local_ui.rs:1056
+msgid "Added {} — scanning…"
+msgstr "已添加 {} — 正在扫描…"
+
+#: src/local_ui.rs:1157
+msgid "{} h {} m"
+msgstr "{} 小时 {} 分钟"
+
+#: src/local_ui.rs:1157
+msgid "{} m"
+msgstr "{} 分钟"
+
+#: src/local_ui.rs:1161
+msgid "{n} track"
+msgid_plural "{n} tracks"
+msgstr[0] "{n} 首歌曲"
+
+#: src/local_ui.rs:1166
+msgid "Added {n} track to “{0}”"
+msgid_plural "Added {n} tracks to “{0}”"
+msgstr[0] "已将 {n} 首歌曲添加到“{0}”"
+
+#: src/local_ui.rs:1173
+msgid "// local · scanning {}…"
+msgstr "// 本地 · 正在扫描 {}…"
+
+#: src/local_ui.rs:1174
+msgid "// local · scanning…"
+msgstr "// 本地 · 正在扫描…"
+
+#: src/local_ui.rs:1175
+msgid "// local · {} of {}"
+msgstr "// 本地 · {} / {}"
+
+#: src/local_ui.rs:1176
+msgid "// local · {}"
+msgstr "// 本地 · {}"
+
+#: src/local_ui.rs:1179
+msgid "{0} of {1} hidden"
+msgid_plural "{0} of {1} hidden"
+msgstr[0] "{1} 项中已隐藏 {0} 项"
+
+#: src/local_ui.rs:1181
+msgid "nothing hidden"
+msgstr "未隐藏任何内容"
+
+#: src/local_ui.rs:1284 src/local_ui.rs:1361
+msgid "All music"
+msgstr "全部音乐"
+
+#: src/local_ui.rs:1320
+msgid "Genres"
+msgstr "流派"
+
+#: src/local_ui.rs:1329
+msgid "Folders"
+msgstr "文件夹"
+
+#: src/local_ui.rs:1339 src/local_ui.rs:1366
+msgid "Recently added"
+msgstr "最近添加"
+
+#: src/local_ui.rs:1341
+msgid "Local playlists"
+msgstr "本地歌单"
+
+#: src/local_ui.rs:1398
+msgid "{n} album"
+msgid_plural "{n} albums"
+msgstr[0] "{n} 张专辑"
+
+#: src/local_ui.rs:1408
+msgid "Looking for music…"
+msgstr "正在查找音乐…"
+
+#: src/local_ui.rs:1410
+msgid "No music yet. Click + (top left) to find music on this PC, or drop audio files and folders here."
+msgstr "还没有音乐。点击 +（左上角）查找此电脑上的音乐，或将音频文件和文件夹拖放到这里。"
+
+#: src/local_ui.rs:1413
+msgid "Nothing here matches the filter."
+msgstr "没有符合筛选条件的内容。"
+
+#: src/local_ui.rs:1415
+msgid "This playlist is empty — drag tracks onto it in the list on the left, or right-click a track."
+msgstr "此歌单为空 — 将歌曲拖到左侧列表中的此歌单上，或右键单击歌曲。"
+
+#: src/local_ui.rs:1417
+msgid "Nothing here."
+msgstr "这里什么都没有。"
+
+#: src/local_ui.rs:1467
+msgid "{}{} tracks"
+msgid_plural "{}{} tracks"
+msgstr[0] "{}{} 首歌曲"
+
+#: src/local_ui.rs:1482
+msgid "Add {} · {}"
+msgstr "添加 {} · {}"
+
+#: src/local_ui.rs:1543
+msgid "A new local playlist"
+msgstr "新的本地歌单"
+
+#: src/local_ui.rs:1545
+msgid "{n} track for a new local playlist"
+msgid_plural "{n} tracks for a new local playlist"
+msgstr[0] "用于新本地歌单的 {n} 首歌曲"
+
+#: src/local_ui.rs:1547
+msgid "Rename the playlist"
+msgstr "重命名歌单"
+
+#: src/local_ui.rs:1737
+msgid "Can’t play “{}” — {}"
+msgstr "无法播放“{}” — {}"
+
+#: src/local_ui.rs:1894
+msgid "Add a music folder to Lightify"
+msgstr "将音乐文件夹添加到 Lightify"
+
+#: src/local_ui.rs:1896
+msgid "Add music files to Lightify"
+msgstr "将音乐文件添加到 Lightify"
+
+#: src/local_ui.rs:1896
+msgid "Audio files"
+msgstr "音频文件"
+
+#: src/main.rs:1465
+msgid "Playlists error — {}"
+msgstr "歌单出错 — {}"
+
+#: src/main.rs:1655 src/main.rs:1754 src/main.rs:1824 src/main.rs:1900
+msgid "Spotify rate limit — pausing polling for {}"
+msgstr "Spotify 速率限制 — 暂停轮询 {}"
+
+#: src/main.rs:1857 src/main.rs:1989 src/main.rs:4868
+msgid "Spotify rate limit — resuming in {}"
+msgstr "Spotify 速率限制 — {} 后恢复"
+
+#: src/main.rs:1885
+msgid "Offline — reconnecting (next try in {})"
+msgstr "离线 — 正在重新连接（{} 后重试）"
+
+#: src/main.rs:2029 src/main.rs:4892
+msgid "Spotify rate limit — pausing for {}"
+msgstr "Spotify 速率限制 — 暂停 {}"
+
+#: src/main.rs:2031 src/main.rs:4412 src/main.rs:4894
+msgid "Search — {}"
+msgstr "搜索 — {}"
+
+#: src/main.rs:2102
+msgid "Give the playlist a name"
+msgstr "请为歌单命名"
+
+#: src/main.rs:2134 src/main.rs:8482
+msgid "That list just changed — try again"
+msgstr "该列表刚刚发生了变化 — 请重试"
+
+#: src/main.rs:2161 src/main.rs:3284 src/main.rs:3299 src/main.rs:11732
+#: src/main.rs:11758 src/main.rs:11837 src/main.rs:15663
+msgid "No recent tracks yet"
+msgstr "还没有最近播放的歌曲"
+
+#: src/main.rs:2183 src/main.rs:4798 src/main.rs:15761
+msgid "Delete “{}” from your Spotify library?"
+msgstr "要从你的 Spotify 音乐库中删除“{}”吗？"
+
+#: src/main.rs:2192 src/main.rs:4800 src/main.rs:15759
+msgid "DELETE PLAYLIST"
+msgstr "删除歌单"
+
+#: src/main.rs:2204
+msgid "Resuming {}…"
+msgstr "正在恢复播放 {}…"
+
+#: src/main.rs:2206 src/main.rs:4954
+msgid "Resume — {}"
+msgstr "恢复播放 — {}"
+
+#: src/main.rs:2225
+msgid "Playback — {}"
+msgstr "播放 — {}"
+
+#: src/main.rs:2259
+msgid "Next — {}"
+msgstr "下一首 — {}"
+
+#: src/main.rs:2276
+msgid "Prev — {}"
+msgstr "上一首 — {}"
+
+#: src/main.rs:2299
+msgid "Loading Liked Songs…"
+msgstr "正在加载已点赞的歌曲…"
+
+#: src/main.rs:2317
+msgid "Loading {}…"
+msgstr "正在加载 {}…"
+
+#: src/main.rs:2346
+msgid "That track is no longer in the list"
+msgstr "该歌曲已不在列表中"
+
+#: src/main.rs:2436 src/main.rs:2546 src/main.rs:3476 src/main.rs:3602
+#: src/main.rs:3668 src/main.rs:4036 src/main.rs:4219 src/main.rs:4367
+#: src/main.rs:4444 src/main.rs:4488 src/main.rs:4655 src/main.rs:4768
+msgid "Play — {}"
+msgstr "播放 — {}"
+
+#: src/main.rs:2576
+msgid "Album — {}"
+msgstr "专辑 — {}"
+
+#: src/main.rs:2635
+msgid "Shuffle — {}"
+msgstr "随机播放 — {}"
+
+#: src/main.rs:2663
+msgid "Repeat — {}"
+msgstr "重复播放 — {}"
+
+#: src/main.rs:2681 src/main.rs:4000 src/main.rs:4312 src/main.rs:4457
+#: src/main.rs:4845
+msgid "Added to queue"
+msgstr "已添加到播放队列"
+
+#: src/main.rs:2683 src/main.rs:3304
+msgid "Queue — {}"
+msgstr "播放队列 — {}"
+
+#: src/main.rs:2786
+msgid "No track playing"
+msgstr "没有正在播放的歌曲"
+
+#: src/main.rs:2797 src/main.rs:4009
+msgid "Saved to Liked Songs"
+msgstr "已添加到已点赞的歌曲"
+
+#: src/main.rs:2797
+msgid "Removed from Liked Songs"
+msgstr "已从已点赞的歌曲中移除"
+
+#: src/main.rs:2802
+msgid "Like — {}"
+msgstr "点赞 — {}"
+
+#: src/main.rs:2823
+msgid "Seek — {}"
+msgstr "跳转 — {}"
+
+#: src/main.rs:2840
+msgid "Volume — {}"
+msgstr "音量 — {}"
+
+#: src/main.rs:2883
+msgid "Loading recent…"
+msgstr "正在加载最近播放…"
+
+#: src/main.rs:2891 src/main.rs:2964
+msgid "Loading downloads…"
+msgstr "正在加载下载列表…"
+
+#: src/main.rs:2924 src/main.rs:2940
+msgid "Nothing to download on that row"
+msgstr "该行没有可下载的内容"
+
+#: src/main.rs:2947 src/main.rs:3521
+msgid "Matching “{}” on Spotify…"
+msgstr "正在 Spotify 上匹配“{}”…"
+
+#: src/main.rs:2953
+msgid "No Spotify match to download for {}"
+msgstr "{} 在 Spotify 上没有可下载的匹配项"
+
+#: src/main.rs:2954 src/main.rs:4141
+msgid "Beatport — {}"
+msgstr "Beatport — {}"
+
+#: src/main.rs:2985 src/main.rs:2997 src/main.rs:3009
+msgid "That download is no longer listed"
+msgstr "该下载已不在列表中"
+
+#: src/main.rs:3020
+msgid "Waiting…"
+msgstr "等待中…"
+
+#: src/main.rs:3035
+msgid "Downloader sign-in started — open Spotify and pick OnTheSpot in the device list. If Windows asked about the firewall, make sure both Private and Public networks are allowed — it only checks Private by default."
+msgstr "下载器登录已开始 — 请打开 Spotify，在设备列表中选择 OnTheSpot。如果 Windows 询问防火墙设置，请确保同时允许专用网络和公用网络 — 默认只勾选专用网络。"
+
+#: src/main.rs:3045
+msgid "Downloader setup failed — {}"
+msgstr "下载器设置失败 — {}"
+
+#: src/main.rs:3103
+msgid "Download path saved"
+msgstr "下载路径已保存"
+
+#: src/main.rs:3105
+msgid "Failed to set download path — {}"
+msgstr "设置下载路径失败 — {}"
+
+#: src/main.rs:3124 src/main.rs:3329
+msgid "Lightify isn’t the active Spotify player right now — Settings → Restart, then try again."
+msgstr "Lightify 当前不是活动的 Spotify 播放器 — 请前往 设置 → 重启，然后重试。"
+
+#: src/main.rs:3154
+msgid "Clearing the queue…"
+msgstr "正在清空播放队列…"
+
+#: src/main.rs:3170
+msgid "Cleared queue"
+msgstr "已清空播放队列"
+
+#: src/main.rs:3173
+msgid "Cleared the queue, but {n} queued tracks are still there"
+msgid_plural "Cleared the queue, but {n} queued tracks are still there"
+msgstr[0] "已清空播放队列，但仍有 {n} 首歌曲在队列中"
+
+#: src/main.rs:3189
+msgid "Couldn’t confirm the queue was cleared — try again"
+msgstr "无法确认播放队列已清空 — 请重试"
+
+#: src/main.rs:3300
+msgid "Recent — other devices’ plays didn’t load: {}"
+msgstr "最近 — 未能加载其他设备上的播放记录：{}"
+
+#: src/main.rs:3304
+msgid "Recent — {}"
+msgstr "最近 — {}"
+
+#: src/main.rs:3369
+msgid "Removed “{}” from the queue"
+msgstr "已从播放队列中移除“{}”"
+
+#: src/main.rs:3570
+msgid "Match — {}"
+msgstr "匹配 — {}"
+
+#: src/main.rs:3579
+msgid "No Spotify match for “{}”"
+msgstr "“{}”在 Spotify 上没有匹配项"
+
+#: src/main.rs:3610
+msgid "Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "正在播放 — 正在准备榜单中的其余歌曲（还剩 {n} 首）"
+
+#: src/main.rs:3615 src/main.rs:3672
+msgid "Playing {} — {}"
+msgstr "正在播放：{} — {}"
+
+#: src/main.rs:3616
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — lining up the rest of the chart ({n} to go)"
+msgstr[0] "Spotify 上没有“{0}” — 改为播放“{1}”。正在播放 — 正在准备榜单中的其余歌曲（还剩 {n} 首）"
+
+#: src/main.rs:3621
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing {1} — {2}"
+msgstr "Spotify 上没有“{0}” — 改为播放“{1}”。正在播放：{1} — {2}"
+
+#: src/main.rs:3694
+msgid "Playing — {0} queued, {n} left to match"
+msgid_plural "Playing — {0} queued, {n} left to match"
+msgstr[0] "正在播放 — 已加入队列 {0} 首，还有 {n} 首待匹配"
+
+#: src/main.rs:3699
+msgid "Playing — {n} queued"
+msgid_plural "Playing — {n} queued"
+msgstr[0] "正在播放 — 已加入队列 {n} 首"
+
+#: src/main.rs:3700
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {2} queued, {n} left to match"
+msgstr[0] "Spotify 上没有“{0}” — 改为播放“{1}”。正在播放 — 已加入队列 {2} 首，还有 {n} 首待匹配"
+
+#: src/main.rs:3705
+msgid "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgid_plural "“{0}” isn’t on Spotify — playing “{1}” instead. Playing — {n} queued"
+msgstr[0] "Spotify 上没有“{0}” — 改为播放“{1}”。正在播放 — 已加入队列 {n} 首"
+
+#: src/main.rs:3726
+msgid "Opened the chart in your browser"
+msgstr "已在浏览器中打开榜单"
+
+#: src/main.rs:3728
+msgid "Open this in your browser: {}"
+msgstr "请在浏览器中打开：{}"
+
+#: src/main.rs:3767
+msgid "Playing the chart — {} of {n} tracks found on Spotify"
+msgid_plural "Playing the chart — {} of {n} tracks found on Spotify"
+msgstr[0] "正在播放榜单 — 在 Spotify 上找到 {} / {n} 首歌曲"
+
+#: src/main.rs:3775
+msgid "Lining up the chart — {} so far; retrying ({})"
+msgstr "正在准备榜单 — 目前 {} 首；正在重试（{}）"
+
+#: src/main.rs:3776
+msgid "Playing the chart — {} lined up…"
+msgstr "正在播放榜单 — 已准备 {} 首…"
+
+#: src/main.rs:3804 src/main.rs:12242 src/main.rs:12250
+msgid "Beatport queue refill — {}"
+msgstr "Beatport 播放队列补充 — {}"
+
+#: src/main.rs:3827 src/main.rs:5274
+msgid "Not running"
+msgstr "未运行"
+
+#: src/main.rs:3845 src/main.rs:15707
+msgid "No devices yet — Lightify’s own player is still starting."
+msgstr "暂无设备 — Lightify 自带的播放器仍在启动。"
+
+#: src/main.rs:3853
+msgid "Devices — {}"
+msgstr "设备 — {}"
+
+#: src/main.rs:3863
+msgid "Playing on {}"
+msgstr "正在 {} 上播放"
+
+#: src/main.rs:3868
+msgid "Transfer — {}"
+msgstr "切换播放设备 — {}"
+
+#: src/main.rs:3967 src/main.rs:16038
+msgid "ASCII lava screensaver"
+msgstr "ASCII 熔岩屏幕保护程序"
+
+#: src/main.rs:4032
+msgid "Nothing to play here"
+msgstr "这里没有可播放的内容"
+
+#: src/main.rs:4043
+msgid "Getting tracks…"
+msgstr "正在获取歌曲…"
+
+#: src/main.rs:4047 src/main.rs:4081
+msgid "Add to queue — {}"
+msgstr "添加到播放队列 — {}"
+
+#: src/main.rs:4052
+msgid "Nothing playable in “{}”"
+msgstr "“{}”中没有可播放的内容"
+
+#: src/main.rs:4066
+msgid "Adding to queue… {}/{}"
+msgstr "正在添加到播放队列… {}/{}"
+
+#: src/main.rs:4084
+msgid "Added {n} track to queue, then stopped — {0}"
+msgid_plural "Added {n} tracks to queue, then stopped — {0}"
+msgstr[0] "已将 {n} 首歌曲添加到播放队列，随后停止 — {0}"
+
+#: src/main.rs:4092
+msgid "Added the first {0} of {n} tracks from “{1}” to queue"
+msgid_plural "Added the first {0} of {n} tracks from “{1}” to queue"
+msgstr[0] "已将“{1}”中 {n} 首歌曲的前 {0} 首添加到播放队列"
+
+#: src/main.rs:4100
+msgid "Added {n} track from “{0}” to queue"
+msgid_plural "Added {n} tracks from “{0}” to queue"
+msgstr[0] "已将“{0}”中的 {n} 首歌曲添加到播放队列"
+
+#: src/main.rs:4111
+msgid "Playlist saved"
+msgstr "歌单已保存"
+
+#: src/main.rs:4114
+msgid "Album saved"
+msgstr "专辑已保存"
+
+#: src/main.rs:4131
+msgid "Added to queue: {}"
+msgstr "已添加到播放队列：{}"
+
+#: src/main.rs:4140
+msgid "No Spotify match for {}"
+msgstr "{} 在 Spotify 上没有匹配项"
+
+#: src/main.rs:4171 src/main.rs:4189
+msgid "No Beatport tracks selected"
+msgstr "未选择 Beatport 歌曲"
+
+#: src/main.rs:4191
+msgid "Matching {n} Beatport tracks…"
+msgid_plural "Matching {n} Beatport tracks…"
+msgstr[0] "正在匹配 {n} 首 Beatport 歌曲…"
+
+#: src/main.rs:4205
+msgid "No Spotify matches for the selection"
+msgstr "所选内容在 Spotify 上没有匹配项"
+
+#: src/main.rs:4224
+msgid "Playing {n} selected ({} unmatched)"
+msgid_plural "Playing {n} selected ({} unmatched)"
+msgstr[0] "正在播放所选的 {n} 首（{} 首未匹配）"
+
+#: src/main.rs:4230 src/main.rs:4664
+msgid "Playing {n} selected"
+msgid_plural "Playing {n} selected"
+msgstr[0] "正在播放所选的 {n} 首"
+
+#: src/main.rs:4254 src/main.rs:4703
+msgid "Added {n} to queue, then stopped — {}"
+msgid_plural "Added {n} to queue, then stopped — {}"
+msgstr[0] "已将 {n} 首添加到播放队列，随后停止 — {}"
+
+#: src/main.rs:4262
+msgid "Added {n} to queue ({} unmatched)"
+msgid_plural "Added {n} to queue ({} unmatched)"
+msgstr[0] "已将 {n} 首添加到播放队列（{} 首未匹配）"
+
+#: src/main.rs:4268 src/main.rs:4709
+msgid "Added {n} to queue"
+msgid_plural "Added {n} to queue"
+msgstr[0] "已将 {n} 首添加到播放队列"
+
+#: src/main.rs:4272
+msgid "BP Selection"
+msgstr "BP 选曲"
+
+#: src/main.rs:4278
+msgid "Created: {} ({n} unmatched)"
+msgid_plural "Created: {} ({n} unmatched)"
+msgstr[0] "已创建：{}（{n} 首未匹配）"
+
+#: src/main.rs:4284 src/main.rs:4338 src/main.rs:4728
+msgid "Created: {}"
+msgstr "已创建：{}"
+
+#: src/main.rs:4295 src/main.rs:4741
+msgid "Create playlist — {}"
+msgstr "创建歌单 — {}"
+
+#: src/main.rs:4333
+msgid "Queue is empty"
+msgstr "播放队列为空"
+
+#: src/main.rs:4347
+msgid "Failed: {}"
+msgstr "失败：{}"
+
+#: src/main.rs:4371
+msgid "Nothing selected"
+msgstr "未选择任何内容"
+
+#: src/main.rs:4651 src/main.rs:4675
+msgid "Selection has no playable tracks"
+msgstr "所选内容中没有可播放的歌曲"
+
+#: src/main.rs:4658
+msgid "Playing the first {0} of {n} selected"
+msgid_plural "Playing the first {0} of {n} selected"
+msgstr[0] "正在播放所选 {n} 首中的前 {0} 首"
+
+#: src/main.rs:4723
+msgid "Selection has no playlist tracks"
+msgstr "所选内容中没有歌单歌曲"
+
+#: src/main.rs:4725
+msgid "Selection"
+msgstr "所选内容"
+
+#: src/main.rs:4764
+msgid "Play — playlist has no URI"
+msgstr "播放 — 歌单没有 URI"
+
+#: src/main.rs:4781
+msgid "Playlist saved to library"
+msgstr "歌单已保存到音乐库"
+
+#: src/main.rs:4828
+msgid "Playlists — {}"
+msgstr "歌单 — {}"
+
+#: src/main.rs:4830
+msgid "Deleted playlist: {}"
+msgstr "已删除歌单：{}"
+
+#: src/main.rs:4832
+msgid "Failed to delete playlist: {}"
+msgstr "删除歌单失败：{}"
+
+#: src/main.rs:4905 src/main.rs:5340
+msgid "Audio output → {}"
+msgstr "音频输出 → {}"
+
+#: src/main.rs:4912
+msgid "Running · Lightify"
+msgstr "运行中 · Lightify"
+
+#: src/main.rs:4925
+msgid "Playing through {}"
+msgstr "正在通过 {} 播放"
+
+#: src/main.rs:4953
+msgid "Playback engine restarted — resumed"
+msgstr "播放引擎已重启 — 已恢复播放"
+
+#: src/main.rs:4962
+msgid "Playback device — {}"
+msgstr "播放设备 — {}"
+
+#: src/main.rs:5133
+msgid "Error — {}"
+msgstr "错误 — {}"
+
+#: src/main.rs:5134 src/main.rs:10064
+msgid "Playback engine — {}"
+msgstr "播放引擎 — {}"
+
+#: src/main.rs:5140
+msgid "Ignored a station that was no longer wanted"
+msgstr "已忽略一个不再需要的电台"
+
+#: src/main.rs:5158
+msgid "Station — {n} similar tracks after this one"
+msgid_plural "Station — {n} similar tracks after this one"
+msgstr[0] "电台 — 此曲之后还有 {n} 首相似歌曲"
+
+#: src/main.rs:5186
+msgid "Station had no tracks to queue"
+msgstr "电台没有可加入队列的歌曲"
+
+#: src/main.rs:5217 src/main.rs:5254
+msgid "Station — {}"
+msgstr "电台 — {}"
+
+#: src/main.rs:5222
+msgid "Station queued — {n} tracks after this one"
+msgid_plural "Station queued — {n} tracks after this one"
+msgstr[0] "电台已加入队列 — 此曲之后还有 {n} 首"
+
+#: src/main.rs:5242 src/main.rs:11832
+msgid "Loading queue…"
+msgstr "正在加载播放队列…"
+
+#: src/main.rs:5258
+msgid "Station started — {n} tracks"
+msgid_plural "Station started — {n} tracks"
+msgstr[0] "电台已开始 — {n} 首歌曲"
+
+#: src/main.rs:5298
+msgid "Playback moved to another Spotify device — Lightify’s player stopped. Settings → Restart to play here again."
+msgstr "播放已转移到另一台 Spotify 设备 — Lightify 的播放器已停止。前往 设置 → 重启 即可在此重新播放。"
+
+#: src/main.rs:5306
+msgid "Playback engine stopped (audio device lost?) — restarting…"
+msgstr "播放引擎已停止（音频设备丢失？） — 正在重启…"
+
+#: src/main.rs:5308 src/main.rs:5360 src/main.rs:5378
+msgid "Restarting…"
+msgstr "正在重启…"
+
+#: src/main.rs:5316
+msgid "Playback engine keeps stopping — check the audio output in Settings, then Restart"
+msgstr "播放引擎反复停止 — 请在设置中检查音频输出，然后重启"
+
+#: src/main.rs:5332
+msgid "That output list changed — pick again"
+msgstr "输出设备列表已变化 — 请重新选择"
+
+#: src/main.rs:5356
+msgid "Settings — {}"
+msgstr "设置 — {}"
+
+#: src/main.rs:5377
+msgid "Reclaiming playback after downloader sign-in…"
+msgstr "下载器登录后正在收回播放控制…"
+
+#: src/main.rs:9465
+msgid "Playback error — {}"
+msgstr "播放错误 — {}"
+
+#: src/main.rs:9773
+msgid "Cleared the queued-ahead tracks"
+msgstr "已清除排在后面的歌曲"
+
+#: src/main.rs:10017
+msgid "Not found"
+msgstr "未找到"
+
+#: src/main.rs:10050
+msgid "Audio output “{}” isn’t available — playing on the system default"
+msgstr "音频输出“{}”不可用 — 改用系统默认设备播放"
+
+#: src/main.rs:10052
+msgid "Starting Lightify playback…"
+msgstr "正在启动 Lightify 播放…"
+
+#: src/main.rs:10054
+msgid "One-time Spotify streaming sign-in — finish it in your browser"
+msgstr "需要一次性登录 Spotify 流媒体 — 请在浏览器中完成"
+
+#: src/main.rs:10063
+msgid "Failed — {}"
+msgstr "失败 — {}"
+
+#: src/main.rs:10091 src/main.rs:15718
+msgid "System default"
+msgstr "系统默认"
+
+#: src/main.rs:10096 src/main.rs:15725
+msgid "Configured output “{}” isn’t connected — playing on the system default."
+msgstr "所设置的输出“{}”未连接 — 改用系统默认设备播放。"
+
+#: src/main.rs:10231 src/main.rs:12525
+msgid "{}m"
+msgstr "{}分钟"
+
+#: src/main.rs:10233
+msgid "{}s"
+msgstr "{}秒"
+
+#: src/main.rs:10275
+msgid "Your saved Spotify tracks"
+msgstr "你在 Spotify 中保存的歌曲"
+
+#: src/main.rs:10284
+msgid "{} tracks"
+msgid_plural "{} tracks"
+msgstr[0] "{} 首歌曲"
+
+#: src/main.rs:10286
+msgid "{} tracks • {}"
+msgid_plural "{} tracks • {}"
+msgstr[0] "{} 首歌曲 • {}"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected"
+msgstr "已连接"
+
+#: src/main.rs:11163 src/main.rs:15339
+msgid "Connected as {}"
+msgstr "已连接：{}"
+
+#: src/main.rs:11244
+msgid "Artist • {} followers"
+msgid_plural "Artist • {} followers"
+msgstr[0] "艺人 • {} 位关注者"
+
+#: src/main.rs:11246
+msgid "Artist"
+msgstr "艺人"
+
+#: src/main.rs:11265
+msgid "Album • {}"
+msgstr "专辑 • {}"
+
+#: src/main.rs:11278
+msgid "Playlist • {} tracks"
+msgid_plural "Playlist • {} tracks"
+msgstr[0] "歌单 • {} 首歌曲"
+
+#: src/main.rs:11280
+msgid "Playlist • {} tracks • {}"
+msgid_plural "Playlist • {} tracks • {}"
+msgstr[0] "歌单 • {} 首歌曲 • {}"
+
+#: src/main.rs:11454
+msgid "See all"
+msgstr "查看全部"
+
+#: src/main.rs:11518
+msgid "Recent searches"
+msgstr "最近搜索"
+
+#: src/main.rs:11685
+msgid "All {n} found on Spotify"
+msgid_plural "All {n} found on Spotify"
+msgstr[0] "全部 {n} 首均已在 Spotify 上找到"
+
+#: src/main.rs:11689
+msgid "{} of {} found · {n} not on Spotify"
+msgid_plural "{} of {} found · {n} not on Spotify"
+msgstr[0] "已找到 {} / {} · {n} 首不在 Spotify 上"
+
+#: src/main.rs:12186
+msgid "Queueing download: {}…"
+msgstr "正在加入下载队列：{}…"
+
+#: src/main.rs:12190
+msgid "Download queued: {}"
+msgstr "已加入下载队列：{}"
+
+#: src/main.rs:12523
+msgid "just now"
+msgstr "刚刚"
+
+#: src/main.rs:12527
+msgid "{}h"
+msgstr "{}小时"
+
+#: src/main.rs:12529
+msgid "{}d"
+msgstr "{}天"
+
+#: src/main.rs:12630
+msgid "Fetching {} — {}…"
+msgstr "正在获取 {} — {}…"
+
+#: src/main.rs:12636 src/main.rs:15693
+msgid "{n} tracks — {} {}"
+msgid_plural "{n} tracks — {} {}"
+msgstr[0] "{n} 首歌曲 — {} {}"
+
+#: src/main.rs:12703 src/main.rs:15560
+msgid "Your Spotify sign-in has expired or was revoked — authorise again. ({})"
+msgstr "你的 Spotify 登录已过期或已被撤销 — 请重新授权。（{}）"
+
+#: src/main.rs:12717 src/main.rs:15566
+msgid "Sign in to Spotify to start"
+msgstr "登录 Spotify 以开始使用"
+
+#: src/main.rs:12732
+msgid "Signed in as {}"
+msgstr "已登录：{}"
+
+#: src/main.rs:12758
+msgid "Opening browser — complete the login…"
+msgstr "正在打开浏览器 — 请完成登录…"
+
+#: src/main.rs:12773
+msgid "Re-opening browser — complete the login…"
+msgstr "正在重新打开浏览器 — 请完成登录…"
+
+#: src/main.rs:13021
+msgid "Automatic (Windows language)"
+msgstr "自动（Windows 语言）"
+
+#: src/main.rs:13023
+msgid "{} (preview)"
+msgstr "{}（预览版）"
+
+#: src/main.rs:13161
+msgid "The downloaded update is gone — check again"
+msgstr "已下载的更新不见了 — 请重新检查"
+
+#: src/main.rs:13176
+msgid "Couldn't start the update: {}"
+msgstr "无法启动更新：{}"
+
+#: src/main.rs:13415
+msgid "Restored queue — {n} track"
+msgid_plural "Restored queue — {n} tracks"
+msgstr[0] "已恢复播放队列 — {n} 首歌曲"
+
+#: src/main.rs:13484
+msgid "Pause"
+msgstr "暂停"
+
+#: src/main.rs:13484 src/main.rs:13485 src/main.rs:13486 src/main.rs:13487
+#: src/main.rs:13488
+msgid "Playback"
+msgstr "播放"
+
+#: src/main.rs:13485
+msgid "Next track"
+msgstr "下一首"
+
+#: src/main.rs:13486
+msgid "Previous track"
+msgstr "上一首"
+
+#: src/main.rs:13487
+msgid "Toggle shuffle"
+msgstr "切换随机播放"
+
+#: src/main.rs:13488
+msgid "Cycle repeat"
+msgstr "切换重复模式"
+
+#: src/main.rs:13489
+msgid "Open settings"
+msgstr "打开设置"
+
+#: src/main.rs:13489
+msgid "App"
+msgstr "应用"
+
+#: src/main.rs:13490
+msgid "Show queue"
+msgstr "显示播放队列"
+
+#: src/main.rs:13490 src/main.rs:13491
+msgid "Panel"
+msgstr "面板"
+
+#: src/main.rs:13491
+msgid "Show recent"
+msgstr "显示最近播放"
+
+#: src/main.rs:13492
+msgid "Collapse left panel"
+msgstr "收起左侧面板"
+
+#: src/main.rs:13492 src/main.rs:13493 src/main.rs:13494 src/main.rs:13495
+#: src/main.rs:13496
+msgid "Window"
+msgstr "窗口"
+
+#: src/main.rs:13493
+msgid "Mini player: square"
+msgstr "迷你播放器：方形"
+
+#: src/main.rs:13494
+msgid "Mini player: bar"
+msgstr "迷你播放器：条形"
+
+#: src/main.rs:13495
+msgid "Mini player: nano (cover only)"
+msgstr "迷你播放器：超迷你（仅封面）"
+
+#: src/main.rs:13496
+msgid "Exit mini player"
+msgstr "退出迷你播放器"
+
+#: src/main.rs:13505
+msgid "Playlist"
+msgstr "歌单"
+
+#: src/main.rs:13593
+msgid "Search for “{}”"
+msgstr "搜索“{}”"
+
+#: src/main.rs:13960 src/main.rs:14032
+msgid "Loading “{}”…"
+msgstr "正在加载“{}”…"
+
+#: src/main.rs:13966 src/main.rs:14087 src/main.rs:15269 src/main.rs:15417
+msgid "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgid_plural "Loaded {n} tracks from “{0}” — preview only; Spotify won’t serve this playlist to this app"
+msgstr[0] "已从“{0}”加载 {n} 首歌曲 — 仅预览；Spotify 不向此应用提供该歌单"
+
+#: src/main.rs:13973 src/main.rs:14094 src/main.rs:15424
+msgid "Loaded {n} tracks from “{0}”"
+msgid_plural "Loaded {n} tracks from “{0}”"
+msgstr[0] "已从“{0}”加载 {n} 首歌曲"
+
+#: src/main.rs:13977 src/main.rs:15405
+msgid "Loaded {n} tracks from “{0}”…"
+msgid_plural "Loaded {n} tracks from “{0}”…"
+msgstr[0] "已从“{0}”加载 {n} 首歌曲…"
+
+#: src/main.rs:13987 src/main.rs:14115
+msgid "“{}” failed: {}"
+msgstr "“{}”失败：{}"
+
+#: src/main.rs:13991 src/main.rs:14119
+msgid "“{}” stopped after {n} tracks: {}"
+msgid_plural "“{}” stopped after {n} tracks: {}"
+msgstr[0] "“{}”在加载 {n} 首后停止：{}"
+
+#: src/main.rs:14100
+msgid "Loaded {0} / {1} tracks from “{2}”"
+msgid_plural "Loaded {0} / {1} tracks from “{2}”"
+msgstr[0] "已从“{2}”加载 {0} / {1} 首歌曲"
+
+#: src/main.rs:14106
+msgid "Loaded {0} tracks from “{1}”"
+msgid_plural "Loaded {0} tracks from “{1}”"
+msgstr[0] "已从“{1}”加载 {0} 首歌曲"
+
+#: src/main.rs:14581
+msgid "Start station needs a Spotify track"
+msgstr "开启电台需要一首 Spotify 歌曲"
+
+#: src/main.rs:14587
+msgid "Start station needs Lightify’s own player — Settings → Restart"
+msgstr "开启电台需要 Lightify 自带的播放器 — 设置 → 重启"
+
+#: src/main.rs:14607
+msgid "Building station…"
+msgstr "正在创建电台…"
+
+#: src/main.rs:14614
+msgid "Follow artist needs the user-follow-modify scope, which this token doesn’t carry"
+msgstr "关注艺人需要 user-follow-modify 权限范围，但此令牌不包含该权限"
+
+#: src/main.rs:14643 src/main.rs:14824
+msgid "Play {n} selected"
+msgid_plural "Play {n} selected"
+msgstr[0] "播放所选的 {n} 首"
+
+#: src/main.rs:14644 src/main.rs:14825 src/main.rs:14835
+msgid "Add {n} to queue"
+msgid_plural "Add {n} to queue"
+msgstr[0] "将 {n} 首添加到播放队列"
+
+#: src/main.rs:14645 src/main.rs:14826
+msgid "Create playlist from selection"
+msgstr "用所选内容创建歌单"
+
+#: src/main.rs:14652
+msgid "Open"
+msgstr "打开"
+
+#: src/main.rs:14653
+msgid "Download liked songs"
+msgstr "下载已点赞的歌曲"
+
+#: src/main.rs:14662
+msgid "Save to library"
+msgstr "保存到音乐库"
+
+#: src/main.rs:14664
+msgid "Delete"
+msgstr "删除"
+
+#: src/main.rs:14689 src/main.rs:14714 src/main.rs:14848 src/main.rs:14869
+#: src/main.rs:14889
+msgid "Share"
+msgstr "分享"
+
+#: src/main.rs:14690 src/main.rs:14715 src/main.rs:14849 src/main.rs:14870
+#: src/main.rs:14890
+msgid "Start station"
+msgstr "开启电台"
+
+#: src/main.rs:14692 src/main.rs:14851 src/main.rs:14872
+msgid "Follow artist"
+msgstr "关注艺人"
+
+#: src/main.rs:14712
+msgid "Like"
+msgstr "点赞"
+
+#: src/main.rs:14727 src/main.rs:14738 src/main.rs:14747
+msgid "Show tracks"
+msgstr "显示歌曲"
+
+#: src/main.rs:14728
+msgid "Save playlist"
+msgstr "保存歌单"
+
+#: src/main.rs:14739
+msgid "Save album"
+msgstr "保存专辑"
+
+#: src/main.rs:14748
+msgid "Add top songs to queue"
+msgstr "将热门歌曲添加到播放队列"
+
+#: src/main.rs:14834
+msgid "Play first selected"
+msgstr "播放所选的第一首"
+
+#: src/main.rs:14911
+msgid "Open download folder"
+msgstr "打开下载文件夹"
+
+#: src/main.rs:14911
+msgid "Open folder"
+msgstr "打开文件夹"
+
+#: src/main.rs:14915
+msgid "Delete file"
+msgstr "删除文件"
+
+#: src/main.rs:14929
+msgid "{n} track from your queue"
+msgid_plural "{n} tracks from your queue"
+msgstr[0] "来自播放队列的 {n} 首歌曲"
+
+#: src/main.rs:14933
+msgid "{n} track selected"
+msgid_plural "{n} tracks selected"
+msgstr[0] "已选择 {n} 首歌曲"
+
+#: src/main.rs:14989
+msgid "Share — no Spotify id"
+msgstr "分享 — 没有 Spotify ID"
+
+#: src/main.rs:14994
+msgid "Copied Spotify link"
+msgstr "已复制 Spotify 链接"
+
+#: src/main.rs:14995
+msgid "Share — {}"
+msgstr "分享 — {}"
+
+#: src/main.rs:15047
+msgid "could not set the clipboard: {}"
+msgstr "无法写入剪贴板：{}"
+
+#: src/main.rs:15404
+msgid "Artist — {}"
+msgstr "艺人 — {}"
+
+#: src/tray.rs:68 src/tray.rs:80
+msgid "Show Lightify"
+msgstr "显示 Lightify"
+
+#: src/tray.rs:69 src/tray.rs:81
+msgid "Quit"
+msgstr "退出"

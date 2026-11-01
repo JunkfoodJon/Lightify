@@ -1,0 +1,376 @@
+# lightify-installer — ja translation. MACHINE DRAFT: needs review by a native speaker before it ships.
+# {} {0} {n} are placeholders: keep each one, as written, in the translation.
+msgid ""
+msgstr ""
+"Project-Id-Version: lightify-installer\n"
+"Language: ja\n"
+"Language-Team: machine draft — needs native review\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: ui/installer.slint:496 src/main.rs:538 src/main.rs:1352
+msgid "Setup couldn't finish"
+msgstr "セットアップを完了できませんでした"
+
+#: ui/installer.slint:503
+msgid "Lightify reopens where you left off."
+msgstr "Lightifyは前回の状態から再開します。"
+
+#: ui/installer.slint:520
+msgid "Uninstall Lightify"
+msgstr "Lightifyのアンインストール"
+
+#: ui/installer.slint:520 ui/installer.slint:554
+msgid "Updating Lightify"
+msgstr "Lightifyを更新中"
+
+#: ui/installer.slint:520
+msgid "Lightify Setup"
+msgstr "Lightifyセットアップ"
+
+#: ui/installer.slint:554
+msgid "Update didn't finish"
+msgstr "アップデートを完了できませんでした"
+
+#: ui/installer.slint:561
+msgid "installed → {} · signature checked"
+msgstr "インストール済み → {} · 署名を確認済み"
+
+#: ui/installer.slint:562
+msgid "{} → {} · signature checked"
+msgstr "{} → {} · 署名を確認済み"
+
+#: ui/installer.slint:607
+msgid "uninstall"
+msgstr "アンインストール"
+
+#: ui/installer.slint:607
+msgid "setup"
+msgstr "セットアップ"
+
+#: ui/installer.slint:651
+msgid "// welcome"
+msgstr "// ようこそ"
+
+#: ui/installer.slint:652
+msgid "Install Lightify"
+msgstr "Lightifyをインストール"
+
+#: ui/installer.slint:661
+msgid "language"
+msgstr "言語"
+
+#: ui/installer.slint:676
+msgid "install for"
+msgstr "インストール対象"
+
+#: ui/installer.slint:692
+msgid "Just me"
+msgstr "自分のみ"
+
+#: ui/installer.slint:703
+msgid "Everyone on this PC"
+msgstr "このPCのすべてのユーザー"
+
+#: ui/installer.slint:719
+msgid "install to"
+msgstr "インストール先"
+
+#: ui/installer.slint:727
+msgid "Change"
+msgstr "変更"
+
+#: ui/installer.slint:737
+msgid "Desktop shortcut"
+msgstr "デスクトップのショートカット"
+
+#: ui/installer.slint:803 ui/installer.slint:872 ui/installer.slint:925
+#: ui/installer.slint:996
+msgid "Cancel"
+msgstr "キャンセル"
+
+#: ui/installer.slint:807
+msgid "Install"
+msgstr "インストール"
+
+#: ui/installer.slint:824
+msgid "// licence"
+msgstr "// ライセンス"
+
+#: ui/installer.slint:825
+msgid "Licence"
+msgstr "ライセンス"
+
+#: ui/installer.slint:835 ui/installer.slint:1074
+msgid "Back"
+msgstr "戻る"
+
+#: ui/installer.slint:839
+msgid "I accept"
+msgstr "同意する"
+
+#: ui/installer.slint:858
+msgid "// lightify is open"
+msgstr "// lightifyが起動中"
+
+#: ui/installer.slint:859
+msgid "Close Lightify first"
+msgstr "先にLightifyを閉じてください"
+
+#: ui/installer.slint:877
+msgid "Closing…"
+msgstr "終了中…"
+
+#: ui/installer.slint:877
+msgid "Close Lightify"
+msgstr "Lightifyを閉じる"
+
+#: ui/installer.slint:894
+msgid "// uninstalling"
+msgstr "// アンインストール中"
+
+#: ui/installer.slint:894
+msgid "// installing"
+msgstr "// インストール中"
+
+#: ui/installer.slint:895
+msgid "Removing Lightify"
+msgstr "Lightifyを削除中"
+
+#: ui/installer.slint:895
+msgid "Installing Lightify"
+msgstr "Lightifyをインストール中"
+
+#: ui/installer.slint:910
+msgid "{}%"
+msgstr "{}%"
+
+#: ui/installer.slint:944
+msgid "// done"
+msgstr "// 完了"
+
+#: ui/installer.slint:945
+msgid "Lightify is installed"
+msgstr "Lightifyをインストールしました"
+
+#: ui/installer.slint:947
+msgid "It keeps itself up to date from lightify.stream."
+msgstr "lightify.streamから自動的に最新の状態に保たれます。"
+
+#: ui/installer.slint:953
+msgid "Launch Lightify"
+msgstr "Lightifyを起動"
+
+#: ui/installer.slint:961
+msgid "Finish"
+msgstr "完了"
+
+#: ui/installer.slint:977
+msgid "// uninstall"
+msgstr "// アンインストール"
+
+#: ui/installer.slint:978
+msgid "Remove Lightify?"
+msgstr "Lightifyを削除しますか？"
+
+#: ui/installer.slint:981
+msgid "Removes the app, its shortcuts and the downloader bridge. Your downloaded music is never touched."
+msgstr "アプリ、ショートカット、ダウンローダーブリッジを削除します。ダウンロードした音楽は削除されません。"
+
+#: ui/installer.slint:987
+msgid "Also remove my settings and Spotify sign-in"
+msgstr "設定とSpotifyのログイン情報も削除する"
+
+#: ui/installer.slint:1000
+msgid "Remove"
+msgstr "削除"
+
+#: ui/installer.slint:1020
+msgid "// removed"
+msgstr "// 削除完了"
+
+#: ui/installer.slint:1021
+msgid "Lightify is removed"
+msgstr "Lightifyを削除しました"
+
+#: ui/installer.slint:1023
+msgid "Settings and sign-in were removed too. Your downloaded music was left where it is."
+msgstr "設定とログイン情報も削除しました。ダウンロードした音楽はそのまま残っています。"
+
+#: ui/installer.slint:1023
+msgid "Your settings and downloaded music were left where they are."
+msgstr "設定とダウンロードした音楽はそのまま残っています。"
+
+#: ui/installer.slint:1033 ui/installer.slint:1078
+msgid "Close"
+msgstr "閉じる"
+
+#: ui/installer.slint:1049
+msgid "// something went wrong"
+msgstr "// 問題が発生しました"
+
+#: src/main.rs:106
+msgid "I accept the <a>licence</a>"
+msgstr "<a>ライセンス条項</a>に同意します"
+
+#: src/main.rs:145
+msgid "{} (preview)"
+msgstr "{}（プレビュー）"
+
+#: src/main.rs:328 src/ops.rs:406
+msgid "this Setup file is damaged ({}) - download it again"
+msgstr "このセットアップファイルは破損しています（{}） - もう一度ダウンロードしてください"
+
+#: src/main.rs:472
+msgid "Setup can't start"
+msgstr "セットアップを開始できません"
+
+#: src/main.rs:520
+msgid "preparing"
+msgstr "準備中"
+
+#: src/main.rs:552 src/main.rs:1335
+msgid "Lightify is open. Setup can close it for you — your settings are kept, and you can reopen it when setup finishes."
+msgstr "Lightifyが起動しています。セットアップで終了できます — 設定は保持され、セットアップ完了後に再び開けます。"
+
+#: src/main.rs:644
+msgid "Setup can't write to that folder. Pick another one, or install for everyone on this PC."
+msgstr "セットアップはそのフォルダーに書き込めません。別のフォルダーを選ぶか、このPCのすべてのユーザー向けにインストールしてください。"
+
+#: src/main.rs:698
+msgid "Installing for everyone needs administrator approval."
+msgstr "すべてのユーザー向けのインストールには管理者の承認が必要です。"
+
+#: src/main.rs:735 src/main.rs:1230
+msgid "Lightify is still open. Quit it from its tray icon (right-click → Quit), then press Close Lightify again."
+msgstr "Lightifyがまだ起動しています。トレイアイコンから終了し（右クリック → 終了）、もう一度「Lightifyを閉じる」を押してください。"
+
+#: src/main.rs:891
+msgid "Lightify isn't installed"
+msgstr "Lightifyはインストールされていません"
+
+#: src/main.rs:892
+msgid "There is no Lightify install on this PC to update. Download Setup from lightify.stream."
+msgstr "このPCには更新できるLightifyがインストールされていません。lightify.streamからセットアップをダウンロードしてください。"
+
+#: src/main.rs:1119
+msgid "There is no Lightify install in {}."
+msgstr "{}にLightifyはインストールされていません。"
+
+#: src/main.rs:1121
+msgid "Nothing to remove"
+msgstr "削除するものがありません"
+
+#: src/main.rs:1186
+msgid "Lightify wasn't fully removed"
+msgstr "Lightifyを完全には削除できませんでした"
+
+#: src/main.rs:1198
+msgid "Lightify is open. Setup can close it for you, then remove it."
+msgstr "Lightifyが起動しています。セットアップで終了してから削除できます。"
+
+#: src/main.rs:1330 src/ops.rs:90
+msgid "Pick a folder, not the root of a drive."
+msgstr "ドライブのルートではなく、フォルダーを選んでください。"
+
+#: src/main.rs:1342 src/ops.rs:443
+msgid "copying {}"
+msgstr "{}をコピー中"
+
+#: src/main.rs:1365 src/ops.rs:639 src/ops.rs:677
+msgid "removing {}"
+msgstr "{}を削除中"
+
+#: src/ops.rs:87
+msgid "Choose a full folder path, like C:\\Programs\\Lightify."
+msgstr "C:\\Programs\\Lightify のような完全なフォルダーパスを指定してください。"
+
+#: src/ops.rs:94
+msgid "Lightify can't be installed inside the Windows folder."
+msgstr "LightifyはWindowsフォルダー内にはインストールできません。"
+
+#: src/ops.rs:98
+msgid "That folder name has characters Windows doesn't allow."
+msgstr "そのフォルダー名にはWindowsで使用できない文字が含まれています。"
+
+#: src/ops.rs:260
+msgid "could not start {}: {}"
+msgstr "{}を起動できませんでした：{}"
+
+#: src/ops.rs:283
+msgid "Downloader bridge"
+msgstr "ダウンローダーブリッジ"
+
+#: src/ops.rs:285
+msgid "Shortcuts and uninstall entry"
+msgstr "ショートカットとアンインストール情報"
+
+#: src/ops.rs:338
+msgid "{} is in use"
+msgstr "{}は使用中です"
+
+#: src/ops.rs:376
+msgid "{}: access denied"
+msgstr "{}：アクセスが拒否されました"
+
+#: src/ops.rs:388
+msgid "could not run the old uninstaller {}: {}"
+msgstr "古いアンインストーラー{}を実行できませんでした：{}"
+
+#: src/ops.rs:390
+msgid "the old uninstaller {} failed ({})"
+msgstr "古いアンインストーラー{}が失敗しました（{}）"
+
+#: src/ops.rs:407
+msgid "this copy of Setup has no files in it (it is the uninstaller) - download Setup from lightify.stream"
+msgstr "このセットアップにはファイルが含まれていません（アンインストーラーです） - lightify.streamからセットアップをダウンロードしてください"
+
+#: src/ops.rs:414
+msgid "removing the previous installer"
+msgstr "以前のインストーラーを削除中"
+
+#: src/ops.rs:468
+msgid "writing {}"
+msgstr "{}を書き込み中"
+
+#: src/ops.rs:477
+msgid "creating shortcuts"
+msgstr "ショートカットを作成中"
+
+#: src/ops.rs:480
+msgid "registering with Windows"
+msgstr "Windowsに登録中"
+
+#: src/ops.rs:496 src/ops.rs:685
+msgid "done"
+msgstr "完了"
+
+#: src/ops.rs:503
+msgid "could not find the Start menu folder"
+msgstr "スタートメニューのフォルダーが見つかりませんでした"
+
+#: src/ops.rs:507
+msgid "could not find the desktop folder"
+msgstr "デスクトップのフォルダーが見つかりませんでした"
+
+#: src/ops.rs:544
+msgid "App files"
+msgstr "アプリのファイル"
+
+#: src/ops.rs:546
+msgid "Settings and Spotify sign-in"
+msgstr "設定とSpotifyのログイン情報"
+
+#: src/ops.rs:650
+msgid "removing shortcuts"
+msgstr "ショートカットを削除中"
+
+#: src/ops.rs:662
+msgid "removing the Apps entry"
+msgstr "アプリ一覧の登録を削除中"
+
+#: src/win.rs:223
+msgid "could not start the elevated installer: {}"
+msgstr "管理者権限でインストーラーを起動できませんでした：{}"
