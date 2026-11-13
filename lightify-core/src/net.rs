@@ -41,12 +41,18 @@ pub fn is_connectivity(e: &reqwest::Error) -> bool {
     e.is_connect() || e.is_timeout()
 }
 
+/// This module's flag and the rate gate are process-wide, and tests run in parallel:
+/// every test that touches either one takes this first.
+#[cfg(test)]
+pub(crate) static TEST_GLOBALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn down_then_up_reports_the_recovery_once() {
+        let _turn = TEST_GLOBALS.blocking_lock();
         note_down();
         assert!(is_offline());
         assert!(note_up());

@@ -36,6 +36,11 @@ fn main() {
     println!("cargo:rerun-if-changed=app.manifest");
     println!("cargo:rustc-link-arg-bin=Lightify-Setup=/MANIFEST:EMBED");
     println!("cargo:rustc-link-arg-bin=Lightify-Setup=/MANIFESTINPUT:{}", manifest.display());
+    // Imports load from System32 only (LOAD_LIBRARY_SEARCH_SYSTEM32), not from the exe's own
+    // folder: dwmapi.dll, uxtheme.dll and others aren't KnownDLLs, and Setup runs elevated from
+    // user-writable places (Downloads, %TEMP%, the updates folder), where a planted copy would
+    // otherwise load before main. win::restrict_dll_search does the same for run-time loads.
+    println!("cargo:rustc-link-arg-bin=Lightify-Setup=/DEPENDENTLOADFLAG:0x800");
 
     // App icon + VERSIONINFO, the same way lightify-shell/build.rs does it.
     let ico = manifest_dir.join("..").join("lightify-shell").join("assets").join("lightify.ico");

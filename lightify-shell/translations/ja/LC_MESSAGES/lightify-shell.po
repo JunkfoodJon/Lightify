@@ -1769,3 +1769,354 @@ msgstr "Lightifyを表示"
 #: src/tray.rs:69 src/tray.rs:81
 msgid "Quit"
 msgstr "終了"
+
+#. machine translation
+#: ui/app.slint:5529
+msgid "Sign in again"
+msgstr "もう一度ログイン"
+
+#. machine translation
+#: ui/app.slint:5807
+msgid "Starting the update to Lightify {}…"
+msgstr "Lightify {} への更新を開始しています…"
+
+#. machine translation
+#: ui/app.slint:6274
+msgid "Most features need a Spotify Premium account, including the player and the downloader. Local mode plays your own music files with any account."
+msgstr "プレイヤーやダウンローダーなど、ほとんどの機能には Spotify Premium アカウントが必要です。ローカルモードなら、どのアカウントでも自分の音楽ファイルを再生できます。"
+
+#. machine translation
+#: ui/app.slint:6290
+msgid "open"
+msgstr "開く"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copied"
+msgstr "コピーしました"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copy"
+msgstr "コピー"
+
+#. machine translation
+#: ui/app.slint:6379
+msgid "No Spotify to hand? Play the music files on this PC."
+msgstr "Spotify が手元にない場合は、この PC の音楽ファイルを再生できます。"
+
+#. machine translation
+#: ui/app.slint:6389
+msgid "Use Local mode"
+msgstr "ローカルモードを使う"
+
+#. machine translation
+#: src/audio_engine.rs:350
+msgid "Spotify refused the song’s key: this account may have asked for too many songs too fast"
+msgstr "Spotify が曲のキーを拒否しました: このアカウントが短時間に多くの曲を要求しすぎた可能性があります"
+
+#. machine translation
+#: src/audio_engine.rs:352
+msgid "couldn’t download it from Spotify’s audio servers: check the network, or a firewall or antivirus blocking them"
+msgstr "Spotify の音声サーバーからダウンロードできませんでした: ネットワークや、ファイアウォール・ウイルス対策ソフトによるブロックを確認してください"
+
+#. machine translation
+#: src/audio_engine.rs:354
+msgid "it isn’t available to this account or in this country"
+msgstr "このアカウントまたはこの国では利用できません"
+
+#. machine translation
+#: src/audio_engine.rs:536
+msgid "Couldn’t play that — {}"
+msgstr "再生できませんでした — {}"
+
+#. machine translation
+#: src/audio_engine.rs:538
+msgid "That song wasn’t in the queue any more, so nothing was removed"
+msgstr "その曲はもうキューにないため、何も削除しませんでした"
+
+#. machine translation
+#: src/audio_engine.rs:983
+msgid "Stopped: {} songs in a row couldn’t be played — {}"
+msgstr "停止しました: {} 曲続けて再生できませんでした — {}"
+
+#. machine translation
+#: src/audio_engine.rs:984
+msgid "Stopped: {} songs in a row couldn’t be played"
+msgstr "停止しました: {} 曲続けて再生できませんでした"
+
+#. machine translation
+#: src/audio_engine.rs:988
+msgid "Skipped a song Spotify can’t play — {}"
+msgstr "Spotify で再生できない曲をスキップしました — {}"
+
+#. machine translation
+#: src/audio_engine.rs:989
+msgid "Skipped a song Spotify can’t play"
+msgstr "Spotify で再生できない曲をスキップしました"
+
+#. machine translation
+#: src/audio_output.rs:520
+msgid "No sound: the audio output wouldn’t open — {}"
+msgstr "音が出ません: オーディオ出力を開けませんでした — {}"
+
+#. machine translation
+#: src/audio_output.rs:540
+msgid "No sound: Windows reports no audio output device. Plug in or turn on speakers or headphones."
+msgstr "音が出ません: Windows がオーディオ出力デバイスを検出していません。スピーカーやヘッドホンを接続するか電源を入れてください。"
+
+#. machine translation
+#: src/downloader.rs:842
+msgid "The downloader is running but not answering. It may be busy; try again in a moment."
+msgstr "ダウンローダーは動作していますが応答しません。処理中かもしれません。しばらくしてからもう一度お試しください。"
+
+#. machine translation
+#: src/local_library.rs:88
+msgid "Unknown artist"
+msgstr "不明なアーティスト"
+
+#. machine translation
+#: src/local_library.rs:89
+msgid "Unknown album"
+msgstr "不明なアルバム"
+
+#. machine translation
+#: src/local_library.rs:956
+msgid "Music"
+msgstr "ミュージック"
+
+#. machine translation
+#: src/local_library.rs:962
+msgid "Desktop"
+msgstr "デスクトップ"
+
+#. machine translation
+#: src/local_library.rs:969
+msgid "OneDrive — Music"
+msgstr "OneDrive — ミュージック"
+
+#. machine translation
+#: src/local_library.rs:972
+msgid "Lightify downloads"
+msgstr "Lightify のダウンロード"
+
+#. machine translation
+#: src/local_player.rs:221
+msgid "could not start the player thread: {}"
+msgstr "プレイヤースレッドを開始できませんでした: {}"
+
+#. machine translation
+#: src/local_player.rs:354
+msgid "the file reports a sample rate of 0 Hz"
+msgstr "ファイルのサンプルレートが 0 Hz になっています"
+
+#. machine translation
+#: src/local_player.rs:356
+msgid "the decoder crashed on this file"
+msgstr "このファイルでデコーダーがクラッシュしました"
+
+#. machine translation
+#: src/local_player.rs:622
+msgid "could not open the file: {}"
+msgstr "ファイルを開けませんでした: {}"
+
+#. machine translation
+#: src/local_player.rs:631
+msgid "unsupported or unreadable audio file: {}"
+msgstr "非対応または読み取れない音声ファイルです: {}"
+
+#. machine translation
+#: src/local_player.rs:637
+msgid "the file has no audio track"
+msgstr "ファイルに音声トラックがありません"
+
+#. machine translation
+#: src/local_player.rs:646
+msgid "unsupported audio codec: {}"
+msgstr "非対応の音声コーデックです: {}"
+
+#. machine translation
+#: src/local_player.rs:689
+msgid "seek failed: {}"
+msgstr "シークに失敗しました: {}"
+
+#. machine translation
+#: src/local_player.rs:734
+msgid "could not read the file: {}"
+msgstr "ファイルを読み取れませんでした: {}"
+
+#. machine translation
+#: src/local_player.rs:776
+msgid "too many undecodable frames"
+msgstr "デコードできないフレームが多すぎます"
+
+#. machine translation
+#: src/local_player.rs:781
+msgid "could not decode the file: {}"
+msgstr "ファイルをデコードできませんでした: {}"
+
+#. machine translation
+#: src/local_player.rs:809 src/local_player.rs:828 src/local_player.rs:838
+msgid "resampling failed: {}"
+msgstr "リサンプリングに失敗しました: {}"
+
+#. machine translation
+#: src/local_player.rs:853
+msgid "the file reports a sample rate of {} Hz, which can’t be played"
+msgstr "ファイルのサンプルレートが {} Hz で、再生できません"
+
+#. machine translation
+#: src/local_player.rs:865
+msgid "cannot resample from {0} Hz: {1}"
+msgstr "{0} Hz からリサンプリングできません: {1}"
+
+#. machine translation
+#: src/local_ui.rs:1245
+msgid "Couldn’t save local playlists — their file can’t be read or written right now"
+msgstr "ローカルプレイリストを保存できませんでした — ファイルを今は読み書きできません"
+
+#. machine translation
+#: src/local_ui.rs:1736
+msgid "Delete “{}” from your local playlists?"
+msgstr "「{}」をローカルプレイリストから削除しますか？"
+
+#. machine translation
+#: src/local_ui.rs:2080
+msgid "Can’t play “{0}” — {1}. Stopped: {n} file in a row couldn’t be played"
+msgid_plural "Can’t play “{0}” — {1}. Stopped: {n} files in a row couldn’t be played"
+msgstr[0] "「{0}」を再生できません — {1}。停止しました: {n} 個のファイルを続けて再生できませんでした"
+
+#. machine translation
+#: src/local_ui.rs:2088
+msgid "Can’t play “{}” — {}. Skipped it"
+msgstr "「{}」を再生できません — {}。スキップしました"
+
+#. machine translation
+#: src/main.rs:3268
+msgid "Cleared finished downloads"
+msgstr "完了したダウンロードを消去しました"
+
+#. machine translation
+#: src/main.rs:3277
+msgid "Download queued for retry"
+msgstr "ダウンロードを再試行のためキューに入れました"
+
+#. machine translation
+#: src/main.rs:3289
+msgid "Download cancelled"
+msgstr "ダウンロードをキャンセルしました"
+
+#. machine translation
+#: src/main.rs:3301
+msgid "Deleted downloaded file"
+msgstr "ダウンロードしたファイルを削除しました"
+
+#. machine translation
+#: src/main.rs:3331
+msgid "Signing the downloader in to Spotify — if a Spotify page opens in your browser, click Agree."
+msgstr "ダウンローダーを Spotify にログインしています — ブラウザーで Spotify のページが開いたら「同意する」をクリックしてください。"
+
+#. machine translation
+#: src/main.rs:3802
+msgid "Playback engine isn’t running"
+msgstr "再生エンジンが動作していません"
+
+#. machine translation
+#: src/main.rs:4639
+msgid "Couldn’t match the selection — {}"
+msgstr "選択内容を照合できませんでした — {}"
+
+#. machine translation
+#: src/main.rs:5672
+msgid "Finish the Spotify streaming sign-in in your browser"
+msgstr "ブラウザーで Spotify ストリーミングのログインを完了してください"
+
+#. machine translation
+#: src/main.rs:5913
+msgid "the system default"
+msgstr "システムの既定"
+
+#. machine translation
+#: src/main.rs:5955
+msgid "Sign in to Spotify in your browser with your Premium account"
+msgstr "ブラウザーで Premium アカウントを使って Spotify にログインしてください"
+
+#. machine translation
+#: src/main.rs:9995 src/main.rs:11679
+msgid "{} / {} loaded"
+msgstr "{} / {} 件読み込み済み"
+
+#. machine translation
+#: src/main.rs:11083
+msgid "Waiting for Spotify to confirm the new track — try again in a moment."
+msgstr "Spotify が新しい曲を確認するのを待っています — しばらくしてからもう一度お試しください。"
+
+#. machine translation
+#: src/main.rs:11442
+msgid "the engine registered but Spotify hasn’t listed it yet"
+msgstr "エンジンは登録されましたが、Spotify にまだ表示されていません"
+
+#. machine translation
+#: src/main.rs:11681
+msgid "{} loaded"
+msgstr "{} 件読み込み済み"
+
+#. machine translation
+#: src/main.rs:12427
+msgid "Nothing to play"
+msgstr "再生するものがありません"
+
+#. machine translation
+#: src/main.rs:12473
+msgid "The player is signed in as “{}”, not the account Lightify uses (“{}”). Sign in again with the same account."
+msgstr "プレイヤーは「{}」でログインしています。Lightify が使うアカウント（「{}」）ではありません。同じアカウントでもう一度ログインしてください。"
+
+#. machine translation
+#: src/main.rs:12604
+msgid "This is a Spotify Free account. Lightify’s player and downloader need Spotify Premium to work properly. Local mode works with any account."
+msgstr "これは Spotify Free アカウントです。Lightify のプレイヤーとダウンローダーが正しく動作するには Spotify Premium が必要です。ローカルモードはどのアカウントでも使えます。"
+
+#. machine translation
+#: src/main.rs:12606 src/main.rs:17615
+msgid "This account is Spotify Free. The player needs Spotify Premium, so songs may not play. Local mode works with any account."
+msgstr "このアカウントは Spotify Free です。プレイヤーには Spotify Premium が必要なため、曲が再生されないことがあります。ローカルモードはどのアカウントでも使えます。"
+
+#. machine translation
+#: src/main.rs:12607 src/main.rs:17616
+msgid "This account is Spotify Free. The downloader needs Spotify Premium, so downloads may not work."
+msgstr "このアカウントは Spotify Free です。ダウンローダーには Spotify Premium が必要なため、ダウンロードできないことがあります。"
+
+#. machine translation
+#: src/main.rs:13684
+msgid "Downloads — {}"
+msgstr "ダウンロード — {}"
+
+#. machine translation
+#: src/main.rs:14579
+msgid "Couldn't open your web browser to sign in."
+msgstr "ログイン用のウェブブラウザーを開けませんでした。"
+
+#. machine translation
+#: src/main.rs:14590
+msgid "Timed out waiting for Spotify — click Authorise to try again."
+msgstr "Spotify の応答待ちがタイムアウトしました — 「認証」をクリックしてもう一度お試しください。"
+
+#. machine translation
+#: src/main.rs:15120
+msgid "Couldn't start the update check"
+msgstr "更新の確認を開始できませんでした"
+
+#. machine translation
+#: src/main.rs:15144
+msgid "Update failed: {}"
+msgstr "更新に失敗しました: {}"
+
+#. machine translation
+#: src/main.rs:15147
+msgid "Couldn't check for updates: {}"
+msgstr "更新を確認できませんでした: {}"
+
+#. machine translation
+#: src/main.rs:16621
+msgid "This playlist is already in your library"
+msgstr "このプレイリストはすでにライブラリにあります"

@@ -14,6 +14,7 @@ mod shuffle_vec;
 mod spirc;
 mod state;
 
+pub use context_resolver::prepare_context;
 pub use model::*;
 pub use spirc::*;
 pub use state::*;

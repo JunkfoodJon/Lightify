@@ -45,28 +45,35 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
 use crate::audio_output::{self, LocalSource, SwitchableSink, LOCAL_RATE};
+use lightify_i18n::tr;
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// A file started playing (after `play`, or the gapless `set_next` taking over).
-    Track { path: PathBuf, duration_ms: u64 },
+    /// A file started playing: the one `play` was given (`next: false`), or the
+    /// gapless `set_next` file taking over (`next: true`; the same path can follow
+    /// itself, e.g. a repeat or a queued copy).
+    Track { path: PathBuf, duration_ms: u64, next: bool },
     /// Playback position, a few times a second while playing.
     Position { ms: u64 },
     Playing { playing: bool },
     /// The current file played to its end and no `set_next` file followed.
     Ended,
-    /// The file couldn't be opened or decoded (playback stops).
+    /// The file couldn't be opened or decoded (playback stops). `path` is the file
+    /// that failed: the one heard, or the `set_next` file it was to continue with.
     Error { path: PathBuf, msg: String },
 }
 
-/// Where events go (set once by main.rs, called from the player's own thread).
-pub fn set_listener(f: impl Fn(Event) + Send + Sync + 'static) {
+/// Where events go (set once by main.rs, called from the player's own thread). Each
+/// comes with the generation of the `play` it belongs to (what `play` returned);
+/// none is sent for a generation once a newer `play` has started.
+pub fn set_listener(f: impl Fn(u64, Event) + Send + Sync + 'static) {
     *lock(&core().listener) = Some(Arc::new(f));
 }
 
-/// Play `path` from `start_ms`, replacing whatever is playing.
-pub fn play(path: &Path, start_ms: u64) {
-    Core::play(core(), path, start_ms);
+/// Play `path` from `start_ms`, replacing whatever is playing. Returns the new
+/// generation, which tags this playback's events.
+pub fn play(path: &Path, start_ms: u64) -> u64 {
+    Core::play(core(), path, start_ms)
 }
 
 /// The file to continue with, gaplessly, when the current one ends (`None` clears it).
@@ -117,8 +124,13 @@ const CHUNKS_PER_PASS: usize = 16;
 const RS_CHUNK: usize = 1024;
 /// Consecutive undecodable packets before a file is given up on.
 const MAX_BAD_PACKETS: u32 = 100;
+/// Input rates a file may have. Real audio sits well inside this (8 kHz .. 768 kHz);
+/// a header outside it is broken, and resampling from it would plan absurdly large FFTs
+/// (a rate of 1 Hz or 4 GHz means hundreds of MB per chunk).
+const MIN_IN_RATE: u32 = 1_000;
+const MAX_IN_RATE: u32 = 768_000;
 
-type Listener = Arc<dyn Fn(Event) + Send + Sync>;
+type Listener = Arc<dyn Fn(u64, Event) + Send + Sync>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -145,6 +157,9 @@ struct Core {
     gen: AtomicU64,
     worker: Mutex<Option<WorkerSlot>>,
     listener: Mutex<Option<Listener>>,
+    /// Held while a worker checks its generation and emits, and while `play` moves the
+    /// generation on: so once `play` has returned, no older worker's event goes out.
+    emit_gate: Mutex<()>,
     /// Drive a real output (start one when none is running). Off in tests.
     real_output: bool,
     /// The output this module started because the engine had none running.
@@ -163,21 +178,32 @@ impl Core {
             gen: AtomicU64::new(0),
             worker: Mutex::new(None),
             listener: Mutex::new(None),
+            emit_gate: Mutex::new(()),
             real_output,
             own_output: Mutex::new(None),
         }
     }
 
-    fn emit(&self, ev: Event) {
-        // Cloned out so the listener never runs under our lock.
+    /// Report `ev` for generation `gen`, unless a newer `play` has started (a replaced
+    /// worker still running must never show its file while another one plays).
+    fn emit(&self, gen: u64, ev: Event) {
+        // Cloned out so the listener never runs under the listener lock. It does run
+        // under the gate, which only `play` and other emits take.
         let l = lock(&self.listener).clone();
+        let _gate = lock(&self.emit_gate);
+        if self.gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
         if let Some(l) = l {
-            l(ev);
+            l(gen, ev);
         }
     }
 
-    fn play(this: &Arc<Self>, path: &Path, start_ms: u64) {
-        let gen = this.gen.fetch_add(1, Ordering::SeqCst) + 1;
+    fn play(this: &Arc<Self>, path: &Path, start_ms: u64) -> u64 {
+        let gen = {
+            let _gate = lock(&this.emit_gate);
+            this.gen.fetch_add(1, Ordering::SeqCst) + 1
+        };
         // Cut whatever was playing now, not when the old worker notices.
         this.src.activate(gen);
         let (tx, rx) = mpsc::channel();
@@ -192,10 +218,11 @@ impl Core {
             .spawn(move || worker_main(core, gen, rx, path_buf, start_ms));
         if let Err(e) = spawned {
             if this.finish(gen) {
-                this.emit(Event::Error { path: path.to_path_buf(), msg: format!("could not start the player thread: {e}") });
-                this.emit(Event::Playing { playing: false });
+                this.emit(gen, Event::Error { path: path.to_path_buf(), msg: tr!("could not start the player thread: {}", e) });
+                this.emit(gen, Event::Playing { playing: false });
             }
         }
+        gen
     }
 
     fn send(&self, cmd: Cmd) {
@@ -294,28 +321,47 @@ enum Exit {
 fn worker_main(core: Arc<Core>, gen: u64, rx: Receiver<Cmd>, path: PathBuf, start_ms: u64) {
     // A decoder panicking on a hostile file must not leave the output stuck on silence.
     let exit = std::panic::catch_unwind(AssertUnwindSafe(|| run(&core, gen, &rx, path.clone(), start_ms)))
-        .unwrap_or_else(|_| Exit::Failed { path, msg: "the decoder crashed on this file".into() });
+        .unwrap_or_else(|p| Exit::Failed { path, msg: crash_msg(&*p) });
     match exit {
         Exit::Replaced => {}
         Exit::Stopped => {
-            core.emit(Event::Playing { playing: false });
+            core.emit(gen, Event::Playing { playing: false });
             core.release_output(gen);
         }
         Exit::Ended | Exit::Failed { .. } => {
             if core.finish(gen) {
                 if let Exit::Failed { path, msg } = exit {
-                    core.emit(Event::Error { path, msg });
+                    core.emit(gen, Event::Error { path, msg });
                 } else {
-                    core.emit(Event::Ended);
+                    core.emit(gen, Event::Ended);
                 }
-                core.emit(Event::Playing { playing: false });
-            } else if core.gen.load(Ordering::SeqCst) == gen {
-                // `stop` got there first: report it as the stop it was.
-                core.emit(Event::Playing { playing: false });
+                core.emit(gen, Event::Playing { playing: false });
+            } else {
+                // `stop` got there first: report it as the stop it was (a newer `play`
+                // taking over is filtered out by `emit`).
+                core.emit(gen, Event::Playing { playing: false });
             }
             core.release_output(gen);
         }
     }
+}
+
+/// What to say about a decoder panic. symphonia's readers build a `TimeBase` from the
+/// header's sample rate, which panics on 0.
+fn crash_msg(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    if text.is_some_and(|t| t.contains("TimeBase")) {
+        tr!("the file reports a sample rate of 0 Hz")
+    } else {
+        tr!("the decoder crashed on this file")
+    }
+}
+
+/// `Source::open`, with a decoder panic on a hostile file reported as that file's
+/// error instead of taking down the worker (and with it the file being heard while
+/// the next one is opened ahead of time).
+fn open_guarded(path: &Path) -> Result<Source, String> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| Source::open(path))).unwrap_or_else(|p| Err(crash_msg(&*p)))
 }
 
 /// A stretch of the pushed stream that belongs to one file.
@@ -335,7 +381,7 @@ enum End {
 
 fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) -> Exit {
     core.ensure_output();
-    let mut cur = match Source::open(&path) {
+    let mut cur = match open_guarded(&path) {
         Ok(s) => s,
         Err(msg) => return Exit::Failed { path, msg },
     };
@@ -346,8 +392,8 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
     let src = &core.src;
     let mut segs: VecDeque<Seg> = VecDeque::new();
     segs.push_back(Seg { start: src.counters().0, path: path.clone(), duration_ms: cur.duration_ms, base_ms });
-    core.emit(Event::Track { path: path.clone(), duration_ms: cur.duration_ms });
-    core.emit(Event::Playing { playing: true });
+    core.emit(gen, Event::Track { path: path.clone(), duration_ms: cur.duration_ms, next: false });
+    core.emit(gen, Event::Playing { playing: true });
 
     let mut next_path: Option<PathBuf> = None;
     let mut prepared: Option<(PathBuf, Result<Source, String>)> = None;
@@ -385,14 +431,14 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                     src.set_paused(true);
                     if !paused {
                         paused = true;
-                        core.emit(Event::Playing { playing: false });
+                        core.emit(gen, Event::Playing { playing: false });
                     }
                 }
                 Cmd::Resume => {
                     src.set_paused(false);
                     if paused {
                         paused = false;
-                        core.emit(Event::Playing { playing: true });
+                        core.emit(gen, Event::Playing { playing: true });
                     }
                 }
                 Cmd::SetNext(p) => {
@@ -400,6 +446,13 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                     // not yet in play time): a repeat of the same request, not a second copy.
                     let ahead = segs.len() > 1 && segs.back().map(|s| &s.path) == p.as_ref();
                     if !ahead {
+                        // The file was fully decoded before this came (a short one is
+                        // over in decode time before its own `Track` reaches the list),
+                        // but it is still being heard: carry on into the new next file
+                        // instead of ending. The finished source hands over to it.
+                        if p.is_some() && matches!(done, Some(End::Ended)) {
+                            done = None;
+                        }
                         next_path = p;
                     }
                 }
@@ -410,7 +463,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                         let heard = segs[0].path.clone();
                         next_path = Some(segs[1].path.clone());
                         prepared = None;
-                        match Source::open(&heard) {
+                        match open_guarded(&heard) {
                             Ok(s) => cur = s,
                             Err(msg) => return Exit::Failed { path: heard, msg },
                         }
@@ -430,7 +483,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                         }
                     };
                     segs.push_back(Seg { start: src.counters().0, base_ms: reached, ..seg });
-                    core.emit(Event::Position { ms: reached });
+                    core.emit(gen, Event::Position { ms: reached });
                     last_pos = Instant::now();
                 }
             }
@@ -441,7 +494,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
         // Keep the prepared next file in step with `next_path` (opened ahead of time).
         let want = next_path.as_ref();
         if prepared.as_ref().map(|(p, _)| p) != want {
-            prepared = want.map(|p| (p.clone(), Source::open(p)));
+            prepared = want.map(|p| (p.clone(), open_guarded(p)));
         }
 
         // ── feed ──
@@ -462,7 +515,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                 if done.is_some() {
                     break;
                 }
-                match cur.next_chunk() {
+                match std::panic::catch_unwind(AssertUnwindSafe(|| cur.next_chunk())).unwrap_or_else(|p| Err(crash_msg(&*p))) {
                     Ok(Some(chunk)) => {
                         pending = chunk;
                         pending_off = 0;
@@ -473,7 +526,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
                         let opened = match (next_path.take(), prepared.take()) {
                             (Some(p), Some((pp, res))) if p == pp => Some((p, res)),
                             (Some(p), _) => {
-                                let res = Source::open(&p);
+                                let res = open_guarded(&p);
                                 Some((p, res))
                             }
                             (None, _) => None,
@@ -509,7 +562,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
             // still be decoding its first chunk, so it counts as playing).
             let end = segs.get(1).map_or(decoded_end, |s| s.start);
             if end > segs[0].start || (segs.len() == 1 && done.is_none()) {
-                core.emit(Event::Track { path: segs[0].path.clone(), duration_ms: segs[0].duration_ms });
+                core.emit(gen, Event::Track { path: segs[0].path.clone(), duration_ms: segs[0].duration_ms, next: true });
             }
         }
         if let Some(end) = &done {
@@ -527,7 +580,7 @@ fn run(core: &Core, gen: u64, rx: &Receiver<Cmd>, path: PathBuf, start_ms: u64) 
             if s.duration_ms > 0 {
                 ms = ms.min(s.duration_ms);
             }
-            core.emit(Event::Position { ms });
+            core.emit(gen, Event::Position { ms });
         }
     }
 }
@@ -566,7 +619,7 @@ enum Rs {
 
 impl Source {
     fn open(path: &Path) -> Result<Self, String> {
-        let file = File::open(path).map_err(|e| format!("could not open the file: {e}"))?;
+        let file = File::open(path).map_err(|e| tr!("could not open the file: {}", e))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -575,18 +628,22 @@ impl Source {
         let opts = FormatOptions { enable_gapless: true, ..Default::default() };
         let probed = symphonia::default::get_probe()
             .format(&hint, mss, &opts, &MetadataOptions::default())
-            .map_err(|e| format!("unsupported or unreadable audio file: {e}"))?;
+            .map_err(|e| tr!("unsupported or unreadable audio file: {}", e))?;
         let format = probed.format;
         let track = format
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            .ok_or_else(|| "the file has no audio track".to_string())?;
+            .ok_or_else(|| tr!("the file has no audio track"))?;
         let params = track.codec_params.clone();
         let track_id = track.id;
+        // Before any decoding: the decoder sizes its buffers from the header too.
+        if let Some(rate) = params.sample_rate {
+            check_rate(rate)?;
+        }
         let decoder = symphonia::default::get_codecs()
             .make(&params, &DecoderOptions::default())
-            .map_err(|e| format!("unsupported audio codec: {e}"))?;
+            .map_err(|e| tr!("unsupported audio codec: {}", e))?;
         let time_base = params.time_base.filter(|tb| tb.numer > 0 && tb.denom > 0);
         let duration_ms = match (params.n_frames, time_base, params.sample_rate) {
             (Some(n), Some(tb), _) => time_ms(tb.calc_time(n)),
@@ -629,7 +686,7 @@ impl Source {
         self.emitted = 0;
         self.eof = false;
         self.finished = false;
-        let seeked = res.map_err(|e| format!("seek failed: {e}"))?;
+        let seeked = res.map_err(|e| tr!("seek failed: {}", e))?;
         Ok(match self.time_base {
             Some(tb) => time_ms(tb.calc_time(seeked.actual_ts)),
             None => ms,
@@ -674,7 +731,7 @@ impl Source {
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
                 // A chained stream changed its track list: treat as the end of this file.
                 Err(SymError::ResetRequired) => return Ok(false),
-                Err(e) => return Err(format!("could not read the file: {e}")),
+                Err(e) => return Err(tr!("could not read the file: {}", e)),
             };
             if packet.track_id() != self.track_id {
                 continue;
@@ -716,12 +773,12 @@ impl Source {
                     // A corrupt frame: skip it, but not forever.
                     self.bad_packets += 1;
                     if self.bad_packets > MAX_BAD_PACKETS {
-                        return Err("too many undecodable frames".into());
+                        return Err(tr!("too many undecodable frames"));
                     }
                 }
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
                 Err(SymError::ResetRequired) => return Ok(false),
-                Err(e) => return Err(format!("could not decode the file: {e}")),
+                Err(e) => return Err(tr!("could not decode the file: {}", e)),
             }
         }
     }
@@ -749,7 +806,7 @@ impl Source {
                 }
                 let res = r
                     .process(&[&self.stage[0][..need], &self.stage[1][..need]], None)
-                    .map_err(|e| format!("resampling failed: {e}"))?;
+                    .map_err(|e| tr!("resampling failed: {}", e))?;
                 self.stage[0].drain(..need);
                 self.stage[1].drain(..need);
                 append_out(&mut out, &res, &mut self.skip, &mut self.emitted, u64::MAX);
@@ -768,7 +825,7 @@ impl Source {
             if !self.stage[0].is_empty() {
                 let res = r
                     .process_partial(Some(&[&self.stage[0][..], &self.stage[1][..]]), None)
-                    .map_err(|e| format!("resampling failed: {e}"))?;
+                    .map_err(|e| tr!("resampling failed: {}", e))?;
                 self.stage[0].clear();
                 self.stage[1].clear();
                 append_out(&mut out, &res, &mut self.skip, &mut self.emitted, expected);
@@ -778,7 +835,7 @@ impl Source {
                 guard += 1;
                 let res = r
                     .process_partial::<&[f32]>(None, None)
-                    .map_err(|e| format!("resampling failed: {e}"))?;
+                    .map_err(|e| tr!("resampling failed: {}", e))?;
                 append_out(&mut out, &res, &mut self.skip, &mut self.emitted, expected);
             }
         }
@@ -789,16 +846,23 @@ impl Source {
     }
 }
 
+fn check_rate(rate: u32) -> Result<(), String> {
+    if (MIN_IN_RATE..=MAX_IN_RATE).contains(&rate) {
+        Ok(())
+    } else {
+        Err(tr!("the file reports a sample rate of {} Hz, which can\u{2019}t be played", rate))
+    }
+}
+
 fn make_rs(rate: u32) -> Result<Rs, String> {
     if rate == OUT_RATE {
         return Ok(Rs::Pass);
     }
-    if rate == 0 {
-        return Err("the file reports a sample rate of 0".into());
-    }
+    // Checked again here: a decoded buffer's rate need not be the header's.
+    check_rate(rate)?;
     FftFixedIn::<f32>::new(rate as usize, OUT_RATE as usize, RS_CHUNK, 2, 2)
         .map(|r| Rs::Fft { r: Box::new(r), in_rate: rate })
-        .map_err(|e| format!("cannot resample from {rate} Hz: {e}"))
+        .map_err(|e| tr!("cannot resample from {0} Hz: {1}", rate, e))
 }
 
 /// Interleave resampler output into `out`, cutting the leading `skip` frames and
@@ -844,7 +908,8 @@ mod tests {
         b.extend_from_slice(&1u16.to_le_bytes()); // PCM
         b.extend_from_slice(&channels.to_le_bytes());
         b.extend_from_slice(&rate.to_le_bytes());
-        b.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+        // Wrapping: the tests also write absurd rates on purpose.
+        b.extend_from_slice(&rate.wrapping_mul(u32::from(channels) * 2).to_le_bytes());
         b.extend_from_slice(&(channels * 2).to_le_bytes());
         b.extend_from_slice(&16u16.to_le_bytes());
         b.extend_from_slice(b"data");
@@ -905,8 +970,107 @@ mod tests {
         let core = Arc::new(Core::new(Arc::new(LocalSource::new()), false));
         let events = Arc::new(Mutex::new(Vec::new()));
         let ev = Arc::clone(&events);
-        *lock(&core.listener) = Some(Arc::new(move |e| lock(&ev).push(e)));
+        *lock(&core.listener) = Some(Arc::new(move |_gen, e| lock(&ev).push(e)));
         (core, events)
+    }
+
+    fn track_events(ev: &[Event]) -> Vec<(PathBuf, bool)> {
+        ev.iter()
+            .filter_map(|e| if let Event::Track { path, next, .. } = e { Some((path.clone(), *next)) } else { None })
+            .collect()
+    }
+
+    #[test]
+    fn local_player_rejects_absurd_sample_rates_with_a_clear_message() {
+        for rate in [0u32, 1, 4_000_000_000] {
+            let p = temp(&format!("rate{rate}.wav"));
+            write_wav(&p, rate, 1, 100, |_, _| 0.1);
+            let err = open_guarded(&p).err().unwrap_or_else(|| panic!("{rate} Hz opened"));
+            assert!(err.contains("sample rate of"), "{rate} Hz: {err}");
+            // Through the player: an Error naming the file, and nothing stuck.
+            let (core, events) = test_core();
+            Core::play(&core, &p, 0);
+            wait_for(&events, |e| matches!(e.last(), Some(Event::Playing { playing: false })));
+            std::fs::remove_file(&p).ok();
+            let ev = lock(&events).clone();
+            assert!(matches!(&ev[0], Event::Error { path, msg } if *path == p && msg.contains("sample rate")), "{ev:?}");
+            assert!(!core.src.is_active());
+        }
+        assert!(make_rs(4_000_000_000).is_err() && make_rs(0).is_err() && make_rs(48_000).is_ok());
+    }
+
+    #[test]
+    fn local_player_a_broken_next_file_does_not_cut_the_current_one() {
+        let a = temp("whole.wav");
+        let bad = temp("next-rate0.wav");
+        write_wav(&a, 44_100, 2, 13_230, |_, _| 0.1); // 0.3 s, no resampler
+        write_wav(&bad, 0, 1, 100, |_, _| 0.5); // panics symphonia's reader
+        let (core, events) = test_core();
+        Core::play(&core, &a, 0);
+        core.send(Cmd::SetNext(Some(bad.clone())));
+        let got = consume_until(&core, &events, |e| e.iter().any(|e| matches!(e, Event::Playing { playing: false })));
+        let ev = lock(&events).clone();
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&bad).ok();
+        assert_eq!(got.len() / 2, 13_230, "the current file plays to its end: {ev:?}");
+        assert_eq!(track_events(&ev), vec![(a.clone(), false)]);
+        assert!(ev.iter().any(|e| matches!(e, Event::Error { path, .. } if *path == bad)), "the next file is blamed: {ev:?}");
+    }
+
+    #[test]
+    fn local_player_short_file_takes_a_next_file_set_after_it_was_decoded() {
+        let short = temp("short.wav");
+        let b = temp("after.wav");
+        write_wav(&short, 44_100, 2, 4_410, |_, _| 0.1); // 0.1 s: decoded at once
+        write_wav(&b, 44_100, 2, 4_410, |_, _| 0.6);
+        let (core, events) = test_core();
+        Core::play(&core, &short, 0);
+        // All of it is in the ring and the worker has seen its end, nothing heard yet.
+        wait_pushed(&core, 4_410);
+        std::thread::sleep(Duration::from_millis(50));
+        core.send(Cmd::SetNext(Some(b.clone())));
+        let got = consume_until(&core, &events, |e| e.iter().any(|e| matches!(e, Event::Playing { playing: false })));
+        let ev = lock(&events).clone();
+        std::fs::remove_file(&short).ok();
+        std::fs::remove_file(&b).ok();
+        assert_eq!(track_events(&ev), vec![(short.clone(), false), (b.clone(), true)], "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, Event::Ended)));
+        assert_eq!(got.len() / 2, 8_820, "both files, whole");
+    }
+
+    #[test]
+    fn local_player_a_replaced_play_sends_nothing_after_the_new_one_started() {
+        let a = temp("first.wav");
+        let b = temp("second.wav");
+        write_wav(&a, 48_000, 2, 48_000, |_, _| 0.1);
+        write_wav(&b, 44_100, 2, 44_100, |_, _| 0.6);
+        for _ in 0..20 {
+            let core = Arc::new(Core::new(Arc::new(LocalSource::new()), false));
+            let events: Arc<Mutex<Vec<(u64, Event)>>> = Arc::default();
+            let ev = Arc::clone(&events);
+            *lock(&core.listener) = Some(Arc::new(move |g, e| lock(&ev).push((g, e))));
+            let ga = Core::play(&core, &a, 0);
+            let gb = Core::play(&core, &b, 0);
+            assert!(gb > ga);
+            let after = lock(&events).len();
+            wait_for_tagged(&events, |e| e.iter().any(|(g, e)| *g == gb && matches!(e, Event::Playing { playing: true })));
+            std::thread::sleep(Duration::from_millis(20));
+            core.stop();
+            let ev = lock(&events).clone();
+            assert!(ev[after..].iter().all(|(g, _)| *g == gb), "the replaced play spoke after: {ev:?}");
+            let last_track = ev.iter().rev().find_map(|(_, e)| if let Event::Track { path, .. } = e { Some(path) } else { None });
+            assert_eq!(last_track, Some(&b));
+        }
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+    }
+
+    fn wait_for_tagged(events: &Mutex<Vec<(u64, Event)>>, pred: impl Fn(&[(u64, Event)]) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pred(&lock(events)) {
+            assert!(Instant::now() < deadline, "timed out; events: {:?}", lock(events));
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Pretend to be the device: pull frames until `stop_when` holds (10 s at most).

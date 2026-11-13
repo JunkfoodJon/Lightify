@@ -51,6 +51,10 @@ const PORT: u16 = 57321;
 /// long while the process is still alive; one that exits fails immediately.
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL_DELAY_MS: u64 = 250;
+/// On a stop, how long the server gets to clean up after the ffmpeg it was running
+/// is ended, before the server itself is.
+#[cfg(windows)]
+const HELPER_GRACE: Duration = Duration::from_millis(1500);
 /// How many bridge log lines to keep for the "didn't come up" error message.
 const LOG_RING: usize = 200;
 
@@ -104,6 +108,9 @@ pub struct Item {
     pub progress: u32,
     pub file_path: String,
     pub error: String,
+    /// The open.spotify.com link this row came from, when known — what a retry of a
+    /// row carried past an idle stop queues again.
+    pub url: String,
 }
 
 impl Item {
@@ -122,8 +129,17 @@ impl Item {
         !self.file_path.is_empty() && matches!(self.status.as_str(), "Downloaded" | "Already Exists")
     }
 
+    /// What the Downloads panel's Clear drops: a finished row, or a failed row carried
+    /// past the bridge's idle stop (`carried`), which `clear_finished` forgets.
+    pub fn clearable(&self) -> bool {
+        self.finished() || self.local_id.starts_with(CARRIED_PREFIX)
+    }
+
+    /// By status alone. A row waiting for another try carries the last attempt's
+    /// error text too (the bridge's transient retry, a refused audio key), and showed
+    /// as failed while it waited (DC18).
     pub fn failed(&self) -> bool {
-        !self.error.is_empty() || matches!(self.status.as_str(), "Failed" | "Unavailable")
+        matches!(self.status.as_str(), "Failed" | "Unavailable")
     }
 
     /// `status • artist • 42%` — ports `renderSidebarDownloads`' summary line.
@@ -195,9 +211,31 @@ fn stop_child_locked(b: &mut Bridge) {
         // server (and anything it spawned, e.g. an ffmpeg mid-convert) and give the
         // bootloader a moment to clean up and exit on its own; the tree-kill below is
         // only the fallback.
+        //
+        // Order matters for the downloads too. What the server started (an ffmpeg
+        // mid-convert) goes first: its failure runs the server's own error handler,
+        // which removes that track's unfinished '~' files — given a moment
+        // (`HELPER_GRACE`) before the server itself is ended. Anything a hard stop
+        // still leaves is swept by the bridge on its next start, and the finished
+        // name is only ever given to a complete file, so a stop at any point can't
+        // leave a truncated track behind.
         #[cfg(windows)]
         {
-            for pid in proc::descendants(child.id()) {
+            let bridge_name = bridge_exe_name();
+            let (servers, helpers): (Vec<_>, Vec<_>) =
+                proc::descendants(child.id()).into_iter().partition(|(_, name)| name.eq_ignore_ascii_case(bridge_name));
+            if !helpers.is_empty() {
+                for (pid, _) in &helpers {
+                    proc::terminate(*pid);
+                }
+                std::thread::sleep(HELPER_GRACE);
+            }
+            if servers.is_empty() {
+                // Run from source (the child *is* the server), or a packaged bridge
+                // still unpacking (no server yet): nothing will end it but us.
+                proc::terminate(child.id());
+            }
+            for (pid, _) in proc::descendants(child.id()) {
                 proc::terminate(pid);
             }
             let deadline = Instant::now() + Duration::from_secs(4);
@@ -257,18 +295,46 @@ fn root_url() -> String {
     format!("http://127.0.0.1:{PORT}")
 }
 
+/// A client for the loopback bridge. `no_proxy`: the bridge is on 127.0.0.1, and a
+/// system or environment proxy would otherwise be asked to reach it (and can't).
+fn bridge_client(pooled: bool) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("Lightify/2.0")
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(10));
+    if !pooled {
+        builder = builder.pool_max_idle_per_host(0);
+    }
+    builder.build().map_err(|e| format!("Failed to build OnTheSpot client: {e}"))
+}
+
 fn http() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .user_agent("Lightify/2.0")
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("Failed to build OnTheSpot client: {e}"))
-        })
-        .clone()
+    CLIENT.get_or_init(|| bridge_client(true)).clone()
+}
+
+/// The idle monitor's own client. It runs on its own runtime, which is only driven
+/// while a check is running; a connection it left in the shared pool belonged to
+/// that parked runtime, and the next UI call that picked it up stalled until its
+/// timeout. Nothing is pooled here, and the UI client never sees its connections.
+fn monitor_http() -> Result<reqwest::Client, String> {
+    bridge_client(false)
+}
+
+/// The bridge's own reason for a refused request (`{"success": false, "error": …}`),
+/// falling back to the HTTP status for a bridge build that doesn't send one.
+async fn bridge_refusal(response: reqwest::Response, what: &str) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    let said = body.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    if status.is_success() && body.get("success").and_then(|v| v.as_bool()) != Some(false) {
+        return Ok(body);
+    }
+    Err(match said {
+        Some(reason) => format!("Failed to {what}: {reason}"),
+        None => format!("Failed to {what}: bridge answered {status}"),
+    })
 }
 
 /// `GET /login` both wakes the Flask session and hands back the cookie every other
@@ -701,6 +767,16 @@ async fn ensure() -> Result<(), String> {
             command.process_group(0);
         }
         command.env("ONTHESPOTDIR", &ots_dir);
+        // Lightify only queues open.spotify.com links: the bridge then skips signing
+        // in to its public Bandcamp/Deezer/SoundCloud/YouTube Music/Crunchyroll
+        // sessions on every start (`FillAccountPool` in accounts.py, DC15).
+        command.env("LIGHTIFY_SPOTIFY_ONLY", "1");
+        // The downloader signs in with the player's own sign-in when there is one (no
+        // device picking); see `_session_from_player_credentials` in the bridge.
+        let player_credentials = crate::engine::cache_dir().join("credentials.json");
+        if player_credentials.is_file() {
+            command.env("LIGHTIFY_PLAYER_CREDENTIALS", &player_credentials);
+        }
         // Python on Windows writes the ANSI code page (cp1252) to a pipe, not UTF-8,
         // so any non-ASCII track/artist name in the bridge's logs would arrive here
         // as invalid UTF-8. Force UTF-8 for both the interpreter's I/O and its
@@ -715,6 +791,12 @@ async fn ensure() -> Result<(), String> {
         let mut child = command
             .spawn()
             .map_err(|e| format!("Failed to start the downloader bridge ({what}): {e}"))?;
+        // Straight after the spawn, before the bootloader has unpacked far enough to
+        // start its server, so the server and its children are in the job too.
+        #[cfg(windows)]
+        if !proc::kill_with_app(&child) {
+            append_log("could not tie the bridge to this app's lifetime; it may outlive a crash");
+        }
         if let Some(stdout) = child.stdout.take() {
             capture(stdout, log_path.clone(), "stdout");
         }
@@ -753,6 +835,14 @@ async fn ensure() -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(READY_POLL_DELAY_MS)).await;
     }
 
+    // A bridge this call started and that never came up is stopped. One that was
+    // already running (busy downloading, say, and slow to answer) is left alone: it
+    // used to be stopped here mid-download (DC5).
+    if !should_spawn {
+        return Err(lightify_i18n::tr!(
+            "The downloader is running but not answering. It may be busy; try again in a moment."
+        ));
+    }
     let log_path = lightify_core::config::data_dir().join("onthespot-web.log");
     shutdown();
     let tail = recent_log(12);
@@ -782,6 +872,9 @@ pub fn spotify_url(kind: &str, id: &str) -> Result<String, String> {
     Ok(format!("https://open.spotify.com/{kind}/{id}"))
 }
 
+/// Length of a Spotify base62 id.
+const SPOTIFY_ID_LEN: usize = 22;
+
 /// Reject anything that isn't a Spotify item URL before it reaches the bridge —
 /// ports `normalize_download_url`.
 fn normalize_url(input: &str) -> Result<String, String> {
@@ -805,7 +898,10 @@ fn normalize_url(input: &str) -> Result<String, String> {
     let (kind, id) = (segments[0], segments[1]);
     match kind {
         "track" | "playlist" | "album" | "artist" | "show" | "episode" => {
-            if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            // Exactly the bridge's own form (`SPOTIFY_URL_REGEX` in parse_item.py: 22
+            // base62 characters). Anything else it silently drops, while this side
+            // used to report "Download queued".
+            if id.len() != SPOTIFY_ID_LEN || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
                 return Err(format!("Invalid {kind} id"));
             }
             Ok(format!("https://open.spotify.com/{kind}/{id}"))
@@ -839,6 +935,20 @@ fn status_from_json(value: &serde_json::Value) -> Status {
 
 pub async fn status() -> Result<Status, String> {
     let (client, cookie) = ready().await?;
+    let status = read_status(&client, cookie).await?;
+    // Any status showing no login in flight ends the tracked attempt — it finished
+    // (or failed) on its own. Without this the timestamp from a login that
+    // *succeeded* lingers, and a later Connect would read as "stuck" and restart a
+    // perfectly healthy bridge, dropping its download queue.
+    if !status.login_in_progress {
+        *login_started_at().lock().unwrap() = None;
+    }
+    Ok(status)
+}
+
+/// `GET /api/lightify/status` on a bridge known to be up. Not through `ready()`, so
+/// the idle monitor can ask without counting as a use.
+async fn read_status(client: &reqwest::Client, cookie: String) -> Result<Status, String> {
     let value: serde_json::Value = client
         .get(format!("{}/api/lightify/status", root_url()))
         .header(reqwest::header::COOKIE, cookie)
@@ -850,15 +960,7 @@ pub async fn status() -> Result<Status, String> {
         .json()
         .await
         .map_err(|e| format!("Failed to parse downloader status: {e}"))?;
-    let status = status_from_json(&value);
-    // Any status showing no login in flight ends the tracked attempt — it finished
-    // (or failed) on its own. Without this the timestamp from a login that
-    // *succeeded* lingers, and a later Connect would read as "stuck" and restart a
-    // perfectly healthy bridge, dropping its download queue.
-    if !status.login_in_progress {
-        *login_started_at().lock().unwrap() = None;
-    }
-    Ok(status)
+    Ok(status_from_json(&value))
 }
 
 /// When the current login attempt started (`None` once it's finished, one way or
@@ -949,19 +1051,21 @@ pub async fn enqueue(url: &str) -> Result<String, String> {
     let st = status().await?;
     if !st.spotify_ready {
         let _ = start_login().await?;
-        return Err("Downloader setup started \u{2014} open Spotify, pick OnTheSpot in the \
-                    device list, then retry Download."
+        return Err("Signing the downloader in to Spotify \u{2014} if a Spotify page opens in your \
+                    browser, click Agree, then retry Download."
             .to_string());
     }
     let (client, cookie) = ready().await?;
-    client
+    let response = client
         .post(format!("{}/api/parse_url/{}", root_url(), url_encode(&normalized)))
         .header(reqwest::header::COOKIE, cookie)
         .send()
         .await
-        .map_err(|e| format!("Failed to enqueue download: {e}"))?
-        .error_for_status()
         .map_err(|e| format!("Failed to enqueue download: {e}"))?;
+    // A link the bridge can't read is refused here (bridges built before this
+    // answered `success` either way); one it accepts but then can't expand shows up
+    // as a failed row in the queue.
+    bridge_refusal(response, "enqueue download").await?;
     Ok(normalized)
 }
 
@@ -976,7 +1080,63 @@ fn u32_field(o: &serde_json::Map<String, serde_json::Value>, key: &str) -> u32 {
 }
 
 /// Read the bridge's whole queue. The result is cached for row→`local_id` lookups.
+///
+/// When the bridge can't be reached the cache holds the carried rows alone, so a
+/// caller that shows them (`last_snapshot()`) with the error keeps them in view and
+/// its row indices right; before, a failed cold start hid them (DC14).
 pub async fn snapshot() -> Result<Vec<Item>, String> {
+    // Nothing to show anywhere (no bridge of ours running, nothing carried, nothing in the
+    // bridge's saved queue, and no other app's bridge answering): an empty list, without
+    // cold-starting the bridge (about 6 s) just to say so (BUGS-PLAN DC15).
+    if !running() && carried().lock().unwrap().is_empty() && !bridge_has_saved_queue() && !ping().await {
+        snapshot_cache().lock().unwrap().clear();
+        return Ok(Vec::new());
+    }
+    match live_queue().await {
+        Ok(live) => {
+            let items = merge_carried(&mut carried().lock().unwrap(), &live);
+            *snapshot_cache().lock().unwrap() = items.clone();
+            persist_failed();
+            Ok(items)
+        }
+        Err(e) => {
+            let kept = carried().lock().unwrap().clone();
+            *snapshot_cache().lock().unwrap() = kept;
+            Err(e)
+        }
+    }
+}
+
+/// Songs the bridge saved as still to do when it last stopped
+/// (`lightify_download_queue.json` in its state folder, written by its queue store):
+/// the next bridge start queues them again, so Downloads must start it to show them.
+fn bridge_has_saved_queue() -> bool {
+    let path = runtime_dir(&lightify_core::config::data_dir()).join("lightify_download_queue.json");
+    saved_queue_has_entries(std::fs::read(path).ok().as_deref())
+}
+
+/// Whether the saved queue (`{"version": 1, "entries": [...]}`, web.py's queue store)
+/// holds anything. A file that can't be read as that counts as having some: then the
+/// bridge starts, as before.
+fn saved_queue_has_entries(bytes: Option<&[u8]>) -> bool {
+    let Some(bytes) = bytes else { return false };
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(v) => v.get("entries").and_then(|e| e.as_array()).map_or(true, |e| !e.is_empty()),
+        Err(_) => true,
+    }
+}
+
+/// The live rows followed by the carried ones. A carried row the bridge lists again
+/// (it was queued again, or another app's bridge still has it) is dropped: the live
+/// row is the one that counts.
+fn merge_carried(carried: &mut Vec<Item>, live: &[Item]) -> Vec<Item> {
+    carried.retain(|c| c.url.is_empty() || !live.iter().any(|l| l.url == c.url));
+    let mut items = live.to_vec();
+    items.extend(carried.iter().cloned());
+    items
+}
+
+async fn live_queue() -> Result<Vec<Item>, String> {
     let (client, cookie) = ready().await?;
     let value: serde_json::Value = client
         .get(format!("{}/api/download_queue", root_url()))
@@ -989,7 +1149,28 @@ pub async fn snapshot() -> Result<Vec<Item>, String> {
         .json()
         .await
         .map_err(|e| format!("Failed to parse downloads queue: {e}"))?;
+    Ok(items_from_json(&value))
+}
 
+/// The link a row can be queued again from: the bridge's own `item_url`, or — for a
+/// row whose metadata lookup failed, which has none — one built from its id.
+fn row_url(o: &serde_json::Map<String, serde_json::Value>) -> String {
+    let url = text_field(o, "item_url");
+    if !url.is_empty() || text_field(o, "item_service") != "spotify" {
+        return url;
+    }
+    let kind = match text_field(o, "item_type").as_str() {
+        "track" => "track",
+        "podcast_episode" => "episode",
+        "playlist" => "playlist",
+        "album" => "album",
+        _ => return String::new(),
+    };
+    spotify_url(kind, &text_field(o, "item_id")).unwrap_or_default()
+}
+
+/// Rows of `/api/download_queue`, in `local_id` order.
+fn items_from_json(value: &serde_json::Value) -> Vec<Item> {
     let mut items: Vec<Item> = value
         .as_object()
         .map(|object| {
@@ -1005,54 +1186,170 @@ pub async fn snapshot() -> Result<Vec<Item>, String> {
                     progress: u32_field(o, "progress"),
                     file_path: text_field(o, "file_path"),
                     error: text_field(o, "error"),
+                    url: row_url(o),
                 })
                 .collect()
         })
         .unwrap_or_default();
     items.sort_by(|a, b| a.local_id.cmp(&b.local_id));
-    *snapshot_cache().lock().unwrap() = items.clone();
-    Ok(items)
+    items
+}
+
+// ── Failed rows outlive an idle stop ────────────────────────────────────────
+
+/// Prefix of a carried row's `local_id`; a new bridge numbers its rows from
+/// `-0` again, so the old ids could collide.
+const CARRIED_PREFIX: &str = "carried:";
+
+/// Failed rows of bridges the idle monitor stopped. The bridge keeps its queue in
+/// memory only, so the stop used to drop them, and with them the only sign that
+/// something still needed a retry. They are listed after the live queue until
+/// retried (which queues the link again) or cleared.
+///
+/// They also outlive Lightify (DC4): the carried rows and the live queue's failed
+/// ones are kept in `FAILED_FILE`, and come back as carried rows on the next run
+/// (the bridge itself queues again what was still waiting). Read on first use.
+fn carried() -> &'static Mutex<Vec<Item>> {
+    static V: OnceLock<Mutex<Vec<Item>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(load_failed_rows(&failed_file())))
+}
+
+/// Where failed downloads are kept between runs, beside the app's other files.
+const FAILED_FILE: &str = "downloader-failed.json";
+
+fn failed_file() -> PathBuf {
+    lightify_core::config::data_dir().join(FAILED_FILE)
+}
+
+fn item_to_json(item: &Item) -> serde_json::Value {
+    serde_json::json!({
+        "local_id": item.local_id, "name": item.name, "by": item.by, "service": item.service,
+        "status": item.status, "error": item.error, "url": item.url,
+    })
+}
+
+/// Carried rows saved by `save_failed_rows`; a row without a link to queue again is
+/// left out (it couldn't be retried).
+fn load_failed_rows(path: &Path) -> Vec<Item> {
+    let Ok(bytes) = std::fs::read(path) else { return Vec::new() };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    let mut rows: Vec<Item> = Vec::new();
+    for o in value["rows"].as_array().into_iter().flatten().filter_map(|v| v.as_object()) {
+        let mut row = Item {
+            local_id: text_field(o, "local_id"),
+            name: text_field(o, "name"),
+            by: text_field(o, "by"),
+            service: text_field(o, "service"),
+            status: text_field(o, "status"),
+            error: text_field(o, "error"),
+            url: text_field(o, "url"),
+            ..Default::default()
+        };
+        if row.url.is_empty() || rows.iter().any(|r| r.url == row.url) {
+            continue;
+        }
+        if !row.local_id.starts_with(CARRIED_PREFIX) {
+            row.local_id = format!("{CARRIED_PREFIX}{}", row.local_id);
+        }
+        if row.status.is_empty() {
+            row.status = "Failed".to_string();
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Write `rows` to `path` unless that is what was written last (every queue poll
+/// asks). Atomic, so a stop mid-write never leaves half a file.
+fn save_failed_rows(path: &Path, rows: &[Item]) {
+    static LAST: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+    let value = serde_json::json!({ "rows": rows.iter().map(item_to_json).collect::<Vec<_>>() });
+    let Ok(text) = serde_json::to_string_pretty(&value) else { return };
+    let mut last = LAST.lock().unwrap();
+    if last.as_ref().is_some_and(|(p, t)| p == path && *t == text) {
+        return;
+    }
+    if lightify_core::config::write_atomic(path, text.as_bytes()).is_ok() {
+        *last = Some((path.to_path_buf(), text));
+    }
+}
+
+/// Keep what a restart would otherwise lose: the carried rows and the failed rows of
+/// the last queue read.
+fn persist_failed() {
+    let mut keep = carried().lock().unwrap().clone();
+    let live: Vec<Item> =
+        snapshot_cache().lock().unwrap().iter().filter(|r| !r.local_id.starts_with(CARRIED_PREFIX)).cloned().collect();
+    carry_failed(&mut keep, &live);
+    save_failed_rows(&failed_file(), &keep);
+}
+
+/// Add the failed, retryable rows of a bridge about to stop to `carried`.
+fn carry_failed(carried: &mut Vec<Item>, rows: &[Item]) {
+    for row in rows.iter().filter(|r| r.status == "Failed" && !r.url.is_empty()) {
+        if carried.iter().any(|c| c.url == row.url) {
+            continue;
+        }
+        let mut kept = row.clone();
+        kept.local_id = format!("{CARRIED_PREFIX}{}", row.local_id);
+        kept.progress = 0;
+        carried.push(kept);
+    }
 }
 
 async fn post_empty(path: String, what: &str) -> Result<(), String> {
     let (client, cookie) = ready().await?;
-    client
+    let response = client
         .post(format!("{}{}", root_url(), path))
         .header(reqwest::header::COOKIE, cookie)
         .header("Content-Length", "0")
         .send()
         .await
-        .map_err(|e| format!("Failed to {what}: {e}"))?
-        .error_for_status()
         .map_err(|e| format!("Failed to {what}: {e}"))?;
+    bridge_refusal(response, what).await?;
     Ok(())
 }
 
 pub async fn clear_finished() -> Result<(), String> {
-    post_empty("/api/clear_items".to_string(), "clear downloads").await
+    post_empty("/api/clear_items".to_string(), "clear downloads").await?;
+    carried().lock().unwrap().clear();
+    persist_failed();
+    Ok(())
 }
 
 pub async fn retry(local_id: &str) -> Result<(), String> {
     let id = check_local_id(local_id)?;
+    if id.starts_with(CARRIED_PREFIX) {
+        let url = carried().lock().unwrap().iter().find(|c| c.local_id == id).map(|c| c.url.clone());
+        let url = url.ok_or_else(|| "That download is no longer listed".to_string())?;
+        enqueue(&url).await?;
+        carried().lock().unwrap().retain(|c| c.local_id != id);
+        persist_failed();
+        return Ok(());
+    }
     post_empty(format!("/api/retry/{}", url_encode(&id)), "retry download").await
 }
 
 pub async fn cancel(local_id: &str) -> Result<(), String> {
     let id = check_local_id(local_id)?;
+    if id.starts_with(CARRIED_PREFIX) {
+        carried().lock().unwrap().retain(|c| c.local_id != id);
+        persist_failed();
+        return Ok(());
+    }
     post_empty(format!("/api/cancel/{}", url_encode(&id)), "cancel download").await
 }
 
 pub async fn delete(local_id: &str) -> Result<(), String> {
     let id = check_local_id(local_id)?;
     let (client, cookie) = ready().await?;
-    client
+    let response = client
         .delete(format!("{}/api/delete/{}", root_url(), url_encode(&id)))
         .header(reqwest::header::COOKIE, cookie)
         .send()
         .await
-        .map_err(|e| format!("Failed to delete downloaded file: {e}"))?
-        .error_for_status()
         .map_err(|e| format!("Failed to delete downloaded file: {e}"))?;
+    bridge_refusal(response, "delete downloaded file").await?;
     Ok(())
 }
 
@@ -1089,7 +1386,7 @@ pub fn open_folder(path: &str) -> Result<(), String> {
     #[cfg(windows)]
     let mut command = {
         let mut c = Command::new("explorer");
-        c.arg(&dir);
+        c.arg(explorer_path(&dir));
         c
     };
     #[cfg(target_os = "macos")]
@@ -1109,9 +1406,27 @@ pub fn open_folder(path: &str) -> Result<(), String> {
     command.spawn().map(|_| ()).map_err(|e| format!("Failed to open folder: {e}"))
 }
 
+/// explorer.exe reads `/` as the start of a switch, so a path holding one (a
+/// download root typed as `D:/Music`, which the bridge then joins with `\`) opened
+/// the default folder instead. Backslashes only.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn explorer_path(dir: &Path) -> String {
+    dir.to_string_lossy().replace('/', "\\")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DC15: Downloads starts the bridge only when its saved queue holds something.
+    #[test]
+    fn only_a_saved_queue_with_songs_needs_the_bridge() {
+        assert!(!saved_queue_has_entries(None), "no file");
+        assert!(!saved_queue_has_entries(Some(br#"{"version": 1, "entries": []}"#)));
+        assert!(saved_queue_has_entries(Some(br#"{"version": 1, "entries": [{"url": "x"}]}"#)));
+        assert!(saved_queue_has_entries(Some(b"{ torn")), "unreadable: start it, as before");
+        assert!(saved_queue_has_entries(Some(br#"{"version": 2}"#)), "unknown shape: start it");
+    }
 
     #[test]
     fn normalizes_supported_spotify_urls() {
@@ -1174,37 +1489,291 @@ mod tests {
         let fresh = Status::default();
         assert_eq!(fresh.summary(), "Spotify downloader is not connected");
     }
+
+    // D5: the bridge only accepts 22-character base62 ids; anything else it dropped
+    // silently while the app said "Download queued".
+    #[test]
+    fn requires_the_bridges_id_form() {
+        assert!(normalize_url("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M").is_ok());
+        assert!(normalize_url("https://open.spotify.com/episode/4cOdK2wGLETKBW3PvgPWqT").is_ok());
+        assert!(normalize_url("https://open.spotify.com/track/abc").is_err());
+        assert!(normalize_url("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWq").is_err());
+        assert!(normalize_url("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqTX").is_err());
+        assert!(normalize_url("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPW_T").is_err());
+    }
+
+    fn tuning_of(cfg: &serde_json::Value, key: &str) -> i64 {
+        cfg[key].as_i64().unwrap()
+    }
+
+    // OnTheSpot's defaults and the slow values Lightify wrote earlier today move to
+    // the quick values (the bridge slows only a batch); anything else is the user's.
+    #[test]
+    fn tuning_moves_defaults_and_old_values_to_the_quick_pace() {
+        let mut stock = serde_json::json!({
+            "maximum_download_workers": 1, "maximum_queue_workers": 1,
+            "download_delay": 3, "download_chunk_size": 50_000, "accounts": [], "language": "en",
+        });
+        assert!(tune_values(stock.as_object_mut().unwrap()));
+        let mut slow = serde_json::json!({
+            "maximum_download_workers": 1, "maximum_queue_workers": 1,
+            "download_delay": 60, "download_chunk_size": 262_144,
+        });
+        assert!(tune_values(slow.as_object_mut().unwrap()));
+        for cfg in [&stock, &slow] {
+            assert_eq!(tuning_of(cfg, "maximum_download_workers"), 3);
+            assert_eq!(tuning_of(cfg, "maximum_queue_workers"), 2);
+            assert_eq!(tuning_of(cfg, "download_delay"), 1);
+            assert_eq!(tuning_of(cfg, "download_chunk_size"), 262_144);
+        }
+        assert_eq!(stock["language"], "en", "other keys are left alone");
+        assert!(stock["accounts"].as_array().unwrap().is_empty());
+
+        // Already quick: nothing to write.
+        assert!(!tune_values(slow.as_object_mut().unwrap()));
+
+        let mut mine = serde_json::json!({
+            "maximum_download_workers": 2, "maximum_queue_workers": 4,
+            "download_delay": 10, "download_chunk_size": 100_000,
+        });
+        assert!(!tune_values(mine.as_object_mut().unwrap()));
+        assert_eq!(tuning_of(&mine, "maximum_download_workers"), 2);
+        assert_eq!(tuning_of(&mine, "download_delay"), 10);
+        assert_eq!(tuning_of(&mine, "download_chunk_size"), 100_000);
+
+        // A key the file doesn't have is OnTheSpot's to fill in.
+        let mut partial = serde_json::json!({ "download_delay": 60 });
+        assert!(tune_values(partial.as_object_mut().unwrap()));
+        assert_eq!(partial.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn first_start_config_already_holds_the_quick_pace() {
+        let dir = std::env::temp_dir().join(format!("lightify-tune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        tune_bridge_config(&dir);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("otsconfig.json")).unwrap()).unwrap();
+        assert_eq!(tuning_of(&written, "maximum_download_workers"), 3);
+        assert_eq!(tuning_of(&written, "download_delay"), 1);
+        assert_eq!(written.as_object().unwrap().len(), BRIDGE_TUNING.len());
+
+        // An existing file is tuned in place, keeping its other keys.
+        std::fs::write(
+            dir.join("otsconfig.json"),
+            br#"{"download_delay": 60, "maximum_download_workers": 1, "theme": "dark"}"#,
+        )
+        .unwrap();
+        tune_bridge_config(&dir);
+        let tuned: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("otsconfig.json")).unwrap()).unwrap();
+        assert_eq!(tuning_of(&tuned, "download_delay"), 1);
+        assert_eq!(tuning_of(&tuned, "maximum_download_workers"), 3);
+        assert_eq!(tuned["theme"], "dark");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn row(local_id: &str, status: &str, url: &str) -> Item {
+        Item { local_id: local_id.into(), status: status.into(), url: url.into(), ..Default::default() }
+    }
+
+    // D16: the idle stop used to take failed rows with it.
+    #[test]
+    fn failed_rows_are_carried_once_and_only_when_retryable() {
+        let rows = [
+            row("a-0", "Failed", "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT"),
+            row("b-0", "Downloaded", "https://open.spotify.com/track/7ouMYWpwJ422jRcDASZB7P"),
+            row("c-0", "Failed", ""),
+        ];
+        let mut carried = Vec::new();
+        carry_failed(&mut carried, &rows);
+        carry_failed(&mut carried, &rows);
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].local_id, "carried:a-0");
+        assert!(carried[0].failed());
+        // M39: a carried row makes Clear available on its own; a live failed row doesn't.
+        assert!(carried[0].clearable());
+        assert!(!rows[0].clearable());
+        assert!(rows[1].clearable());
+    }
+
+    #[test]
+    fn idle_only_when_every_row_is_final() {
+        assert!(queue_idle(&[]));
+        assert!(queue_idle(&[row("a", "Failed", ""), row("b", "Already Exists", "")]));
+        assert!(!queue_idle(&[row("a", "Downloaded", ""), row("b", "Waiting", "")]));
+        assert!(!queue_idle(&[row("a", "Converting", "")]));
+    }
+
+    #[test]
+    fn rows_know_the_link_to_queue_again() {
+        let queue = serde_json::json!({
+            "x-0": { "local_id": "x-0", "item_status": "Failed", "item_service": "spotify",
+                     "item_type": "track", "item_id": "4cOdK2wGLETKBW3PvgPWqT", "item_url": "" },
+            "p-0": { "local_id": "p-0", "item_status": "Failed", "item_service": "spotify",
+                     "item_type": "playlist", "item_id": "37i9dQZF1DXcBWIGoYBM5M",
+                     "item_url": "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M" },
+            "e-0": { "local_id": "e-0", "item_status": "Failed", "item_service": "spotify",
+                     "item_type": "podcast_episode", "item_id": "4cOdK2wGLETKBW3PvgPWqT" },
+            "l-0": { "local_id": "l-0", "item_status": "Failed", "item_service": "spotify",
+                     "item_type": "liked_songs", "item_id": null },
+        });
+        let items = items_from_json(&queue);
+        let url = |id: &str| items.iter().find(|i| i.local_id == id).unwrap().url.clone();
+        assert_eq!(url("x-0"), "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT");
+        assert_eq!(url("p-0"), "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M");
+        assert_eq!(url("e-0"), "https://open.spotify.com/episode/4cOdK2wGLETKBW3PvgPWqT");
+        assert_eq!(url("l-0"), "");
+        assert_eq!(items.iter().map(|i| i.local_id.as_str()).collect::<Vec<_>>(), ["e-0", "l-0", "p-0", "x-0"]);
+    }
+
+    // DC18: a row waiting for another try keeps the last attempt's error text; it is
+    // not a failed row.
+    #[test]
+    fn failed_is_by_status_alone() {
+        let waiting = Item { status: "Waiting".into(), error: "Transient Spotify stream reset; retry 1/4".into(), ..Default::default() };
+        assert!(!waiting.failed());
+        assert!(row("a", "Failed", "").failed());
+        assert!(row("a", "Unavailable", "").failed());
+        assert!(!row("a", "Downloaded", "").failed());
+    }
+
+    // DC4: failed rows outlive Lightify; a carried row the bridge lists again is shown once.
+    #[test]
+    fn failed_rows_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("lightify-failed-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FAILED_FILE);
+        assert!(load_failed_rows(&path).is_empty(), "no file: nothing carried");
+
+        let mut kept = vec![row("carried:a-0", "Failed", "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT")];
+        carry_failed(&mut kept, &[row("b-0", "Failed", "https://open.spotify.com/track/7ouMYWpwJ422jRcDASZB7P")]);
+        kept[0].error = "Spotify refused the audio key (error 2) (2 times)".into();
+        save_failed_rows(&path, &kept);
+        let back = load_failed_rows(&path);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].local_id, "carried:a-0");
+        assert_eq!(back[0].error, kept[0].error);
+        assert_eq!(back[1].local_id, "carried:b-0");
+        assert!(back.iter().all(|r| r.clearable() && r.failed()));
+
+        // A torn file is no rows, not an error.
+        std::fs::write(&path, b"{\"rows\": [").unwrap();
+        assert!(load_failed_rows(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_rows_replace_carried_ones() {
+        let url = "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT";
+        let mut carried = vec![row("carried:a-0", "Failed", url), row("carried:c-0", "Failed", "https://open.spotify.com/track/7ouMYWpwJ422jRcDASZB7P")];
+        let live = [row("a-0", "Waiting", url)];
+        let shown = merge_carried(&mut carried, &live);
+        assert_eq!(shown.iter().map(|r| r.local_id.as_str()).collect::<Vec<_>>(), ["a-0", "carried:c-0"]);
+        assert_eq!(carried.len(), 1, "the replaced row is gone for good");
+    }
+
+    // DC3: a torn otsconfig.json is set aside and the quick pace written in its place.
+    #[test]
+    fn a_torn_bridge_config_is_set_aside() {
+        let dir = std::env::temp_dir().join(format!("lightify-torn-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("otsconfig.json"), br#"{"accounts": [{"uuid": "x", "ser"#).unwrap();
+        tune_bridge_config(&dir);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("otsconfig.json")).unwrap()).unwrap();
+        assert_eq!(tuning_of(&written, "maximum_download_workers"), 3);
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("otsconfig.json.broken-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the torn file is kept beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explorer_gets_backslashes() {
+        assert_eq!(explorer_path(Path::new("D:/Music\\Artist/Album")), "D:\\Music\\Artist\\Album");
+    }
 }
 
-// ── Speed: OnTheSpot's defaults are one download at a time ───────────────────
+// ── Pace: quick for a few songs, slow only for a batch ───────────────────────
 
-/// OnTheSpot ships with 1 download worker, a 3 s pause after every track and 50 KB
-/// stream reads. Those values are only replaced while they are still the defaults —
-/// a value changed in OnTheSpot's own settings is the user's and stays. Workers are
-/// created when the bridge starts, so this runs just before a start.
-const BRIDGE_TUNING: [(&str, i64, i64); 4] = [
-    // (key, OnTheSpot default, Lightify value)
-    ("maximum_download_workers", 1, 3),
-    ("maximum_queue_workers", 1, 2),
-    ("download_delay", 3, 1),
-    ("download_chunk_size", 50_000, 262_144),
+/// Downloads go at the quick 2026-09-26 values again (3 download workers, 2 queue
+/// workers, 1 s between tracks). Spotify refuses audio keys to *every* device on an
+/// account after roughly 25-35 in a few minutes, so the bridge itself slows only a
+/// batch: the first 10 songs in any 15 minutes start at once, the rest one a minute
+/// (`wait_for_key_turn` in the bridge's downloader.py; owner, 2026-11-05: "only
+/// engage the slow throttle when a batch size is of threshold"). A key is replaced
+/// only while it holds OnTheSpot's default or a value Lightify wrote before, so
+/// anything the user set stays. Workers are created when the bridge starts, so this
+/// runs just before a start. The larger read chunk changes reads, not key counts.
+const BRIDGE_TUNING: [(&str, &[i64], i64); 4] = [
+    // (key, values Lightify may replace: OnTheSpot's default and Lightify's earlier values, target)
+    ("maximum_download_workers", &[1], 3),
+    ("maximum_queue_workers", &[1], 2),
+    ("download_delay", &[3, 60], 1),
+    ("download_chunk_size", &[50_000], 262_144),
 ];
 
-fn tune_bridge_config(ots_dir: &Path) {
-    let path = ots_dir.join("otsconfig.json");
-    // No file yet: the bridge writes its defaults on first start; the next start
-    // tunes them.
-    let Ok(bytes) = std::fs::read(&path) else { return };
-    let Ok(mut cfg) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
-    let Some(obj) = cfg.as_object_mut() else { return };
+/// Apply `BRIDGE_TUNING` to a parsed `otsconfig.json`. True when anything changed.
+fn tune_values(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     let mut changed = false;
-    for (key, default, tuned) in BRIDGE_TUNING {
-        if obj.get(key).and_then(|v| v.as_i64()) == Some(default) {
-            obj.insert(key.to_string(), serde_json::json!(tuned));
+    for (key, replaceable, target) in BRIDGE_TUNING {
+        let Some(current) = obj.get(key).and_then(|v| v.as_i64()) else { continue };
+        if current != target && replaceable.contains(&current) {
+            obj.insert(key.to_string(), serde_json::json!(target));
             changed = true;
         }
     }
-    if changed {
+    changed
+}
+
+/// A first-start `otsconfig.json` holding only `BRIDGE_TUNING`: OnTheSpot reads every
+/// other key from its template and fills them in on its first save.
+fn write_first_bridge_config(path: &Path) {
+    let first: serde_json::Map<String, serde_json::Value> =
+        BRIDGE_TUNING.iter().map(|(key, _, target)| (key.to_string(), serde_json::json!(target))).collect();
+    if let Ok(out) = serde_json::to_vec_pretty(&first) {
+        let _ = lightify_core::config::write_atomic(path, &out);
+    }
+}
+
+fn tune_bridge_config(ots_dir: &Path) {
+    let path = ots_dir.join("otsconfig.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        // No file yet: the bridge would write OnTheSpot's defaults and run its first
+        // session at a track every 3 s. A file holding only these keys is enough —
+        // OnTheSpot reads every other key from its template and fills them in on
+        // its first save.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            write_first_bridge_config(&path);
+            return;
+        }
+        Err(_) => return,
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).ok().filter(|v| v.is_object());
+    let Some(mut cfg) = parsed else {
+        // Torn (a stop mid-write by a bridge from before its saves were atomic, DC3).
+        // Set aside the way the bridge does it (`load_json_or_set_aside`), so it can
+        // still be looked at, and start from the quick pace rather than OnTheSpot's
+        // slow defaults. The downloader account in it needs connecting again.
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        if std::fs::rename(&path, ots_dir.join(format!("otsconfig.json.broken-{secs}"))).is_ok() {
+            write_first_bridge_config(&path);
+        }
+        return;
+    };
+    let Some(obj) = cfg.as_object_mut() else { return };
+    if tune_values(obj) {
         if let Ok(out) = serde_json::to_vec_pretty(&cfg) {
             let _ = lightify_core::config::write_atomic(&path, &out);
         }
@@ -1241,11 +1810,20 @@ fn touch() {
     *last_interest().lock().unwrap() = Instant::now();
 }
 
-/// Is anything still queued or in progress? `None` = the bridge didn't answer.
-/// Deliberately not through `ready()`: asking must not count as using it.
-async fn queue_busy() -> Option<bool> {
-    let client = http().ok()?;
-    let cookie = session_cookie(&client).await.ok()?;
+/// Nothing is queued or in progress: every row is in a final state.
+fn queue_idle(rows: &[Item]) -> bool {
+    rows.iter().all(|r| {
+        matches!(
+            r.status.as_str(),
+            "Downloaded" | "Already Exists" | "Cancelled" | "Unavailable" | "Deleted" | "Failed"
+        )
+    })
+}
+
+/// The bridge's queue rows, or `None` when it didn't answer. Deliberately not
+/// through `ready()`: asking must not count as using it.
+async fn monitor_queue(client: &reqwest::Client) -> Option<Vec<Item>> {
+    let cookie = session_cookie(client).await.ok()?;
     let value: serde_json::Value = client
         .get(format!("{}/api/download_queue", root_url()))
         .header(reqwest::header::COOKIE, cookie)
@@ -1255,14 +1833,27 @@ async fn queue_busy() -> Option<bool> {
         .json()
         .await
         .ok()?;
-    let busy = value.as_object()?.values().filter_map(|v| v.as_object()).any(|o| {
-        let status = text_field(o, "item_status");
-        !matches!(
-            status.as_str(),
-            "Downloaded" | "Already Exists" | "Cancelled" | "Unavailable" | "Deleted" | "Failed"
-        )
-    });
-    Some(busy)
+    value.as_object()?;
+    Some(items_from_json(&value))
+}
+
+/// Whether a sign-in still holds the bridge up. The marker is only cleared by a
+/// `status()` call, and nothing polls that after a sign-in started by a Download
+/// (only the Settings button's task does), so on its own it kept the bridge up for
+/// the rest of the session. Here the monitor asks itself: a finished sign-in
+/// clears it; one still running holds the bridge up until `LOGIN_STUCK_AFTER`,
+/// past which it is wedged and stopping the bridge is what clears it.
+async fn sign_in_holds(client: &reqwest::Client) -> bool {
+    let Some(started) = *login_started_at().lock().unwrap() else { return false };
+    let Ok(cookie) = session_cookie(client).await else { return true };
+    match read_status(client, cookie).await {
+        Ok(st) if !st.login_in_progress => {
+            *login_started_at().lock().unwrap() = None;
+            false
+        }
+        Ok(_) => started.elapsed() < LOGIN_STUCK_AFTER,
+        Err(_) => true,
+    }
 }
 
 /// One watcher per bridge we started: every `IDLE_CHECK` it looks for
@@ -1280,6 +1871,7 @@ fn spawn_idle_monitor() {
         .stack_size(256 * 1024)
         .spawn(|| {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+            let client = monitor_http().ok();
             let (idle_after, idle_check) = idle_timing();
             loop {
                 std::thread::sleep(idle_check);
@@ -1295,14 +1887,18 @@ fn spawn_idle_monitor() {
                 if last_interest().lock().unwrap().elapsed() < idle_after {
                     continue;
                 }
-                if login_started_at().lock().unwrap().is_some() {
+                let (Some(rt), Some(client)) = (rt.as_ref(), client.as_ref()) else { break };
+                if rt.block_on(sign_in_holds(client)) {
                     continue;
                 }
-                let Some(rt) = rt.as_ref() else { break };
-                if rt.block_on(queue_busy()) == Some(false) {
-                    append_log(&format!("stopping the downloader bridge after {}s idle", idle_after.as_secs()));
-                    shutdown();
-                    break;
+                if let Some(rows) = rt.block_on(monitor_queue(client)) {
+                    if queue_idle(&rows) {
+                        carry_failed(&mut carried().lock().unwrap(), &rows);
+                        persist_failed();
+                        append_log(&format!("stopping the downloader bridge after {}s idle", idle_after.as_secs()));
+                        shutdown();
+                        break;
+                    }
                 }
             }
             RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1389,22 +1985,59 @@ mod proc {
         out
     }
 
-    /// Every descendant of `root`, deepest first (so a server dies after anything
-    /// it spawned, never leaving an orphan behind).
-    pub fn descendants(root: u32) -> Vec<u32> {
+    /// Every descendant of `root` with its exe name, deepest first (so a server
+    /// dies after anything it spawned, never leaving an orphan behind).
+    pub fn descendants(root: u32) -> Vec<(u32, String)> {
         let all = processes();
-        let mut found = Vec::new();
+        let mut found: Vec<(u32, String)> = Vec::new();
         let mut frontier = vec![root];
         while let Some(parent) = frontier.pop() {
-            for &(pid, ppid, _) in &all {
-                if ppid == parent && pid != root && !found.contains(&pid) {
-                    found.push(pid);
-                    frontier.push(pid);
+            for (pid, ppid, name) in &all {
+                if *ppid == parent && *pid != root && !found.iter().any(|(p, _)| p == pid) {
+                    found.push((*pid, name.clone()));
+                    frontier.push(*pid);
                 }
             }
         }
         found.reverse();
         found
+    }
+
+    /// Put a bridge we spawned in a job object that Windows ends, with everything
+    /// in it, when Lightify's handle to it closes — i.e. whenever Lightify exits,
+    /// a crash or Task Manager included. Without it a bridge outlived a crashed
+    /// Lightify, and the next launch reused it without a handle, so it was never
+    /// stopped. Processes the bridge starts join the job too. A bridge someone else
+    /// started (the shipped Tauri app's) is never assigned here and keeps running.
+    /// The handle is deliberately never closed while Lightify runs.
+    pub fn kill_with_app(child: &std::process::Child) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // HANDLE is a raw pointer (not Sync); kept as an integer.
+        static JOB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let job = *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 {
+                CloseHandle(job);
+                return 0;
+            }
+            job as usize
+        });
+        job != 0 && unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) != 0 }
     }
 
     pub fn terminate(pid: u32) {

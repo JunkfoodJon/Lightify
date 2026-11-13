@@ -33,11 +33,11 @@ the permissive option.
 
 ## Patched copies in `lightify-shell/vendor/`
 
-Two crates are vendored with small changes and used through `[patch.crates-io]`. They
+Three crates are vendored with small changes and used through `[patch.crates-io]`. They
 stay under their original licenses:
 
-- `librespot-connect` 0.8.0, from [librespot](https://github.com/librespot-org/librespot),
-  under the MIT License:
+- `librespot-connect` and `librespot-core` 0.8.0, from
+  [librespot](https://github.com/librespot-org/librespot), under the MIT License:
 
   > The MIT License (MIT)
   >

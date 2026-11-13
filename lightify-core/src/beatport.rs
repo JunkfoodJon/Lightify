@@ -672,11 +672,57 @@ fn token_overlap_score(left: &str, right: &str) -> i32 {
     (overlap * 100) / scale.max(1)
 }
 
+/// Whether `needle`'s words appear in `hay` as a run of whole words: "above" is in
+/// "above beyond", "ed" is not in "fred again" (BUGS-PLAN DC8: a raw substring let a
+/// short Beatport artist match unrelated Spotify ones, and the same-titled song by
+/// someone else was accepted and cached).
+fn has_words(hay: &str, needle: &str) -> bool {
+    let hay: Vec<&str> = hay.split_whitespace().collect();
+    let needle: Vec<&str> = needle.split_whitespace().collect();
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle.as_slice())
+}
+
+/// One name's words inside the other's, either way.
+fn names_overlap(a: &str, b: &str) -> bool {
+    has_words(a, b) || has_words(b, a)
+}
+
+/// The artist comparison the score below is built on: the same name, or one name inside
+/// the other as whole words (Beatport's "A & B" against Spotify's separate "A", "B", say).
+/// A spelled-out "and" doesn't count, because normalizing has already dropped the "&" in
+/// "Above & Beyond".
+fn artist_names_match(left: &str, right: &str) -> bool {
+    fn without_and(name: &str) -> String {
+        name.split_whitespace().filter(|word| *word != "and").collect::<Vec<_>>().join(" ")
+    }
+    let contains_either = |a: &str, b: &str| names_overlap(a, b);
+    if contains_either(left, right) {
+        return true;
+    }
+    let (left, right) = (without_and(left), without_and(right));
+    !left.is_empty() && !right.is_empty() && contains_either(&left, &right)
+}
+
 /// Score a Spotify candidate against a normalized Beatport (name, artists). The
 /// host accepts the best candidate only when this is ≥ 160 (see `MATCH_THRESHOLD`).
+///
+/// Deliberately stricter than the host: when both sides name artists and none of them
+/// match, the candidate scores 0 however good its title. An exact title alone is worth
+/// 800, far more than the 120 a missing artist used to cost, so a same-titled song by
+/// someone else was played and cached as the match for 90 days. A genuine track
+/// credited under a different name now shows as unmatched (owner decision, 2026-11-05).
 pub fn score_beatport_track_match(target_name: &str, target_artists: &[String], track: &Track) -> i32 {
     let candidate_name = normalize_match_text(&track.name);
     if candidate_name.is_empty() || target_name.is_empty() {
+        return 0;
+    }
+    let candidate_artists = normalize_artist_list(&track.artists);
+    let artists_known = !target_artists.is_empty() && !candidate_artists.is_empty();
+    if artists_known
+        && !candidate_artists
+            .iter()
+            .any(|candidate| target_artists.iter().any(|artist| artist_names_match(artist, candidate)))
+    {
         return 0;
     }
     let mut score = 0;
@@ -687,14 +733,10 @@ pub fn score_beatport_track_match(target_name: &str, target_artists: &[String], 
     }
     score += token_overlap_score(target_name, &candidate_name) * 3;
 
-    let candidate_artists = normalize_artist_list(&track.artists);
     if let Some(primary_artist) = target_artists.first() {
         if candidate_artists.iter().any(|artist| artist == primary_artist) {
             score += 180;
-        } else if candidate_artists
-            .iter()
-            .any(|artist| artist.contains(primary_artist) || primary_artist.contains(artist))
-        {
+        } else if candidate_artists.iter().any(|artist| names_overlap(artist, primary_artist)) {
             score += 90;
         }
     }
@@ -704,10 +746,7 @@ pub fn score_beatport_track_match(target_name: &str, target_artists: &[String], 
         if candidate_artists.iter().any(|candidate| candidate == artist) {
             exact_artist_hits += 1;
             score += 70;
-        } else if candidate_artists
-            .iter()
-            .any(|candidate| candidate.contains(artist) || artist.contains(candidate))
-        {
+        } else if candidate_artists.iter().any(|candidate| names_overlap(candidate, artist)) {
             score += 30;
         }
     }
@@ -762,6 +801,67 @@ mod tests {
         let artists = normalize_artist_list("deadmau5");
         let s = score_beatport_track_match(&name, &artists, &track("A Totally Different Song", "Nobody"));
         assert!(s < MATCH_THRESHOLD, "unrelated track should fail, got {s}");
+    }
+
+    #[test]
+    fn same_title_by_someone_else_is_not_a_match() {
+        let name = normalize_match_text("Strobe");
+        let artists = normalize_artist_list("deadmau5");
+        assert_eq!(score_beatport_track_match(&name, &artists, &track("Strobe", "Some Cover Band")), 0);
+        // Every listed artist gets a look, and none of them is here either.
+        let artists = normalize_artist_list("deadmau5, Kaskade");
+        assert_eq!(score_beatport_track_match(&name, &artists, &track("Strobe", "Cover Band, Other Band")), 0);
+    }
+
+    #[test]
+    fn true_matches_survive_differently_formatted_artists() {
+        let cases = [
+            // Spotify lists a featured artist Beatport doesn't, and the reverse.
+            ("Strobe", "deadmau5", "Strobe", "deadmau5, Kaskade"),
+            ("Strobe", "deadmau5, Kaskade", "Strobe", "deadmau5"),
+            // Only the second Beatport artist is credited on Spotify.
+            ("Strobe", "Kaskade, deadmau5", "Strobe", "deadmau5"),
+            // One Beatport string against Spotify's separate artists, and the reverse.
+            ("Strobe", "deadmau5 feat. Kaskade", "Strobe", "deadmau5, Kaskade"),
+            ("Strobe", "deadmau5 & Kaskade", "Strobe", "Kaskade, deadmau5"),
+            ("Strobe", "deadmau5, Kaskade", "Strobe", "deadmau5 feat. Kaskade"),
+            // The featured artist sits in the Spotify title.
+            ("Strobe", "deadmau5", "Strobe (feat. Kaskade)", "deadmau5, Kaskade"),
+            // Case, punctuation and accents.
+            ("Red Lights", "TIËSTO", "Red Lights", "Tiesto"),
+            ("Strobe", "Dead.Mau5", "Strobe", "dead mau5"),
+            // "&" against a spelled-out "and", both ways.
+            ("Sun & Moon", "Above & Beyond", "Sun & Moon", "Above and Beyond"),
+            ("Sun & Moon", "Above and Beyond", "Sun & Moon", "Above & Beyond"),
+        ];
+        for (title, artists, sp_title, sp_artists) in cases {
+            let name = normalize_match_text(title);
+            let targets = normalize_artist_list(artists);
+            let s = score_beatport_track_match(&name, &targets, &track(sp_title, sp_artists));
+            assert!(s >= MATCH_THRESHOLD, "{title} / {artists} vs {sp_title} / {sp_artists}: {s}");
+        }
+    }
+
+    /// DC8: a short artist name inside a longer, unrelated one isn't the same artist, so a
+    /// same-titled song by someone else stays unmatched.
+    #[test]
+    fn a_name_inside_another_name_is_not_the_artist() {
+        for (artists, sp_artists) in [("ED", "Fred again.."), ("MK", "Kamkam"), ("mau", "deadmau5")] {
+            let name = normalize_match_text("Same Title");
+            let s = score_beatport_track_match(&name, &normalize_artist_list(artists), &track("Same Title", sp_artists));
+            assert!(s < MATCH_THRESHOLD, "{artists} vs {sp_artists}: {s}");
+        }
+        assert!(has_words("above beyond", "above") && !has_words("fred again", "ed"));
+    }
+
+    /// With no artist to compare on one side, the title decides, as it did before.
+    #[test]
+    fn unknown_artists_are_not_a_mismatch() {
+        let name = normalize_match_text("Strobe");
+        let s = score_beatport_track_match(&name, &[], &track("Strobe", "deadmau5"));
+        assert!(s >= MATCH_THRESHOLD, "no Beatport artist: {s}");
+        let s = score_beatport_track_match(&name, &normalize_artist_list("deadmau5"), &track("Strobe", ""));
+        assert!(s >= MATCH_THRESHOLD, "no Spotify artist: {s}");
     }
 
     #[test]

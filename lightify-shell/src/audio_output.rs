@@ -22,8 +22,11 @@
 //! error callback (device invalidated), so a change lands in well under a second.
 //!
 //! Two rules the rest of the module is built around:
-//! * **Never block without a bound.** Every wait has a deadline, and when no stream is
-//!   pulling audio the writer drops the oldest samples rather than waiting.
+//! * **Never block without a bound.** Every wait has a deadline. When no stream is
+//!   pulling audio (or one stops pulling without saying so) the writer drops the oldest
+//!   samples rather than wait for room, but still takes as long as the audio would have
+//!   taken to play: librespot must not race through songs nobody hears, which would
+//!   mark them played and spend an audio key on each.
 //! * **`stop` must never fail.** librespot calls `exit(1)` if it does.
 //!
 //! **Local playback** (`local_player`) is a second source: a [`LocalSource`] ring of
@@ -63,8 +66,61 @@ const POLL: Duration = Duration::from_millis(100);
 /// discarding the oldest audio instead. Covers a normal device switch comfortably.
 const DEAD_WRITE_GRACE: Duration = Duration::from_millis(400);
 
+/// How long a stream that says it is alive may take nothing from a full ring before it
+/// counts as stalled: it is reopened and `write` carries on as for a dead device. Normal
+/// writes wait tens of milliseconds, so this only has to outlast a driver's hiccup.
+const STALL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The same for a device that has taken nothing since it opened. Laptop speakers waking
+/// from power saving, Bluetooth and some USB devices take seconds to start pulling; a
+/// short deadline reopened them before they ever did, again and again, and no sound
+/// came out at all. A device that truly never starts still gets reopened, just later.
+const FIRST_PULL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How far unheard audio may run behind its clock and still catch up. A wake-up can land
+/// ~15 ms late on Windows, longer than some packets, so the clock runs on from when the
+/// last packet was due rather than from when it was let go. Past this it restarts: the
+/// decoder was waiting for data, and a burst to make up for that would serve nobody.
+const PACE_SLACK: Duration = Duration::from_millis(100);
+
+/// Longest single wait inside `write`, so shutdown and a device coming back are noticed.
+const WRITE_WAIT: Duration = Duration::from_millis(20);
+
+/// How long dropping the sink waits for the output thread. A wedged driver can hold that
+/// thread inside a stream call for good; the thread is then left behind, not waited for.
+const OUTPUT_JOIN_WAIT: Duration = Duration::from_secs(1);
+
 /// Upper bound on letting the buffered tail play out when librespot stops the sink.
 const DRAIN_MAX: Duration = Duration::from_millis(600);
+
+/// How long a stream that reports alive may take nothing before it counts as stalled.
+fn stall_deadline(pulled_since_open: bool) -> Duration {
+    if pulled_since_open { STALL_DEADLINE } else { FIRST_PULL_DEADLINE }
+}
+
+/// Why nothing can be heard, for the user: no output device opened. Set by the output
+/// thread, taken (once per new reason) by the engine, cleared when a device goes live.
+static TROUBLE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+
+fn note_trouble(why: String) {
+    if let Ok(mut g) = TROUBLE.lock() {
+        if g.as_ref().map(|(w, _)| w.as_str()) != Some(why.as_str()) {
+            *g = Some((why, false));
+        }
+    }
+}
+
+/// A reason not yet reported that no audio can be heard, if there is one.
+pub fn take_trouble() -> Option<String> {
+    let mut g = TROUBLE.lock().ok()?;
+    match g.as_mut() {
+        Some((why, reported)) if !*reported => {
+            *reported = true;
+            Some(why.clone())
+        }
+        _ => None,
+    }
+}
 
 /// How often to re-enumerate every output device, and only while a pinned device is
 /// *not* the one playing (waiting for it to come back). Enumeration costs ~150 ms of
@@ -101,9 +157,13 @@ struct Shared {
     /// (not per-`write`) so the grace is paid once per outage: as a local, every
     /// packet waited the full 400 ms again before dropping, throttling the player
     /// thread to a crawl for as long as no device was open. Cleared once alive.
+    /// After the grace, `Pace` is what holds the player thread to real time.
     dead_since: Mutex<Option<Instant>>,
     /// librespot has started the sink (paused = output silence, keep the buffer).
     playing: AtomicBool,
+    /// The current stream has taken audio from the ring at least once since it went
+    /// live: only then can "taking nothing" mean stalled rather than still starting.
+    pulled: AtomicBool,
     /// Ask the output thread to rebuild its stream on its next pass.
     reopen: AtomicBool,
     shutdown: AtomicBool,
@@ -111,6 +171,96 @@ struct Shared {
     target: Mutex<Option<String>>,
     /// Identity for [`OWNER`]: only the current output plays local audio.
     id: u64,
+}
+
+impl Shared {
+    fn new(target: Option<String>) -> Self {
+        Self {
+            ring: Mutex::new(VecDeque::with_capacity(RING_CAP)),
+            drained: Condvar::new(),
+            alive: AtomicBool::new(false),
+            dead_since: Mutex::new(None),
+            playing: AtomicBool::new(false),
+            pulled: AtomicBool::new(false),
+            reopen: AtomicBool::new(true),
+            shutdown: AtomicBool::new(false),
+            target: Mutex::new(target),
+            id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+        }
+    }
+
+    /// Put `data` in the ring, waiting for room as long as something is playing from it.
+    /// With nothing to play it (`local` owns the output, the device is gone, or it has
+    /// stalled) room is made by dropping the oldest audio, once `data` has taken its
+    /// playing time on `pace`. Every path is bounded. Returns whether this call found the
+    /// stream stalled and asked for it to be reopened.
+    fn push(&self, data: &[f32], local: &LocalSource, pace: &mut Pace) -> bool {
+        let mut stalled = false;
+        let mut ring = lock(&self.ring);
+        // The fill level last seen, and since when. Only this writer adds to the ring, so
+        // a change means the device took audio: no callback has to report anything.
+        let (mut seen_len, mut seen_at) = (ring.len(), Instant::now());
+        let mut due: Option<Instant> = None;
+        while ring.len() + data.len() > RING_CAP {
+            if self.shutdown.load(Ordering::SeqCst) {
+                return stalled;
+            }
+            let now = Instant::now();
+            let unheard = if local.is_active() {
+                // Local playback owns the device, so nothing drains this ring until it
+                // stops (normally Spotify was paused first and we never get here).
+                true
+            } else if self.alive.load(Ordering::SeqCst) {
+                *lock(&self.dead_since) = None;
+                if ring.len() != seen_len {
+                    (seen_len, seen_at) = (ring.len(), now);
+                } else if now.duration_since(seen_at) >= stall_deadline(self.pulled.load(Ordering::Relaxed)) {
+                    // Alive by every report, but taking nothing. The grace below was
+                    // already served waiting here.
+                    self.alive.store(false, Ordering::SeqCst);
+                    self.reopen.store(true, Ordering::SeqCst);
+                    *lock(&self.dead_since) = Some(seen_at);
+                    stalled = true;
+                }
+                false
+            } else {
+                // No device is pulling audio (it vanished and none has opened yet).
+                // Waiting for room here is what used to hang the engine for good.
+                lock(&self.dead_since).get_or_insert(now).elapsed() >= DEAD_WRITE_GRACE
+            };
+            let mut wait = WRITE_WAIT;
+            if unheard {
+                let frames = data.len() / SRC_CHANNELS;
+                let packet = Duration::from_secs_f64(frames as f64 / SRC_RATE);
+                let left = due.get_or_insert_with(|| pace.next_due(now, packet)).saturating_duration_since(now);
+                if left.is_zero() {
+                    let excess = (ring.len() + data.len()).saturating_sub(RING_CAP).min(ring.len());
+                    ring.drain(..excess);
+                    break;
+                }
+                wait = wait.min(left);
+            }
+            ring = self.drained.wait_timeout(ring, wait).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        ring.extend(data.iter().copied());
+        stalled
+    }
+}
+
+/// The clock for audio nobody hears, so it still takes as long as it would to play.
+#[derive(Default)]
+struct Pace {
+    due: Option<Instant>,
+}
+
+impl Pace {
+    /// When a packet of length `packet`, written at `now`, counts as played.
+    fn next_due(&mut self, now: Instant, packet: Duration) -> Instant {
+        let from = self.due.filter(|due| *due + PACE_SLACK >= now).unwrap_or(now);
+        let due = from + packet;
+        self.due = Some(due);
+        due
+    }
 }
 
 /// Ids handed to each `Shared`, and the id of the one registered in [`active`] (the
@@ -182,6 +332,7 @@ pub struct SwitchableSink {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     log: Logger,
+    pace: Pace,
 }
 
 impl SwitchableSink {
@@ -205,17 +356,7 @@ impl SwitchableSink {
     fn spawn(device: Option<String>, log: Logger, on_change: OnChange) -> (Arc<Shared>, Self) {
         let device = device.filter(|d| !d.trim().is_empty());
         *lock(last_target_slot()) = Some(device.clone());
-        let shared = Arc::new(Shared {
-            ring: Mutex::new(VecDeque::with_capacity(RING_CAP)),
-            drained: Condvar::new(),
-            alive: AtomicBool::new(false),
-            dead_since: Mutex::new(None),
-            playing: AtomicBool::new(false),
-            reopen: AtomicBool::new(true),
-            shutdown: AtomicBool::new(false),
-            target: Mutex::new(device),
-            id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
-        });
+        let shared = Arc::new(Shared::new(device));
 
         let thread = {
             let shared = Arc::clone(&shared);
@@ -228,7 +369,7 @@ impl SwitchableSink {
         if thread.is_none() {
             log("audio output: could not start the output thread".into());
         }
-        (Arc::clone(&shared), Self { shared, thread, log })
+        (Arc::clone(&shared), Self { shared, thread, log, pace: Pace::default() })
     }
 }
 
@@ -237,7 +378,15 @@ impl Drop for SwitchableSink {
         self.shared.shutdown.store(true, Ordering::SeqCst);
         self.shared.drained.notify_all();
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            let deadline = Instant::now() + OUTPUT_JOIN_WAIT;
+            while !t.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if t.is_finished() {
+                let _ = t.join();
+            } else {
+                (self.log)("audio output: the output thread is stuck in the driver; leaving it behind".into());
+            }
         }
     }
 }
@@ -282,45 +431,9 @@ impl Sink for SwitchableSink {
             }
         };
         let data = converter.f64_to_f32(samples);
-        let sh = &self.shared;
-        let mut ring = lock(&sh.ring);
-        // Set only while local audio owns the output (see below).
-        let mut local_deadline: Option<Instant> = None;
-        while ring.len() + data.len() > RING_CAP {
-            if sh.shutdown.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            if local_source().is_active() {
-                // Local playback owns the device, so nothing drains this ring until it
-                // stops (normally Spotify was paused first and we never get here).
-                // Waiting for room would stall librespot's player thread - and with it
-                // its command handling - for as long as local audio plays. Hold the
-                // packet about as long as it would take to play, then drop the oldest
-                // audio as for a dead device: librespot keeps a real-time pace, unheard.
-                let frames = data.len() / SRC_CHANNELS;
-                let deadline = *local_deadline
-                    .get_or_insert_with(|| Instant::now() + Duration::from_secs_f64(frames as f64 / SRC_RATE));
-                if Instant::now() >= deadline {
-                    let excess = (ring.len() + data.len()).saturating_sub(RING_CAP).min(ring.len());
-                    ring.drain(..excess);
-                    break;
-                }
-            } else if sh.alive.load(Ordering::SeqCst) {
-                *lock(&sh.dead_since) = None;
-            } else {
-                let since = *lock(&sh.dead_since).get_or_insert_with(Instant::now);
-                if since.elapsed() >= DEAD_WRITE_GRACE {
-                    // No device is pulling audio (it vanished and none has opened yet).
-                    // Waiting here is what used to hang the engine for good; drop the
-                    // oldest audio instead so the player thread keeps moving.
-                    let excess = (ring.len() + data.len()).saturating_sub(RING_CAP).min(ring.len());
-                    ring.drain(..excess);
-                    break;
-                }
-            }
-            ring = sh.drained.wait_timeout(ring, Duration::from_millis(20)).unwrap_or_else(|p| p.into_inner()).0;
+        if self.shared.push(&data, local_source(), &mut self.pace) {
+            (self.log)("audio output: the device stopped taking audio; reopening it".to_string());
         }
-        ring.extend(data.iter().copied());
         Ok(())
     }
 }
@@ -404,6 +517,7 @@ fn output_thread(shared: Arc<Shared>, log: Logger, on_change: OnChange) {
                         // mid-switch in Windows often refuses the first open.
                         if last_failure.as_deref() != Some(e.as_str()) {
                             log(format!("audio output: {e}"));
+                            note_trouble(lightify_i18n::tr!("No sound: the audio output wouldn\u{2019}t open \u{2014} {}", e));
                             last_failure = Some(e);
                         }
                         // ...but not forever on a pin: after `PINNED_OPEN_TRIES`, the next
@@ -423,6 +537,7 @@ fn output_thread(shared: Arc<Shared>, log: Logger, on_change: OnChange) {
                 None => {
                     if last_failure.as_deref() != Some("no output device") {
                         log("audio output: no output device available; waiting for one".into());
+                        note_trouble(lightify_i18n::tr!("No sound: Windows reports no audio output device. Plug in or turn on speakers or headphones."));
                         last_failure = Some("no output device".into());
                     }
                 }
@@ -467,7 +582,11 @@ fn went_live(shared: &Shared, log: &Logger, on_change: &OnChange, name: &str) {
     *lock(&shared.dead_since) = None;
     shared.alive.store(true, Ordering::SeqCst);
     shared.drained.notify_all();
+    shared.pulled.store(false, Ordering::SeqCst);
     log(format!("audio output: playing on \"{name}\""));
+    if let Ok(mut g) = TROUBLE.lock() {
+        *g = None;
+    }
     on_change(name.to_string());
 }
 
@@ -576,6 +695,9 @@ where
             }
             let playing = data_shared.playing.load(Ordering::Relaxed);
             let mut ring = lock(&data_shared.ring);
+            if playing && !ring.is_empty() {
+                data_shared.pulled.store(true, Ordering::Relaxed);
+            }
             for frame in out.chunks_mut(channels) {
                 let (l, r) = if playing { next_frame(&mut rs, &mut ring) } else { (0.0, 0.0) };
                 if channels == 1 {
@@ -783,6 +905,183 @@ fn next_frame(rs: &mut Resampler, ring: &mut VecDeque<f32>) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 100 ms of audio, in samples.
+    const PACKET: usize = (SRC_RATE as usize * SRC_CHANNELS) / 10;
+
+    /// A ring that is full, with `alive` as given and no device: the tests are the device.
+    fn full_ring(alive: bool) -> Arc<Shared> {
+        let shared = Arc::new(Shared::new(None));
+        shared.reopen.store(false, Ordering::SeqCst);
+        shared.alive.store(alive, Ordering::SeqCst);
+        lock(&shared.ring).extend(std::iter::repeat(0.25f32).take(RING_CAP));
+        shared
+    }
+
+    /// Past the grace: the state after a device has been gone for a while.
+    fn gone_for_a_while(shared: &Shared) {
+        *lock(&shared.dead_since) = Instant::now().checked_sub(DEAD_WRITE_GRACE);
+    }
+
+    /// Writes `packets` of 100 ms each, returning how long that took.
+    fn write_packets(shared: &Shared, local: &LocalSource, packets: usize) -> Duration {
+        let (started, mut pace) = (Instant::now(), Pace::default());
+        for n in 0..packets {
+            let data = vec![n as f32; PACKET];
+            shared.push(&data, local, &mut pace);
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    fn pace_runs_on_from_when_the_last_packet_was_due() {
+        let (mut pace, t0, packet) = (Pace::default(), Instant::now(), Duration::from_millis(10));
+        assert_eq!(pace.next_due(t0, packet), t0 + packet);
+        // Woken 15 ms late, longer than a packet: the lost time is caught up.
+        let late = t0 + packet + Duration::from_millis(15);
+        assert_eq!(pace.next_due(late, packet), t0 + packet * 2);
+    }
+
+    #[test]
+    fn pace_starts_over_after_a_real_gap() {
+        let (mut pace, t0, packet) = (Pace::default(), Instant::now(), Duration::from_millis(10));
+        pace.next_due(t0, packet);
+        // The decoder was waiting for data: no burst to make up for it.
+        let later = t0 + packet + PACE_SLACK + Duration::from_millis(1);
+        assert_eq!(pace.next_due(later, packet), later + packet);
+    }
+
+    #[test]
+    fn no_stream_holds_real_time_and_keeps_only_the_newest_audio() {
+        let (shared, local) = (full_ring(false), LocalSource::new());
+        gone_for_a_while(&shared);
+        let took = write_packets(&shared, &local, 8);
+        // 800 ms of audio. It took under 1 ms a packet before.
+        assert!(took >= Duration::from_millis(790), "raced ahead: {took:?}");
+        assert!(took < Duration::from_millis(2000), "fell behind: {took:?}");
+        let ring = lock(&shared.ring);
+        assert!(ring.len() <= RING_CAP);
+        assert_eq!(ring.back(), Some(&7.0));
+    }
+
+    #[test]
+    fn no_stream_serves_the_grace_once_then_keeps_moving() {
+        let (shared, local) = (full_ring(false), LocalSource::new());
+        // A device switch in progress: this first write waits for the grace, no longer.
+        let took = write_packets(&shared, &local, 1);
+        assert!(took >= DEAD_WRITE_GRACE, "gave up early: {took:?}");
+        assert!(took < DEAD_WRITE_GRACE + Duration::from_millis(600), "{took:?}");
+        // The outage is remembered: the next packet only takes its own playing time.
+        let took = write_packets(&shared, &local, 1);
+        assert!(took < Duration::from_millis(350), "paid the grace again: {took:?}");
+    }
+
+    /// Takes 100 ms of audio every 10 ms, a device far faster than any test needs.
+    fn fake_device(shared: &Arc<Shared>) -> (JoinHandle<usize>, Arc<AtomicBool>) {
+        let (shared, stop) = (Arc::clone(shared), Arc::new(AtomicBool::new(false)));
+        let stop_it = Arc::clone(&stop);
+        let device = std::thread::spawn(move || {
+            let mut taken = 0;
+            while !stop_it.load(Ordering::SeqCst) {
+                {
+                    let mut ring = lock(&shared.ring);
+                    let n = ring.len().min(PACKET);
+                    ring.drain(..n);
+                    taken += n;
+                }
+                shared.drained.notify_all();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            taken
+        });
+        (device, stop)
+    }
+
+    #[test]
+    fn a_live_stream_is_waited_for_and_loses_nothing() {
+        let (shared, local) = (full_ring(true), LocalSource::new());
+        let (device, stop) = fake_device(&shared);
+        let mut pace = Pace::default();
+        let mut stalled = false;
+        for _ in 0..40 {
+            stalled |= shared.push(&vec![0.5f32; PACKET], &local, &mut pace);
+        }
+        stop.store(true, Ordering::SeqCst);
+        let taken = device.join().unwrap();
+        assert!(!stalled);
+        assert!(!shared.reopen.load(Ordering::SeqCst));
+        assert!(shared.alive.load(Ordering::SeqCst));
+        assert_eq!(taken + lock(&shared.ring).len(), RING_CAP + 40 * PACKET);
+    }
+
+    #[test]
+    fn a_stalled_stream_is_reopened_and_never_hangs_the_writer() {
+        // A fake of the driver that can't be produced here: alive by every report, and
+        // nothing ever leaves the ring.
+        let (shared, local) = (full_ring(true), LocalSource::new());
+        shared.pulled.store(true, Ordering::SeqCst);
+        let (started, mut pace) = (Instant::now(), Pace::default());
+        assert!(shared.push(&vec![1.0f32; PACKET], &local, &mut pace));
+        let took = started.elapsed();
+        assert!(took >= STALL_DEADLINE, "gave up early: {took:?}");
+        assert!(took < STALL_DEADLINE + Duration::from_secs(1), "{took:?}");
+        assert!(shared.reopen.load(Ordering::SeqCst), "the output thread is told to rebuild");
+        assert!(!shared.alive.load(Ordering::SeqCst));
+
+        // Until it has, the writer goes on as for a dead device, with no second grace.
+        let took = write_packets(&shared, &local, 3);
+        assert!(took < Duration::from_millis(900), "{took:?}");
+        assert!(took >= Duration::from_millis(290), "raced ahead: {took:?}");
+    }
+
+    #[test]
+    fn a_device_still_starting_is_given_time_before_it_counts_as_stalled() {
+        // A device that has pulled audio before and stops: the short deadline.
+        assert_eq!(stall_deadline(true), STALL_DEADLINE);
+        // One that hasn't started yet (power saving, Bluetooth): longer, so it isn't
+        // reopened before it ever plays, but still reopened if it never does.
+        assert!(stall_deadline(false) > STALL_DEADLINE);
+        assert!(stall_deadline(false) <= Duration::from_secs(10));
+        // Opening a stream forgets the last one's pulling.
+        let shared = Shared::new(None);
+        shared.pulled.store(true, Ordering::SeqCst);
+        let log: Logger = Arc::new(|_| {});
+        let on_change: OnChange = Arc::new(|_| {});
+        went_live(&shared, &log, &on_change, "test");
+        assert!(!shared.pulled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn shutdown_ends_a_wait_promptly() {
+        for alive in [true, false] {
+            let shared = full_ring(alive);
+            let local = LocalSource::new();
+            gone_for_a_while(&shared);
+            let closer = {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    shared.shutdown.store(true, Ordering::SeqCst);
+                })
+            };
+            // Far longer than the test should take, were shutdown missed.
+            let huge = vec![0.0f32; (SRC_RATE as usize * SRC_CHANNELS) * 30];
+            let started = Instant::now();
+            shared.push(&huge, &local, &mut Pace::default());
+            assert!(started.elapsed() < Duration::from_millis(500), "alive: {alive}");
+            closer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn local_audio_owning_the_output_holds_real_time_too() {
+        let (shared, local) = (full_ring(true), LocalSource::new());
+        local.activate(1);
+        let took = write_packets(&shared, &local, 5);
+        assert!(took >= Duration::from_millis(490), "raced ahead: {took:?}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        assert!(!shared.reopen.load(Ordering::SeqCst), "the device isn't at fault");
+    }
 
     fn ring_of(frames: &[(f32, f32)]) -> VecDeque<f32> {
         frames.iter().flat_map(|&(l, r)| [l, r]).collect()

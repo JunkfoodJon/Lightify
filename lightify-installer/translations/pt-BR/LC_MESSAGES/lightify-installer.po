@@ -376,3 +376,23 @@ msgstr "removendo a entrada em Aplicativos"
 #: src/win.rs:223
 msgid "could not start the elevated installer: {}"
 msgstr "não foi possível iniciar o instalador com permissões de administrador: {}"
+
+#: src/win.rs:513
+msgid "Install Lightify to"
+msgstr "Instalar o Lightify em"
+
+#: src/ops.rs:136
+msgid "That folder has other files in it. Pick an empty one, or add \\Lightify to the end."
+msgstr "Essa pasta tem outros arquivos. Escolha uma vazia ou adicione \\Lightify ao final."
+
+#: src/ops.rs:668
+msgid "removing the old copy"
+msgstr "removendo a cópia antiga"
+
+#: src/ops.rs:970
+msgid ""
+"Lightify was removed, but these settings could not be deleted. Close whatever is using them, then delete them yourself:\n"
+"{}"
+msgstr ""
+"O Lightify foi removido, mas estas configurações não puderam ser excluídas. Feche o que as está usando e exclua-as você mesmo:\n"
+"{}"

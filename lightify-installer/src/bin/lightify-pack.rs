@@ -6,6 +6,11 @@
 //! Each FILE is installed under its own file name. LICENSE.md is required (the wizard
 //! shows it before Install), as is Lightify.exe. Called by
 //! lightify-shell/scripts/build-installer.ps1.
+//!
+//!     lightify-pack --extract <setup.exe> <name> <dest>
+//!
+//! Unpacks one payload file, so scripts/stage-release.ps1 can check the app it is about
+//! to publish.
 
 use std::path::PathBuf;
 
@@ -16,8 +21,23 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
+fn extract(setup: &str, name: &str, dest: &str) -> ! {
+    match payload::extract_file(setup.as_ref(), name, dest.as_ref()) {
+        Ok(true) => std::process::exit(0),
+        Ok(false) => eprintln!("lightify-pack: {setup} has no payload file {name}"),
+        Err(e) => eprintln!("lightify-pack: {setup}: {e}"),
+    }
+    std::process::exit(1);
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let cli: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, setup, name, dest] = cli.as_slice() {
+        if flag == "--extract" {
+            extract(setup, name, dest);
+        }
+    }
+    let mut args = cli.into_iter();
     let (mut stub, mut out, mut version) = (None, None, None);
     let mut level = 19;
     let mut threads = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);

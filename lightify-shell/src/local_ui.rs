@@ -22,8 +22,11 @@ pub enum LocalCmd {
     Scanned(Vec<LocalTrack>),
     ScanProgress(usize),
     NodeClick(usize),
-    RowActivate(usize),
-    RowSelect(usize, bool, bool),
+    /// Row clicks carry the track the clicked row showed (`UI_ROWS`), so a list rebuilt
+    /// before the worker reads them (a scan finishing) can't turn them onto another
+    /// track; `None` only when the UI had no row there.
+    RowActivate(usize, Option<PathBuf>),
+    RowSelect(usize, bool, bool, Option<PathBuf>),
     ClearSel,
     Sort(i32),
     Rescan,
@@ -35,7 +38,7 @@ pub enum LocalCmd {
     Volume(f32),
     ToggleShuffle,
     CycleRepeat,
-    CarryBegin(usize),
+    CarryBegin(usize, Option<PathBuf>),
     CarryEnd(i32),
     // Hold-to-select drag over the track list (display rows).
     DragBegin(usize),
@@ -55,6 +58,9 @@ pub enum LocalCmd {
     // (its "5m" times move on).
     RecentPlay(usize),
     RecentRefresh,
+    /// Whether history entries outside the library still exist, looked up on a thread
+    /// of its own (a dead network share must not stall the worker).
+    RecentChecked(Vec<(PathBuf, bool)>),
     // Explorer drag-over / drop (only acted on in Local mode)
     DropHover(Vec<PathBuf>),
     DropCancel,
@@ -68,23 +74,32 @@ pub enum LocalCmd {
     Picked(Vec<PathBuf>),
     FindConfirm,
     FindClose,
-    // context-menu actions (row = display row; the selection when it holds it)
-    MenuPlay(usize),
-    MenuQueue(usize),
-    MenuAddTo(usize, String),
-    MenuNewPlaylist(usize),
-    MenuShowInFolder(usize),
-    QueueShowInFolder(usize),
-    MenuRemoveFromPlaylist(usize),
-    NodePlay(usize),
-    NodeRename(usize),
-    NodeDelete(usize),
+    // Context-menu actions. They run after the menu closes, by when a scan or a track
+    // change may have rebuilt the rows, so each carries what was right-clicked (paths,
+    // ids, positions checked against their path), never a bare row number.
+    /// (the row right-clicked, the tracks the menu was for: the selection or that row)
+    MenuPlay(usize, Vec<PathBuf>),
+    MenuQueue(Vec<PathBuf>),
+    MenuAddTo(Vec<PathBuf>, String),
+    MenuNewPlaylist(Vec<PathBuf>),
+    ShowInFolder(PathBuf),
+    /// (playlist id, its entries by position, each with the path it held)
+    MenuRemoveFromPlaylist(String, Vec<(usize, PathBuf)>),
+    QueueItemPlay(QSrc, PathBuf),
+    QueueItemRemove(QSrc, PathBuf),
+    NodePlay(View),
+    NodeRename(String),
+    /// "Delete playlist": asks first (the confirm dialog Spotify's delete uses).
+    NodeDelete(String),
+    /// The confirm dialog's Yes for the delete it was opened for.
+    DeleteConfirmed,
     NodeNewPlaylist,
-    NodeRemoveFolder(usize),
-    NodeShowInFolder(usize),
+    NodeRemoveFolder(PathBuf),
+    NodeShowInFolder(PathBuf),
     /// The name prompt answered (`Some`) or was cancelled (`None`).
     Named(Option<String>),
-    Player(local_player::Event),
+    /// A player event, with the generation of the `play` it belongs to.
+    Player(u64, local_player::Event),
     Cover(PathBuf, Option<(Vec<u8>, u32, u32, slint::Color)>),
     /// The language changed: everything this view built in Rust, said again.
     Relabel,
@@ -92,7 +107,7 @@ pub enum LocalCmd {
 
 /// What the track list shows.
 #[derive(Clone, PartialEq)]
-enum View {
+pub enum View {
     All,
     Artist(String),
     Album(String, String),
@@ -122,11 +137,27 @@ enum NodeAct {
 
 /// Where a Queue drawer row comes from.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum QSrc {
+pub enum QSrc {
     Current,
     User(usize),
     Order(usize),
 }
+
+/// Where the file `set_next` last gave the player comes from, so the gapless handoff
+/// is followed by position: a list holding one file twice, or a queued copy of the
+/// playing file, then moves on instead of looping.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum NextSrc {
+    /// The front of the user queue.
+    Queue,
+    /// This place in the order.
+    Order(usize),
+    /// Repeat one: the same file again.
+    Same,
+}
+
+/// Unplayable files in a row skipped before playback gives up.
+const MAX_FAILS: u32 = 5;
 
 /// Library filters (saved): what the library views leave out. Playlists are the
 /// user's own picks and always show everything.
@@ -243,8 +274,25 @@ fn load_filters() -> Filters {
 
 fn save_filters(f: &Filters) {
     if let Ok(s) = serde_json::to_string_pretty(f) {
-        let _ = std::fs::write(filters_path(), s);
+        let _ = lightify_core::config::write_atomic(&filters_path(), s.as_bytes());
     }
+}
+
+fn volume_path() -> PathBuf {
+    lightify_core::config::data_dir().join("lightify_shell_local_volume.txt")
+}
+
+/// The Local volume as last set (0.8 the first time).
+fn load_volume() -> f32 {
+    std::fs::read_to_string(volume_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(0.8, |v| v.clamp(0.0, 1.0))
+}
+
+fn save_volume(v: f32) {
+    let _ = lightify_core::config::write_atomic(&volume_path(), format!("{v:.3}").as_bytes());
 }
 
 /// A name the prompt was opened for.
@@ -259,6 +307,9 @@ pub struct LocalState {
     playlists: Vec<LocalPlaylist>,
     folders: Vec<PathBuf>,
     scanning: Option<usize>,
+    /// A scan was asked for while one ran (the sources changed under it): run another
+    /// once it ends, and don't show the one that ran.
+    rescan: bool,
     scanned_once: bool,
     view: View,
     open: BTreeSet<Section>,
@@ -292,16 +343,34 @@ pub struct LocalState {
     shuffle: bool,
     repeat: i32,
     volume: f32,
+    /// The generation of the last `local_player::play`: events of older ones are stale.
+    play_gen: u64,
+    /// What `set_next` last gave the player, and where it comes from.
+    next_src: Option<(NextSrc, PathBuf)>,
+    /// Unplayable files skipped in a row, and the first position reported since the
+    /// last track started (a later one means audio is really playing).
+    fails: u32,
+    first_pos: Option<u64>,
     // find music
     cands: Vec<Candidate>,
     cand_on: Vec<bool>,
+    /// The Find dialog is open (its results may come after it was closed).
+    find_open: bool,
     pending: Option<Pending>,
+    /// The playlist id the delete confirmation is open for.
+    delete_pending: Option<String>,
     // RECENT: the local files played (newest first, with when), each added the moment it
-    // starts — only from the local player, never Spotify. Read from disk on first use.
+    // starts — only from the local player, never Spotify. Read from disk on first use;
+    // while the file is there but can't be read, plays are kept here and not saved
+    // (`history_loaded` stays false), so the file is never written over with less.
     history: Vec<(PathBuf, String)>,
     history_loaded: bool,
     /// What the Recent drawer shows, row by row.
     rview: Vec<PathBuf>,
+    /// History entries outside the library: whether each file still exists (checked off
+    /// the worker, `RecentChecked`), and whether a check is running.
+    recent_known: std::collections::HashMap<PathBuf, bool>,
+    recent_checking: bool,
 }
 
 impl Default for LocalState {
@@ -312,6 +381,7 @@ impl Default for LocalState {
             playlists: Vec::new(),
             folders: Vec::new(),
             scanning: None,
+            rescan: false,
             scanned_once: false,
             view: View::All,
             open: BTreeSet::from([Section::Artists, Section::Playlists]),
@@ -337,12 +407,20 @@ impl Default for LocalState {
             shuffle: false,
             repeat: 0,
             volume: 0.8,
+            play_gen: 0,
+            next_src: None,
+            fails: 0,
+            first_pos: None,
             cands: Vec::new(),
             cand_on: Vec::new(),
+            find_open: false,
             pending: None,
+            delete_pending: None,
             history: Vec::new(),
             history_loaded: false,
             rview: Vec::new(),
+            recent_known: std::collections::HashMap::new(),
+            recent_checking: false,
         }
     }
 }
@@ -353,6 +431,19 @@ thread_local! {
     /// The headless `--shot-local` render: UI writes apply at once to this window
     /// (there is no event loop to post them to).
     static SHOT: std::cell::RefCell<Option<MainWindow>> = const { std::cell::RefCell::new(None) };
+    /// UI thread: the track behind each row of the list and of the Queue drawer, as
+    /// they are on screen (set in the same UI write that puts the rows there). A click
+    /// is sent on with the track it hit, not just its row number.
+    static UI_ROWS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    static UI_QUEUE: std::cell::RefCell<Vec<(QSrc, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn ui_row(i: i32) -> Option<PathBuf> {
+    UI_ROWS.with(|r| usize::try_from(i).ok().and_then(|i| r.borrow().get(i).cloned()))
+}
+
+fn ui_queue(i: i32) -> Option<(QSrc, PathBuf)> {
+    UI_QUEUE.with(|r| usize::try_from(i).ok().and_then(|i| r.borrow().get(i).cloned()))
 }
 
 /// Apply a UI write on the UI thread.
@@ -380,7 +471,7 @@ pub fn load_mode() -> bool {
 }
 
 fn save_mode(on: bool) {
-    let _ = std::fs::write(mode_path(), if on { "local" } else { "spotify" });
+    let _ = lightify_core::config::write_atomic(&mode_path(), if on { "local" } else { "spotify" }.as_bytes());
 }
 
 // ── Wiring (UI thread) ───────────────────────────────────────────────────────
@@ -391,7 +482,7 @@ pub fn install(app: &MainWindow, tx: Tx) {
     // on the right side without a fade.
     app.set_local_mode(load_mode());
     let t = tx.clone();
-    local_player::set_listener(move |ev| send(&t, LocalCmd::Player(ev)));
+    local_player::set_listener(move |gen, ev| send(&t, LocalCmd::Player(gen, ev)));
     let _ = DRAG_TX.set(tx.clone());
     macro_rules! wire {
         ($setter:ident, |$($a:ident),*| $cmd:expr) => {{
@@ -401,8 +492,8 @@ pub fn install(app: &MainWindow, tx: Tx) {
     }
     wire!(on_local_mode_changed, |on| LocalCmd::ModeChanged(on));
     wire!(on_local_node_click, |i| LocalCmd::NodeClick(i.max(0) as usize));
-    wire!(on_local_row_activate, |i| LocalCmd::RowActivate(i.max(0) as usize));
-    wire!(on_local_row_select, |i, c, s| LocalCmd::RowSelect(i.max(0) as usize, c, s));
+    wire!(on_local_row_activate, |i| LocalCmd::RowActivate(i.max(0) as usize, ui_row(i)));
+    wire!(on_local_row_select, |i, c, s| LocalCmd::RowSelect(i.max(0) as usize, c, s, ui_row(i)));
     wire!(on_local_row_clear_sel, | | LocalCmd::ClearSel);
     wire!(on_local_sort, |c| LocalCmd::Sort(c));
     wire!(on_local_find, | | LocalCmd::Find);
@@ -415,7 +506,7 @@ pub fn install(app: &MainWindow, tx: Tx) {
     wire!(on_local_set_volume, |v| LocalCmd::Volume(v));
     wire!(on_local_toggle_shuffle, | | LocalCmd::ToggleShuffle);
     wire!(on_local_cycle_repeat, | | LocalCmd::CycleRepeat);
-    wire!(on_local_carry_begin, |i| LocalCmd::CarryBegin(i.max(0) as usize));
+    wire!(on_local_carry_begin, |i| LocalCmd::CarryBegin(i.max(0) as usize, ui_row(i)));
     wire!(on_local_carry_end, |t| LocalCmd::CarryEnd(t));
     wire!(on_local_find_toggle, |i| LocalCmd::FindToggle(i.max(0) as usize));
     wire!(on_local_find_add_folder, | | LocalCmd::FindAddFolder);
@@ -429,10 +520,18 @@ pub fn install(app: &MainWindow, tx: Tx) {
     wire!(on_local_flt_set_len, |longest, text| LocalCmd::FltLen(longest, text.to_string()));
     wire!(on_local_flt_reset, | | LocalCmd::FltReset);
     wire!(on_local_flt_toggle_type, |i| LocalCmd::FltType(i.max(0) as usize));
-    wire!(on_local_queue_play, |i| LocalCmd::QueuePlay(i.max(0) as usize));
-    wire!(on_local_queue_remove, |i| LocalCmd::QueueRemove(i.max(0) as usize));
+    // Queue rows go as the item they showed (where it sits now is `queue_item`'s job).
+    wire!(on_local_queue_play, |i| match ui_queue(i) {
+        Some((src, p)) => LocalCmd::QueueItemPlay(src, p),
+        None => LocalCmd::QueuePlay(i.max(0) as usize),
+    });
+    wire!(on_local_queue_remove, |i| match ui_queue(i) {
+        Some((src, p)) => LocalCmd::QueueItemRemove(src, p),
+        None => LocalCmd::QueueRemove(i.max(0) as usize),
+    });
     wire!(on_local_queue_clear, | | LocalCmd::QueueClear);
     wire!(on_local_recent_play, |i| LocalCmd::RecentPlay(i.max(0) as usize));
+    wire!(on_local_confirm_accept, | | LocalCmd::DeleteConfirmed);
 }
 
 /// Should play/pause, next and previous (media keys, tray, palette) drive local
@@ -501,6 +600,8 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 if !st.scanned_once && st.tracks.is_empty() {
                     st.filters = load_filters();
                     push_len_fields(st, weak, None);
+                    st.volume = load_volume();
+                    local_player::set_volume(st.volume);
                     st.tracks = local_library::cached();
                     st.playlists = local_library::playlists();
                     refresh(st, weak);
@@ -510,11 +611,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 }
             }
         }
-        LocalCmd::Rescan => {
-            if st.scanning.is_none() {
-                start_scan(st, weak, tx);
-            }
-        }
+        LocalCmd::Rescan => start_scan(st, weak, tx),
         LocalCmd::ScanProgress(n) => {
             if st.scanning.is_some() {
                 st.scanning = Some(n);
@@ -523,6 +620,12 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         }
         LocalCmd::Scanned(tracks) => {
             st.scanning = None;
+            // The sources changed while it ran (a folder added or removed): what it found
+            // is already out of date, and showing it could bring a removed folder back.
+            if std::mem::take(&mut st.rescan) {
+                start_scan(st, weak, tx);
+                return;
+            }
             st.scanned_once = true;
             st.tracks = tracks;
             st.playlists = local_library::playlists();
@@ -547,8 +650,13 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 NodeAct::NewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new())),
             }
         }
-        LocalCmd::RowActivate(row) => play_from(st, row, weak),
-        LocalCmd::RowSelect(row, ctrl, shift) => {
+        LocalCmd::RowActivate(row, path) => {
+            if let Some(row) = clicked_row(st, row, path.as_deref()) {
+                play_from(st, row, weak);
+            }
+        }
+        LocalCmd::RowSelect(row, ctrl, shift, path) => {
+            let Some(row) = clicked_row(st, row, path.as_deref()) else { return };
             if shift {
                 let a = st.anchor.unwrap_or(row);
                 let (lo, hi) = (a.min(row), a.max(row));
@@ -622,43 +730,29 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 play_list(st, list, i, weak);
             }
         }
-        LocalCmd::RecentRefresh => push_recent(st, weak),
-        LocalCmd::QueuePlay(i) => match st.qview.get(i).cloned() {
-            Some((QSrc::Current, _)) => local_player::seek(0),
-            Some((QSrc::User(k), _)) => {
-                if let Some(p) = st.user_queue.remove(k) {
-                    pause_spotify();
-                    local_player::set_volume(st.volume);
-                    local_player::play(&p, 0);
-                    st.now = Some(p);
-                    st.now_ms = 0;
-                    push_rows(st, weak);
-                    push_now(st, weak);
-                }
-            }
-            Some((QSrc::Order(k), _)) => {
-                st.pos = k;
-                start_current(st, weak);
-            }
-            None => {}
-        },
-        LocalCmd::QueueRemove(i) => {
-            match st.qview.get(i).cloned() {
-                Some((QSrc::User(k), _)) => {
-                    st.user_queue.remove(k);
-                }
-                Some((QSrc::Order(k), _)) if k > st.pos => {
-                    let gone = st.order.remove(k);
-                    // ...and out of the list shuffle-off goes back to, so it stays gone.
-                    if let Some(at) = st.source.iter().position(|p| *p == gone) {
-                        st.source.remove(at);
-                    }
-                }
-                _ => return,
-            }
-            set_next(st);
-            push_now(st, weak);
+        LocalCmd::RecentRefresh => {
+            push_recent(st, weak, None);
+            // The drawer opened: look again at the files outside the library (one may
+            // have been deleted, or a share come back), off the worker.
+            check_recent(st, tx, true);
         }
+        LocalCmd::RecentChecked(found) => {
+            st.recent_checking = false;
+            st.recent_known.extend(found);
+            push_recent(st, weak, Some(tx));
+        }
+        LocalCmd::QueuePlay(i) => {
+            if let Some((src, p)) = st.qview.get(i).cloned() {
+                queue_play(st, src, &p, weak);
+            }
+        }
+        LocalCmd::QueueItemPlay(src, p) => queue_play(st, src, &p, weak),
+        LocalCmd::QueueRemove(i) => {
+            if let Some((src, p)) = st.qview.get(i).cloned() {
+                queue_remove(st, src, &p, weak);
+            }
+        }
+        LocalCmd::QueueItemRemove(src, p) => queue_remove(st, src, &p, weak),
         LocalCmd::QueueClear => {
             st.user_queue.clear();
             st.order.truncate(st.pos + 1);
@@ -666,11 +760,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             set_next(st);
             push_now(st, weak);
         }
-        LocalCmd::QueueShowInFolder(i) => {
-            if let Some((_, p)) = st.qview.get(i) {
-                show_in_folder(p);
-            }
-        }
+        LocalCmd::ShowInFolder(p) => show_in_folder(&p),
         LocalCmd::Sort(c) => {
             st.sort = if st.sort.0 == c { (c, !st.sort.1) } else { (c, false) };
             clear_selection(st);
@@ -684,9 +774,10 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         }
         LocalCmd::TogglePlay => {
             if !local_player::active() {
+                st.fails = 0;
                 if let Some(p) = st.now.clone() {
-                    pause_spotify();
-                    local_player::play(&p, st.now_ms);
+                    let ms = st.now_ms;
+                    play_path(st, p, ms);
                 } else if !st.shown.is_empty() {
                     play_from(st, 0, weak);
                 }
@@ -697,8 +788,12 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 local_player::resume();
             }
         }
-        LocalCmd::Next => advance(st, weak, 1),
+        LocalCmd::Next => {
+            st.fails = 0;
+            advance(st, weak, 1);
+        }
         LocalCmd::Prev => {
+            st.fails = 0;
             if st.now_ms > 3000 {
                 local_player::seek(0);
             } else {
@@ -713,6 +808,8 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::Volume(v) => {
             st.volume = v.clamp(0.0, 1.0);
             local_player::set_volume(st.volume);
+            // The bar sends one value per release, not one per pixel dragged.
+            save_volume(st.volume);
         }
         LocalCmd::ToggleShuffle => {
             st.shuffle = !st.shuffle;
@@ -724,8 +821,8 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             set_next(st);
             push_now(st, weak);
         }
-        LocalCmd::CarryBegin(row) => {
-            st.carry = rows_or_selection(st, row);
+        LocalCmd::CarryBegin(row, path) => {
+            st.carry = clicked_row(st, row, path.as_deref()).map(|row| rows_or_selection(st, row)).unwrap_or_default();
             let n = st.carry.len();
             let what = plural(n);
             ui(weak, move |a| a.set_local_carry_what(what.into()));
@@ -734,12 +831,8 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
             let paths = std::mem::take(&mut st.carry);
             if let Some((_, _, Some(id))) = usize::try_from(target).ok().and_then(|t| st.nodes.get(t)) {
                 let id = id.clone();
-                let name = st.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
                 if !paths.is_empty() {
-                    local_library::add_to_playlist(&id, &paths);
-                    st.playlists = local_library::playlists();
-                    crate::set_status(weak, added_to(paths.len(), &name));
-                    refresh(st, weak);
+                    add_to_playlist(st, &paths, &id, weak);
                 }
             }
         }
@@ -777,11 +870,16 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::Find => {
             st.cands.clear();
             st.cand_on.clear();
+            st.find_open = true;
             push_find(st, weak, true, true);
             let tx = tx.clone();
             std::thread::spawn(move || send(&tx, LocalCmd::FindFound(local_library::find_candidates())));
         }
         LocalCmd::FindFound(c) => {
+            // Closed while it was looking: the answer doesn't open it again.
+            if !st.find_open {
+                return;
+            }
             st.cand_on = c.iter().map(|c| !c.already_added).collect();
             st.cands = c;
             push_find(st, weak, true, false);
@@ -789,7 +887,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         LocalCmd::FindToggle(i) => {
             if let Some(on) = st.cand_on.get_mut(i) {
                 *on = !*on;
-                push_find(st, weak, true, false);
+                push_find(st, weak, st.find_open, false);
             }
         }
         LocalCmd::FindAddFolder => {
@@ -802,6 +900,7 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
         }
         LocalCmd::Picked(paths) => {
             if !paths.is_empty() {
+                st.find_open = false;
                 push_find(st, weak, false, false);
                 add_and_rescan(st, &paths, weak, tx);
             }
@@ -814,115 +913,119 @@ pub fn handle(st: &mut LocalState, cmd: LocalCmd, weak: &slint::Weak<MainWindow>
                 .filter(|(c, on)| **on && !c.already_added)
                 .map(|(c, _)| c.path.clone())
                 .collect();
+            st.find_open = false;
             push_find(st, weak, false, false);
             if !paths.is_empty() {
                 add_and_rescan(st, &paths, weak, tx);
             }
         }
-        LocalCmd::FindClose => push_find(st, weak, false, false),
-        LocalCmd::MenuPlay(row) => {
-            let paths = rows_or_selection(st, row);
-            if paths.len() > 1 {
-                play_list(st, paths, 0, weak);
-            } else {
-                play_from(st, row, weak);
+        LocalCmd::FindClose => {
+            st.find_open = false;
+            push_find(st, weak, false, false);
+        }
+        LocalCmd::MenuPlay(row, paths) => {
+            match paths.as_slice() {
+                [] => {}
+                // One track: the list on screen plays from it, if it is still there.
+                [one] => match row_of(st, row, one) {
+                    Some(r) => play_from(st, r, weak),
+                    None => play_list(st, paths, 0, weak),
+                },
+                _ => play_list(st, paths, 0, weak),
             }
         }
-        LocalCmd::MenuQueue(row) => {
-            let paths = rows_or_selection(st, row);
+        LocalCmd::MenuQueue(paths) => {
             let n = paths.len();
             st.user_queue.extend(paths);
             set_next(st);
+            push_queue(st, weak);
             crate::set_status(weak, lightify_i18n::trn!("Added {n} track to the queue", "Added {n} tracks to the queue", n));
         }
-        LocalCmd::MenuAddTo(row, id) => {
-            let paths = rows_or_selection(st, row);
-            local_library::add_to_playlist(&id, &paths);
+        LocalCmd::MenuAddTo(paths, id) => add_to_playlist(st, &paths, &id, weak),
+        LocalCmd::MenuNewPlaylist(paths) => ask_name(st, weak, Pending::NewPlaylist(paths)),
+        LocalCmd::MenuRemoveFromPlaylist(id, entries) => {
+            if !local_library::remove_from_playlist(&id, &entries) {
+                playlists_not_saved(weak);
+            }
             st.playlists = local_library::playlists();
-            let name = st.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
-            crate::set_status(weak, added_to(paths.len(), &name));
+            clear_selection(st);
             refresh(st, weak);
         }
-        LocalCmd::MenuNewPlaylist(row) => {
-            let paths = rows_or_selection(st, row);
-            ask_name(st, weak, Pending::NewPlaylist(paths));
+        LocalCmd::NodePlay(v) => {
+            st.view = v;
+            st.sort = (-1, false);
+            clear_selection(st);
+            refresh(st, weak);
+            play_from(st, 0, weak);
         }
-        LocalCmd::MenuShowInFolder(row) => {
-            if let Some(t) = st.shown.get(row).and_then(|&k| st.tracks.get(k)) {
-                show_in_folder(&t.path);
+        LocalCmd::NodeRename(id) => ask_name(st, weak, Pending::Rename(id)),
+        LocalCmd::NodeDelete(id) => ask_delete(st, weak, id),
+        LocalCmd::DeleteConfirmed => {
+            let Some(id) = st.delete_pending.take() else { return };
+            if !local_library::delete_playlist(&id) {
+                playlists_not_saved(weak);
             }
-        }
-        LocalCmd::MenuRemoveFromPlaylist(row) => {
-            if let View::Playlist(id) = st.view.clone() {
-                let rows: Vec<usize> = if st.selected.contains(&row) { st.selected.iter().copied().collect() } else { vec![row] };
-                let idx: Vec<usize> = rows.iter().filter_map(|r| st.shown_pl.get(*r).copied()).collect();
-                local_library::remove_from_playlist(&id, &idx);
-                st.playlists = local_library::playlists();
+            st.playlists = local_library::playlists();
+            if !st.playlists.iter().any(|p| p.id == id) && st.view == View::Playlist(id) {
+                st.view = View::All;
                 clear_selection(st);
-                refresh(st, weak);
             }
-        }
-        LocalCmd::NodePlay(i) => {
-            if let Some((_, NodeAct::View(v), _)) = st.nodes.get(i).cloned() {
-                st.view = v;
-                st.sort = (-1, false);
-                clear_selection(st);
-                refresh(st, weak);
-                play_from(st, 0, weak);
-            }
-        }
-        LocalCmd::NodeRename(i) => {
-            if let Some((_, _, Some(id))) = st.nodes.get(i).cloned() {
-                ask_name(st, weak, Pending::Rename(id));
-            }
-        }
-        LocalCmd::NodeDelete(i) => {
-            if let Some((_, _, Some(id))) = st.nodes.get(i).cloned() {
-                local_library::delete_playlist(&id);
-                st.playlists = local_library::playlists();
-                if st.view == View::Playlist(id) {
-                    st.view = View::All;
-                }
-                refresh(st, weak);
-            }
+            refresh(st, weak);
         }
         LocalCmd::NodeNewPlaylist => ask_name(st, weak, Pending::NewPlaylist(Vec::new())),
-        LocalCmd::NodeRemoveFolder(i) => {
-            if let Some((_, NodeAct::View(View::Folder(p)), _)) = st.nodes.get(i).cloned() {
-                local_library::remove_folder(&p);
-                if st.view == View::Folder(p) {
-                    st.view = View::All;
-                }
-                start_scan(st, weak, tx);
+        LocalCmd::NodeRemoveFolder(p) => {
+            local_library::remove_folder(&p);
+            if st.view == View::Folder(p) {
+                st.view = View::All;
+                clear_selection(st);
+                refresh(st, weak);
             }
+            start_scan(st, weak, tx);
         }
-        LocalCmd::NodeShowInFolder(i) => {
-            if let Some((_, NodeAct::View(View::Folder(p)), _)) = st.nodes.get(i).cloned() {
-                open_path(&p);
-            }
-        }
+        LocalCmd::NodeShowInFolder(p) => open_path(&p),
         LocalCmd::Named(name) => {
             let Some(p) = st.pending.take() else { return };
-            let Some(name) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else { return };
+            let Some(name) = name.map(|n| n.trim().to_string()) else { return };
+            if name.is_empty() {
+                // Only spaces: the prompt stays up asking for a name (as Spotify's does),
+                // instead of closing on nothing.
+                st.pending = Some(p);
+                ui(weak, |a| {
+                    a.set_name_prompt_note(tr!("Give the playlist a name").into());
+                    a.set_name_prompt_open(true);
+                });
+                return;
+            }
             match p {
-                Pending::NewPlaylist(paths) => {
-                    let id = local_library::create_playlist(&name, &paths);
-                    st.playlists = local_library::playlists();
-                    st.open.insert(Section::Playlists);
-                    if paths.is_empty() {
-                        st.view = View::Playlist(id);
+                Pending::NewPlaylist(paths) => match local_library::create_playlist(&name, &paths) {
+                    Some(id) => {
+                        st.playlists = local_library::playlists();
+                        st.open.insert(Section::Playlists);
+                        if paths.is_empty() {
+                            st.view = View::Playlist(id);
+                            clear_selection(st);
+                        }
+                        crate::set_status(weak, tr!("Created \u{201c}{}\u{201d}", name));
                     }
-                    crate::set_status(weak, tr!("Created \u{201c}{}\u{201d}", name));
-                }
+                    None => playlists_not_saved(weak),
+                },
                 Pending::Rename(id) => {
-                    local_library::rename_playlist(&id, &name);
+                    if !local_library::rename_playlist(&id, &name) {
+                        playlists_not_saved(weak);
+                    }
                     st.playlists = local_library::playlists();
                 }
             }
             refresh(st, weak);
         }
         LocalCmd::Relabel => relabel(st, weak),
-        LocalCmd::Player(ev) => on_player(st, ev, weak, tx),
+        LocalCmd::Player(gen, ev) => {
+            // A `play` started since: what an older one says is about a file no longer
+            // playing (it may have been queued before that `play` and read only now).
+            if gen == st.play_gen {
+                on_player(st, ev, weak, tx);
+            }
+        }
         LocalCmd::Cover(path, px) => {
             if st.now.as_deref() != Some(path.as_path()) {
                 return;
@@ -964,15 +1067,17 @@ pub fn row_menu(st: &LocalState, row: usize) -> Vec<CtxItem> {
     }
     let many = st.selected.contains(&row) && st.selected.len() > 1;
     let n = if many { st.selected.len() } else { 1 };
+    // Resolved now, while the rows are the ones the user right-clicked.
+    let paths = rows_or_selection(st, row);
     let mut items = vec![
         CtxItem::new(
             if many { lightify_i18n::trn!("Play {n} track", "Play {n} tracks", n) } else { tr!("Play") },
-            Cmd::Local(LocalCmd::MenuPlay(row)),
+            Cmd::Local(LocalCmd::MenuPlay(row, paths.clone())),
         ),
-        CtxItem::new(tr!("Add to queue"), Cmd::Local(LocalCmd::MenuQueue(row))),
+        CtxItem::new(tr!("Add to queue"), Cmd::Local(LocalCmd::MenuQueue(paths.clone()))),
     ];
     for p in &st.playlists {
-        items.push(CtxItem::new(tr!("Add to \u{201c}{}\u{201d}", p.name), Cmd::Local(LocalCmd::MenuAddTo(row, p.id.clone()))));
+        items.push(CtxItem::new(tr!("Add to \u{201c}{}\u{201d}", p.name), Cmd::Local(LocalCmd::MenuAddTo(paths.clone(), p.id.clone()))));
     }
     items.push(CtxItem::new(
         if many {
@@ -980,29 +1085,36 @@ pub fn row_menu(st: &LocalState, row: usize) -> Vec<CtxItem> {
         } else {
             tr!("New playlist from track")
         },
-        Cmd::Local(LocalCmd::MenuNewPlaylist(row)),
+        Cmd::Local(LocalCmd::MenuNewPlaylist(paths.clone())),
     ));
     if !many {
-        items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::MenuShowInFolder(row))));
+        if let Some(p) = paths.first() {
+            items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::ShowInFolder(p.clone()))));
+        }
     }
-    if matches!(st.view, View::Playlist(_)) {
+    if let View::Playlist(id) = &st.view {
+        let rows: Vec<usize> = if st.selected.contains(&row) { st.selected.iter().copied().collect() } else { vec![row] };
+        let entries: Vec<(usize, PathBuf)> = rows
+            .iter()
+            .filter_map(|&r| Some((*st.shown_pl.get(r)?, st.tracks[*st.shown.get(r)?].path.clone())))
+            .collect();
         items.push(CtxItem::danger(
             if many { lightify_i18n::trn!("Remove {n} from playlist", "Remove {n} from playlist", n) } else { tr!("Remove from playlist") },
-            Cmd::Local(LocalCmd::MenuRemoveFromPlaylist(row)),
+            Cmd::Local(LocalCmd::MenuRemoveFromPlaylist(id.clone(), entries)),
         ));
     }
     items
 }
 
 pub fn queue_menu(st: &LocalState, i: usize) -> Vec<CtxItem> {
-    let Some((src, _)) = st.qview.get(i) else { return Vec::new() };
+    let Some((src, path)) = st.qview.get(i) else { return Vec::new() };
     let mut items = Vec::new();
     if *src != QSrc::Current {
-        items.push(CtxItem::new(tr!("Play now"), Cmd::Local(LocalCmd::QueuePlay(i))));
+        items.push(CtxItem::new(tr!("Play now"), Cmd::Local(LocalCmd::QueueItemPlay(*src, path.clone()))));
     }
-    items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::QueueShowInFolder(i))));
+    items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::ShowInFolder(path.clone()))));
     if *src != QSrc::Current {
-        items.push(CtxItem::danger(tr!("Remove from queue"), Cmd::Local(LocalCmd::QueueRemove(i))));
+        items.push(CtxItem::danger(tr!("Remove from queue"), Cmd::Local(LocalCmd::QueueItemRemove(*src, path.clone()))));
     }
     items
 }
@@ -1011,14 +1123,14 @@ pub fn node_menu(st: &LocalState, i: usize) -> Vec<CtxItem> {
     let Some((node, act, pl)) = st.nodes.get(i) else { return Vec::new() };
     let mut items = Vec::new();
     if let NodeAct::View(v) = act {
-        items.push(CtxItem::new(tr!("Play"), Cmd::Local(LocalCmd::NodePlay(i))));
-        if pl.is_some() {
-            items.push(CtxItem::new(tr!("Rename"), Cmd::Local(LocalCmd::NodeRename(i))));
-            items.push(CtxItem::danger(tr!("Delete playlist"), Cmd::Local(LocalCmd::NodeDelete(i))));
+        items.push(CtxItem::new(tr!("Play"), Cmd::Local(LocalCmd::NodePlay(v.clone()))));
+        if let Some(id) = pl {
+            items.push(CtxItem::new(tr!("Rename"), Cmd::Local(LocalCmd::NodeRename(id.clone()))));
+            items.push(CtxItem::danger(tr!("Delete playlist"), Cmd::Local(LocalCmd::NodeDelete(id.clone()))));
         }
-        if let View::Folder(_) = v {
-            items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::NodeShowInFolder(i))));
-            items.push(CtxItem::danger(tr!("Remove folder from library"), Cmd::Local(LocalCmd::NodeRemoveFolder(i))));
+        if let View::Folder(p) = v {
+            items.push(CtxItem::new(tr!("Show in folder"), Cmd::Local(LocalCmd::NodeShowInFolder(p.clone()))));
+            items.push(CtxItem::danger(tr!("Remove folder from library"), Cmd::Local(LocalCmd::NodeRemoveFolder(p.clone()))));
         }
     } else if node.kind == 0 && matches!(act, NodeAct::Toggle(Section::Playlists)) {
         items.push(CtxItem::new(tr!("New playlist"), Cmd::Local(LocalCmd::NodeNewPlaylist)));
@@ -1028,9 +1140,15 @@ pub fn node_menu(st: &LocalState, i: usize) -> Vec<CtxItem> {
 
 // ── Library views ────────────────────────────────────────────────────────────
 
+/// Scan the library. One scan at a time: asked for during one, another follows it (two
+/// at once could finish out of order, an older one bringing a removed folder back).
 fn start_scan(st: &mut LocalState, weak: &slint::Weak<MainWindow>, tx: &Tx) {
-    st.scanning = Some(0);
     st.folders = local_library::sources().folders;
+    if st.scanning.is_some() {
+        st.rescan = true;
+        return;
+    }
+    st.scanning = Some(0);
     push_kicker(st, weak);
     let tx = tx.clone();
     std::thread::spawn(move || {
@@ -1060,17 +1178,78 @@ fn add_and_rescan(st: &mut LocalState, paths: &[PathBuf], weak: &slint::Weak<Mai
 }
 
 fn refresh(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
+    let keys = selection_keys(st);
     build_shown(st);
+    remap_selection(st, keys);
     push_tree(st, weak);
     push_rows(st, weak);
     push_now(st, weak);
 }
 
+/// What a shown row is, independent of where it sits: its path, and in a playlist its
+/// position there (a playlist may hold one file twice).
+type RowKey = (PathBuf, Option<usize>);
+
+fn row_key(st: &LocalState, row: usize) -> Option<RowKey> {
+    let path = st.tracks.get(*st.shown.get(row)?)?.path.clone();
+    let pl = matches!(st.view, View::Playlist(_)).then(|| st.shown_pl.get(row).copied()).flatten();
+    Some((path, pl))
+}
+
+/// The selection and its anchor, as rows' identities.
+fn selection_keys(st: &LocalState) -> (Vec<RowKey>, Option<RowKey>) {
+    let sel = st.selected.iter().filter_map(|&r| row_key(st, r)).collect();
+    (sel, st.anchor.and_then(|a| row_key(st, a)))
+}
+
+/// After the rows were rebuilt (a scan, an edit), select the same tracks again where
+/// they now are, so a later action can't land on whatever moved into the old rows.
+fn remap_selection(st: &mut LocalState, (sel, anchor): (Vec<RowKey>, Option<RowKey>)) {
+    if sel.is_empty() && anchor.is_none() {
+        return;
+    }
+    let at: std::collections::HashMap<RowKey, usize> =
+        (0..st.shown.len()).filter_map(|r| Some((row_key(st, r)?, r))).collect();
+    let before = std::mem::take(&mut st.selected);
+    st.selected = sel.iter().filter_map(|k| at.get(k).copied()).collect();
+    st.anchor = anchor.and_then(|k| at.get(&k).copied());
+    if st.selected != before {
+        // A drag in progress holds rows of the old list.
+        st.drag = None;
+    }
+}
+
+/// Where the track `path` the user picked at display row `row` is now: that row while
+/// it still shows it, else wherever it moved; `None` when it is gone from the list.
+fn row_of(st: &LocalState, row: usize, path: &Path) -> Option<usize> {
+    let at = |r: usize| st.shown.get(r).and_then(|&k| st.tracks.get(k)).is_some_and(|t| t.path == path);
+    if at(row) {
+        return Some(row);
+    }
+    (0..st.shown.len()).find(|&r| at(r))
+}
+
+fn add_to_playlist(st: &mut LocalState, paths: &[PathBuf], id: &str, weak: &slint::Weak<MainWindow>) {
+    if local_library::add_to_playlist(id, paths) {
+        st.playlists = local_library::playlists();
+        let name = st.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default();
+        crate::set_status(weak, added_to(paths.len(), &name));
+    } else {
+        playlists_not_saved(weak);
+    }
+    refresh(st, weak);
+}
+
+/// A playlist edit wasn't saved (the playlists file couldn't be read or written).
+fn playlists_not_saved(weak: &slint::Weak<MainWindow>) {
+    crate::set_status(weak, tr!("Couldn\u{2019}t save local playlists \u{2014} their file can\u{2019}t be read or written right now"));
+}
+
 fn track_matches(t: &LocalTrack, f: &str) -> bool {
     f.is_empty()
         || t.title.to_lowercase().contains(f)
-        || t.artist.to_lowercase().contains(f)
-        || t.album.to_lowercase().contains(f)
+        || local_library::shown(&t.artist).to_lowercase().contains(f)
+        || local_library::shown(&t.album).to_lowercase().contains(f)
 }
 
 fn build_shown(st: &mut LocalState) {
@@ -1293,6 +1472,15 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
             *genres.entry(t.genre.clone()).or_default() += 1;
         }
     }
+    // An artist's list (`View::Artist`) also has the tracks they play on under another
+    // album artist (a compilation): counted here too, so the number is the list's.
+    for t in &lib {
+        if t.artist != t.album_artist {
+            if let Some(n) = artists.get_mut(&t.artist) {
+                *n += 1;
+            }
+        }
+    }
     let ci = |s: &String| s.to_lowercase();
     let mut a: Vec<(String, usize)> = artists.into_iter().collect();
     a.sort_by_key(|x| ci(&x.0));
@@ -1301,7 +1489,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     if open {
         for (name, n) in &a {
             let v = View::Artist(name.clone());
-            nodes.push((sub(name, *n, st.view == v, false), NodeAct::View(v), None));
+            nodes.push((sub(&local_library::shown(name), *n, st.view == v, false), NodeAct::View(v), None));
         }
     }
     let mut al: Vec<((String, String), usize)> = albums.into_iter().collect();
@@ -1311,7 +1499,7 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
     if open {
         for ((album, aa), n) in &al {
             let v = View::Album(album.clone(), aa.clone());
-            nodes.push((sub(&format!("{album} \u{00b7} {aa}"), *n, st.view == v, false), NodeAct::View(v), None));
+            nodes.push((sub(&format!("{} \u{00b7} {}", local_library::shown(album), local_library::shown(aa)), *n, st.view == v, false), NodeAct::View(v), None));
         }
     }
     let mut g: Vec<(String, usize)> = genres.into_iter().collect();
@@ -1359,8 +1547,8 @@ fn push_tree(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
 fn view_title(st: &LocalState) -> String {
     match &st.view {
         View::All => tr!("All music"),
-        View::Artist(a) => a.clone(),
-        View::Album(al, _) => al.clone(),
+        View::Artist(a) => local_library::shown(a),
+        View::Album(al, _) => local_library::shown(al),
         View::Genre(g) => g.clone(),
         View::Folder(p) => p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string()),
         View::Recent => tr!("Recently added"),
@@ -1380,8 +1568,8 @@ fn push_rows(st: &LocalState, weak: &slint::Weak<MainWindow>) {
             LocalRow {
                 num: if playing { "\u{25B6}".into() } else { format!("{:02}", i + 1).into() },
                 title: t.title.clone().into(),
-                artist: t.artist.clone().into(),
-                album: t.album.clone().into(),
+                artist: local_library::shown(&t.artist).into(),
+                album: local_library::shown(&t.album).into(),
                 time: fmt_time(t.duration_ms).into(),
                 playing,
                 selected: st.selected.contains(&i),
@@ -1417,7 +1605,9 @@ fn push_rows(st: &LocalState, weak: &slint::Weak<MainWindow>) {
         tr!("Nothing here.")
     };
     let (sc, sd, nsel) = (st.sort.0, st.sort.1, st.selected.len() as i32);
+    let paths: Vec<PathBuf> = st.shown.iter().map(|&k| st.tracks[k].path.clone()).collect();
     ui(weak, move |a| {
+        UI_ROWS.with(|r| *r.borrow_mut() = paths);
         apply_rows(&a, rows);
         a.set_local_title(title.into());
         a.set_local_stats(stats.into());
@@ -1462,7 +1652,7 @@ fn find_rows(st: &LocalState) -> (Vec<LocalCand>, String) {
         .iter()
         .zip(&st.cand_on)
         .map(|(c, on)| LocalCand {
-            name: c.name.clone().into(),
+            name: lightify_i18n::translate(&c.name).into(),
             path: c.path.display().to_string().into(),
             count: lightify_i18n::trn!("{}{} tracks", "{}{} tracks", c.count, thousands(c.count), if c.capped { "+" } else { "" })
                 .into(),
@@ -1492,7 +1682,17 @@ fn relabel(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
         push_rows(st, weak);
     }
     if st.history_loaded {
-        push_recent(st, weak);
+        push_recent(st, weak, None);
+    }
+    // An open delete confirmation of ours (Spotify's is said again by main).
+    if let Some(name) = st.delete_pending.as_ref().and_then(|id| st.playlists.iter().find(|p| &p.id == id)).map(|p| p.name.clone()) {
+        let msg = delete_message(&name);
+        ui(weak, move |a| {
+            if a.get_confirm_open() && a.get_confirm_local() {
+                a.set_confirm_title(tr!("DELETE PLAYLIST").into());
+                a.set_confirm_message(msg.into());
+            }
+        });
     }
     if !st.cands.is_empty() {
         let (cands, confirm) = find_rows(st);
@@ -1515,6 +1715,35 @@ fn relabel(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
 fn clear_selection(st: &mut LocalState) {
     st.selected.clear();
     st.anchor = None;
+}
+
+/// "Delete playlist": open the confirm dialog (the one Spotify's delete uses) for it;
+/// its Yes comes back as `DeleteConfirmed`.
+fn ask_delete(st: &mut LocalState, weak: &slint::Weak<MainWindow>, id: String) {
+    let Some(name) = st.playlists.iter().find(|p| p.id == id).map(|p| p.name.clone()) else { return };
+    st.delete_pending = Some(id);
+    let msg = delete_message(&name);
+    ui(weak, move |a| {
+        a.set_confirm_title(tr!("DELETE PLAYLIST").into());
+        a.set_confirm_message(msg.into());
+        a.set_confirm_local(true);
+        a.set_confirm_open(true);
+    });
+}
+
+/// The delete confirmation's message for a local playlist.
+fn delete_message(name: &str) -> String {
+    tr!("Delete \u{201c}{}\u{201d} from your local playlists?", name)
+}
+
+/// The row a click on display row `row` meant: where the track it showed (`path`, from
+/// `UI_ROWS`) is now. `None` when that track has left the list; a click the UI had no
+/// track for keeps its row number.
+fn clicked_row(st: &LocalState, row: usize, path: Option<&Path>) -> Option<usize> {
+    match path {
+        Some(p) => row_of(st, row, p),
+        None => (row < st.shown.len()).then_some(row),
+    }
 }
 
 /// The selection when `row` is part of it, else just `row` — as paths, in view order.
@@ -1594,6 +1823,8 @@ fn play_list(st: &mut LocalState, list: Vec<PathBuf>, row: usize, weak: &slint::
     if list.is_empty() {
         return;
     }
+    // The user picked something: a new run of skipped files starts from here.
+    st.fails = 0;
     let row = row.min(list.len() - 1);
     st.source = list.clone();
     if st.shuffle {
@@ -1607,13 +1838,22 @@ fn play_list(st: &mut LocalState, list: Vec<PathBuf>, row: usize, weak: &slint::
     start_current(st, weak);
 }
 
-fn start_current(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
-    let Some(p) = st.order.get(st.pos).cloned() else { return };
+/// Every local `play` goes through here: Spotify paused, the volume applied (the
+/// output's own level is 100% until told otherwise), the generation noted so older
+/// players' events are told apart. `play` clears the player's next file; `set_next`
+/// runs again when this file's `Track` comes.
+fn play_path(st: &mut LocalState, path: PathBuf, ms: u64) {
     pause_spotify();
     local_player::set_volume(st.volume);
-    local_player::play(&p, 0);
-    st.now = Some(p);
-    st.now_ms = 0;
+    st.play_gen = local_player::play(&path, ms);
+    st.next_src = None;
+    st.now = Some(path);
+    st.now_ms = ms;
+}
+
+fn start_current(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
+    let Some(p) = st.order.get(st.pos).cloned() else { return };
+    play_path(st, p, 0);
     push_rows(st, weak);
     push_now(st, weak);
 }
@@ -1634,42 +1874,69 @@ fn rebuild_order_keep_current(st: &mut LocalState) {
     set_next(st);
 }
 
-/// The file after the current one, by queue, repeat and order (without moving).
-fn peek_next(st: &LocalState) -> Option<PathBuf> {
+/// The file after the current one, by queue, repeat and order (without moving), and
+/// where it comes from.
+fn peek_next(st: &LocalState) -> Option<(NextSrc, PathBuf)> {
     if let Some(q) = st.user_queue.front() {
-        return Some(q.clone());
+        return Some((NextSrc::Queue, q.clone()));
     }
     if st.repeat == 2 {
-        return st.now.clone();
+        return st.now.clone().map(|p| (NextSrc::Same, p));
     }
     match st.order.get(st.pos + 1) {
-        Some(p) => Some(p.clone()),
-        None if st.repeat == 1 => st.order.first().cloned(),
+        Some(p) => Some((NextSrc::Order(st.pos + 1), p.clone())),
+        None if st.repeat == 1 => st.order.first().map(|p| (NextSrc::Order(0), p.clone())),
         None => None,
     }
 }
 
-fn set_next(st: &LocalState) {
-    local_player::set_next(peek_next(st));
+fn set_next(st: &mut LocalState) {
+    st.next_src = peek_next(st);
+    local_player::set_next(st.next_src.as_ref().map(|(_, p)| p.clone()));
+}
+
+/// The player went on to `path` by itself (the gapless next file started, or failed
+/// to): step the queue or the order the way `set_next` said, by position — searching
+/// for the path instead loops a list that holds it twice, and leaves a queued copy of
+/// the playing file at the front of the queue for good.
+fn follow_next(st: &mut LocalState, path: &Path) {
+    match st.next_src.take() {
+        Some((src, p)) if p == path => match src {
+            NextSrc::Queue => {
+                st.user_queue.pop_front();
+            }
+            NextSrc::Order(i) => st.pos = i,
+            NextSrc::Same => {}
+        },
+        // Not what was asked last (that `set_next` reached the player too late): find it,
+        // the queue first, then the order from just after the current place.
+        _ => {
+            if st.user_queue.front().is_some_and(|q| q == path) {
+                st.user_queue.pop_front();
+            } else if let Some(i) = (st.pos + 1..st.order.len()).chain(0..=st.pos).find(|&i| st.order.get(i).is_some_and(|p| p == path)) {
+                st.pos = i;
+            }
+        }
+    }
+    st.now = Some(path.to_path_buf());
 }
 
 /// Step `dir` (+1 / -1) through the order (the user queue first, going forward).
-fn advance(st: &mut LocalState, weak: &slint::Weak<MainWindow>, dir: i32) {
+/// Whether something started (or, at the very start, the track restarted).
+fn advance(st: &mut LocalState, weak: &slint::Weak<MainWindow>, dir: i32) -> bool {
     if dir > 0 {
         if let Some(q) = st.user_queue.pop_front() {
-            pause_spotify();
-            local_player::play(&q, 0);
-            st.now = Some(q);
+            play_path(st, q, 0);
             push_rows(st, weak);
             push_now(st, weak);
-            return;
+            return true;
         }
         if st.pos + 1 < st.order.len() {
             st.pos += 1;
         } else if st.repeat == 1 && !st.order.is_empty() {
             st.pos = 0;
         } else {
-            return;
+            return false;
         }
     } else if st.pos > 0 {
         st.pos -= 1;
@@ -1677,27 +1944,83 @@ fn advance(st: &mut LocalState, weak: &slint::Weak<MainWindow>, dir: i32) {
         st.pos = st.order.len() - 1;
     } else {
         local_player::seek(0);
-        return;
+        return true;
     }
     start_current(st, weak);
+    true
+}
+
+/// Where a Queue drawer item is now: `src` while it still holds `path`, else where
+/// `path` moved to in the same part of the queue (rows are rebuilt on every track
+/// change, so a menu or a click can be a step behind). `None` when it is gone.
+fn queue_item(st: &LocalState, src: QSrc, path: &Path) -> Option<QSrc> {
+    match src {
+        QSrc::Current => (st.now.as_deref() == Some(path)).then_some(QSrc::Current),
+        QSrc::User(k) => {
+            if st.user_queue.get(k).is_some_and(|p| p == path) {
+                return Some(src);
+            }
+            st.user_queue.iter().position(|p| p == path).map(QSrc::User)
+        }
+        QSrc::Order(k) => {
+            if k > st.pos && st.order.get(k).is_some_and(|p| p == path) {
+                return Some(src);
+            }
+            (st.pos + 1..st.order.len()).find(|&i| st.order[i] == path).map(QSrc::Order)
+        }
+    }
+}
+
+fn queue_play(st: &mut LocalState, src: QSrc, path: &Path, weak: &slint::Weak<MainWindow>) {
+    st.fails = 0;
+    match queue_item(st, src, path) {
+        Some(QSrc::Current) => local_player::seek(0),
+        Some(QSrc::User(k)) => {
+            if let Some(p) = st.user_queue.remove(k) {
+                play_path(st, p, 0);
+                push_rows(st, weak);
+                push_now(st, weak);
+            }
+        }
+        Some(QSrc::Order(k)) => {
+            st.pos = k;
+            start_current(st, weak);
+        }
+        None => {}
+    }
+}
+
+fn queue_remove(st: &mut LocalState, src: QSrc, path: &Path, weak: &slint::Weak<MainWindow>) {
+    match queue_item(st, src, path) {
+        Some(QSrc::User(k)) => {
+            st.user_queue.remove(k);
+        }
+        Some(QSrc::Order(k)) => {
+            let gone = st.order.remove(k);
+            // ...and out of the list shuffle-off goes back to, so it stays gone.
+            if let Some(at) = st.source.iter().position(|p| *p == gone) {
+                st.source.remove(at);
+            }
+        }
+        _ => return,
+    }
+    set_next(st);
+    push_now(st, weak);
 }
 
 fn on_player(st: &mut LocalState, ev: local_player::Event, weak: &slint::Weak<MainWindow>, tx: &Tx) {
     match ev {
-        local_player::Event::Track { path, duration_ms } => {
-            // A gapless handoff: follow it in the order / queue.
-            if st.now.as_deref() != Some(path.as_path()) {
-                if st.user_queue.front() == Some(&path) {
-                    st.user_queue.pop_front();
-                } else if let Some(i) = st.order.iter().position(|p| *p == path) {
-                    st.pos = i;
-                }
-                st.now = Some(path.clone());
+        local_player::Event::Track { path, duration_ms, next } => {
+            // A gapless handoff: follow it in the order / queue. (A `play`'s own file is
+            // already `now`.)
+            if next {
+                follow_next(st, &path);
             }
             st.dur_ms = duration_ms;
             st.now_ms = 0;
+            st.first_pos = None;
             st.playing = true;
-            add_local_play(st, path.clone(), weak);
+            add_local_play(st, path.clone(), weak, tx);
             set_next(st);
             push_rows(st, weak);
             push_now(st, weak);
@@ -1717,6 +2040,12 @@ fn on_player(st: &mut LocalState, ev: local_player::Event, weak: &slint::Weak<Ma
         }
         local_player::Event::Position { ms } => {
             st.now_ms = ms;
+            // The clock moved on from where this file started: it really plays.
+            match st.first_pos {
+                None => st.first_pos = Some(ms),
+                Some(first) if ms > first => st.fails = 0,
+                Some(_) => {}
+            }
             let (e, p) = (fmt_time(ms), if st.dur_ms > 0 { (ms as f32 / st.dur_ms as f32).clamp(0.0, 1.0) } else { 0.0 });
             ui(weak, move |a| {
                 a.set_local_now_elapsed(e.into());
@@ -1730,12 +2059,38 @@ fn on_player(st: &mut LocalState, ev: local_player::Event, weak: &slint::Weak<Ma
         local_player::Event::Ended => {
             st.playing = false;
             st.now_ms = 0;
+            // A next file was asked for but came after the player had finished: play it.
+            if let Some((_, p)) = st.next_src.clone() {
+                follow_next(st, &p);
+                play_path(st, p, 0);
+                push_rows(st, weak);
+            }
             push_now(st, weak);
         }
         local_player::Event::Error { path, msg } => {
-            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            crate::set_status(weak, tr!("Can\u{2019}t play \u{201c}{}\u{201d} \u{2014} {}", name, msg));
             st.playing = false;
+            st.fails += 1;
+            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            // The next file failed to start: it takes its place in the order, so the
+            // list moves on past it, not back to it.
+            if st.now.as_deref() != Some(path.as_path()) {
+                follow_next(st, &path);
+            }
+            let msg = if st.fails >= MAX_FAILS {
+                lightify_i18n::trn!(
+                    "Can\u{2019}t play \u{201c}{0}\u{201d} \u{2014} {1}. Stopped: {n} file in a row couldn\u{2019}t be played",
+                    "Can\u{2019}t play \u{201c}{0}\u{201d} \u{2014} {1}. Stopped: {n} files in a row couldn\u{2019}t be played",
+                    st.fails as usize,
+                    name,
+                    msg
+                )
+            } else if advance(st, weak, 1) {
+                tr!("Can\u{2019}t play \u{201c}{}\u{201d} \u{2014} {}. Skipped it", name, msg)
+            } else {
+                tr!("Can\u{2019}t play \u{201c}{}\u{201d} \u{2014} {}", name, msg)
+            };
+            crate::set_status(weak, msg);
+            push_rows(st, weak);
             push_now(st, weak);
         }
     }
@@ -1749,45 +2104,98 @@ fn history_path() -> PathBuf {
     lightify_core::config::data_dir().join("lightify_shell_local_history.json")
 }
 
+/// Read the history file once it can be. A file that is there but can't be read now
+/// leaves `history_loaded` false (tried again next time) and the plays since kept in
+/// memory; once read, those plays go on top of what it held.
 fn ensure_history(st: &mut LocalState) {
-    if !st.history_loaded {
-        st.history_loaded = true;
-        st.history = std::fs::read(history_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    ensure_history_from(st, &history_path());
+}
+
+fn ensure_history_from(st: &mut LocalState, file: &Path) {
+    if st.history_loaded {
+        return;
     }
+    let Ok(saved) = crate::play_history::read_file::<Vec<(PathBuf, String)>>(file) else { return };
+    st.history_loaded = true;
+    st.history.extend(saved.unwrap_or_default());
+    st.history.truncate(HISTORY_KEEP);
 }
 
 /// A local file just started playing (`local_player::Event::Track`): to the top of
 /// Local's Recent, at once.
-fn add_local_play(st: &mut LocalState, path: PathBuf, weak: &slint::Weak<MainWindow>) {
-    ensure_history(st);
+fn add_local_play(st: &mut LocalState, path: PathBuf, weak: &slint::Weak<MainWindow>, tx: &Tx) {
+    add_local_play_to(st, path, &history_path());
+    push_recent(st, weak, Some(tx));
+}
+
+fn add_local_play_to(st: &mut LocalState, path: PathBuf, file: &Path) {
+    ensure_history_from(st, file);
     // Lightify reopened and resumed the file already at the top: the same listen.
     if st.history.first().is_some_and(|(p, at)| *p == path && crate::play_history::continues(at, st.dur_ms)) {
         return;
     }
+    // It is playing, so it is there.
+    st.recent_known.insert(path.clone(), true);
     st.history.insert(0, (path, crate::play_history::now_iso()));
     st.history.truncate(HISTORY_KEEP);
-    if let Ok(b) = serde_json::to_vec(&st.history) {
-        let _ = lightify_core::config::write_atomic(&history_path(), &b);
+    // Not written over a file that couldn't be read (it would lose what it holds).
+    if st.history_loaded {
+        if let Ok(b) = serde_json::to_vec(&st.history) {
+            let _ = lightify_core::config::write_atomic(file, &b);
+        }
     }
-    push_recent(st, weak);
 }
 
-/// The Recent drawer in Local mode: the files played, newest first (files that have
-/// gone missing are left out).
-fn push_recent(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
+/// Look up, on a thread of its own, whether the history's files outside the library
+/// still exist: those not known yet, or (`all`) every one. One lookup at a time.
+fn check_recent(st: &mut LocalState, tx: &Tx, all: bool) {
+    if st.recent_checking {
+        return;
+    }
+    let lib: std::collections::HashSet<&Path> = st.tracks.iter().map(|t| t.path.as_path()).collect();
+    let mut paths: Vec<PathBuf> = st
+        .history
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|p| !lib.contains(p.as_path()) && (all || !st.recent_known.contains_key(*p)))
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return;
+    }
+    st.recent_checking = true;
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let found = paths.into_iter().map(|p| {
+            let ok = p.is_file();
+            (p, ok)
+        });
+        send(&tx, LocalCmd::RecentChecked(found.collect()));
+    });
+}
+
+/// The Recent drawer in Local mode: the files played, newest first. A file outside the
+/// library shows once it is known to exist (looked up off the worker: `check_recent`,
+/// when `tx` is given); gone ones are left out.
+fn push_recent(st: &mut LocalState, weak: &slint::Weak<MainWindow>, tx: Option<&Tx>) {
     ensure_history(st);
+    if let Some(tx) = tx {
+        check_recent(st, tx, false);
+    }
     let by_path: std::collections::HashMap<&Path, &LocalTrack> = st.tracks.iter().map(|t| (t.path.as_path(), t)).collect();
     let mut view = Vec::new();
     let mut rows = Vec::new();
     for (p, at) in &st.history {
         let t = by_path.get(p.as_path());
-        if t.is_none() && !p.is_file() {
+        if t.is_none() && st.recent_known.get(p) != Some(&true) {
             continue;
         }
         view.push(p.clone());
         rows.push(crate::SideRow {
             name: t.map(|t| t.title.clone()).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()).into(),
-            artist: t.map(|t| t.artist.clone()).unwrap_or_default().into(),
+            artist: t.map(|t| local_library::shown(&t.artist)).unwrap_or_default().into(),
             time: crate::rel_time(at).into(),
             playing: st.playing && st.now.as_deref() == Some(p.as_path()),
             selected: false,
@@ -1814,7 +2222,7 @@ fn push_queue(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
             let t = by_path.get(p.as_path());
             crate::SideRow {
                 name: t.map(|t| t.title.clone()).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()).into(),
-                artist: t.map(|t| t.artist.clone()).unwrap_or_default().into(),
+                artist: t.map(|t| local_library::shown(&t.artist)).unwrap_or_default().into(),
                 time: t.map(|t| fmt_time(t.duration_ms)).unwrap_or_default().into(),
                 playing: *src == QSrc::Current,
                 selected: false,
@@ -1822,8 +2230,11 @@ fn push_queue(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
             }
         })
         .collect();
-    st.qview = q;
-    ui(weak, move |a| a.set_local_queue_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows)))));
+    st.qview = q.clone();
+    ui(weak, move |a| {
+        UI_QUEUE.with(|r| *r.borrow_mut() = q);
+        a.set_local_queue_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+    });
 }
 
 fn push_now(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
@@ -1835,8 +2246,8 @@ fn push_now(st: &mut LocalState, weak: &slint::Weak<MainWindow>) {
         .map(|t| t.title.clone())
         .or_else(|| st.now.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let artist = t.as_ref().map(|t| t.artist.clone()).unwrap_or_default();
-    let album = t.as_ref().map(|t| t.album.clone()).unwrap_or_default();
+    let artist = t.as_ref().map(|t| local_library::shown(&t.artist)).unwrap_or_default();
+    let album = t.as_ref().map(|t| local_library::shown(&t.album)).unwrap_or_default();
     let dur = if st.dur_ms > 0 { st.dur_ms } else { t.as_ref().map(|t| t.duration_ms).unwrap_or(0) };
     let (elapsed, duration) = (fmt_time(st.now_ms), fmt_time(dur));
     let progress = if dur > 0 { (st.now_ms as f32 / dur as f32).clamp(0.0, 1.0) } else { 0.0 };
@@ -1862,7 +2273,7 @@ fn open_path(p: &Path) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("explorer").arg(p).creation_flags(0x0800_0000).spawn();
+        let _ = std::process::Command::new("explorer").raw_arg(quoted_arg(p)).creation_flags(0x0800_0000).spawn();
     }
     #[cfg(not(windows))]
     let _ = p;
@@ -1872,12 +2283,47 @@ fn show_in_folder(p: &Path) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let mut arg = std::ffi::OsString::from("/select,");
-        arg.push(p.as_os_str());
-        let _ = std::process::Command::new("explorer").arg(arg).creation_flags(0x0800_0000).spawn();
+        let _ = std::process::Command::new("explorer").raw_arg(select_arg(p)).creation_flags(0x0800_0000).spawn();
     }
     #[cfg(not(windows))]
     let _ = p;
+}
+
+/// A folder for Explorer to open, quoted and passed raw: Explorer splits its command
+/// line at commas, and the standard quoting leaves a path without spaces bare, so
+/// "Earth,Wind" opened Explorer's default folder instead (as `select_arg`).
+#[cfg(windows)]
+fn quoted_arg(p: &Path) -> std::ffi::OsString {
+    let mut arg = std::ffi::OsString::from("\"");
+    arg.push(p.as_os_str());
+    arg.push("\"");
+    arg
+}
+
+/// Explorer's `/select,"<path>"`, passed raw. Explorer splits its own command line at
+/// commas, and the standard quoting wraps the whole `/select,…` argument (or, with no
+/// space in the path, nothing at all), so a path with a comma selected nothing. A
+/// Windows path can't contain `"`, so the quotes need no escaping.
+#[cfg(windows)]
+fn select_arg(p: &Path) -> std::ffi::OsString {
+    let mut arg = std::ffi::OsString::from("/select,\"");
+    arg.push(p.as_os_str());
+    arg.push("\"");
+    arg
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn a_folder_to_open_is_quoted_whole_commas_and_all() {
+    assert_eq!(quoted_arg(Path::new(r"D:\Music\Earth,Wind")), std::ffi::OsString::from(r#""D:\Music\Earth,Wind""#));
+    assert_eq!(quoted_arg(Path::new(r"C:\A, B\C")), std::ffi::OsString::from(r#""C:\A, B\C""#));
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn select_arg_quotes_paths_with_commas_and_spaces() {
+    let p = Path::new(r"C:\Music\Earth, Wind & Fire\01 September.flac");
+    assert_eq!(select_arg(p), std::ffi::OsString::from(r#"/select,"C:\Music\Earth, Wind & Fire\01 September.flac""#));
 }
 
 /// The native picker: a folder (`folder`) or audio files. Empty when cancelled.
@@ -1942,7 +2388,10 @@ fn pick(_folder: bool) -> Vec<PathBuf> {
 /// Fill the Local view with sample data for a render: `library` (an artist open, a
 /// track playing), `find` (the Find dialog), `drop` (an Explorer drag over it),
 /// `carry` (tracks carried onto a playlist), `now` (the now-playing view), `filters`
-/// (the filter panel, Music only + WAV off), `queue` (the Queue drawer) or `empty`.
+/// (the filter panel, Music only + WAV off), `queue` (the Queue drawer), `filtered`
+/// (the library filtered by "Ellis", the box showing it), `menu` (a playlist row's
+/// menu with 24 playlists in it; `menu-short` with the usual two), `confirm` (deleting a local playlist), `find-many`
+/// (the Find dialog with more folders than fit) or `empty`.
 pub fn shot(app: &MainWindow, variant: &str) {
     SHOT.with(|s| *s.borrow_mut() = Some(app.clone_strong()));
     let weak = app.as_weak();
@@ -1993,6 +2442,12 @@ pub fn shot(app: &MainWindow, variant: &str) {
             tracks: idx.iter().map(|&i| st.tracks[i].path.clone()).collect(),
         };
         st.playlists = vec![pl("lp1", "Late night", &[1, 3, 8, 11]), pl("lp2", "Focus", &[0, 6, 7])];
+        if variant == "menu" {
+            // Enough playlists that the row menu is taller than the window.
+            for i in 1..=22 {
+                st.playlists.push(pl(&format!("lpm{i}"), &format!("Mix {i:02}"), &[i % 12]));
+            }
+        }
         st.view = View::Artist("Ellis Marrow".into());
         st.selected = BTreeSet::from([4, 5]);
         st.now = Some(st.tracks[1].path.clone());
@@ -2007,6 +2462,17 @@ pub fn shot(app: &MainWindow, variant: &str) {
             }
             st.view = View::All;
             st.selected.clear();
+        }
+        if variant.starts_with("menu") {
+            st.view = View::Playlist("lp1".into());
+            st.selected.clear();
+        }
+        if variant == "filtered" {
+            // The filter box shows the filter that is on (its text lives on the window).
+            st.filter = "ellis".into();
+            st.view = View::All;
+            st.selected.clear();
+            app.set_local_filter_text("Ellis".into());
         }
         build_shown(&mut st);
         st.order = st.shown.iter().map(|&k| st.tracks[k].path.clone()).collect();
@@ -2032,6 +2498,31 @@ pub fn shot(app: &MainWindow, variant: &str) {
             st.cand_on = vec![false, true, true, false];
             push_find(&st, &weak, true, false);
         }
+        // More suggestions than the dialog has room for: the list scrolls, the buttons stay.
+        "find-many" => {
+            st.cands = (0..9)
+                .map(|i| Candidate {
+                    name: ["Music", "Downloads", "Desktop", "OneDrive \u{2014} Music", "Lightify downloads"]
+                        .get(i)
+                        .map_or_else(|| format!(r"{}:\Music", (b'D' + i as u8 - 5) as char), |s| s.to_string()),
+                    path: PathBuf::from(format!(r"C:\Users\you\Folder{i}")),
+                    count: 40 + i * 37,
+                    capped: false,
+                    already_added: i == 0,
+                })
+                .collect();
+            st.cand_on = (0..9).map(|i| i % 2 == 1).collect();
+            push_find(&st, &weak, true, false);
+        }
+        "menu" | "menu-short" => {
+            let items = row_menu(&st, 1);
+            app.set_ctx_items(slint::ModelRc::from(Rc::new(slint::VecModel::from(crate::ctx_rows(&items)))));
+            app.set_ctx_w(crate::menu_width(&items));
+            app.set_ctx_x(420.0);
+            app.set_ctx_y(150.0);
+            app.set_ctx_open(true);
+        }
+        "confirm" => ask_delete(&mut st, &weak, "lp1".into()),
         "drop" => {
             let detail = [
                 lightify_i18n::trn!("{n} audio file", "{n} audio files", 3),
@@ -2058,14 +2549,14 @@ pub fn shot(app: &MainWindow, variant: &str) {
                 .iter()
                 .map(|&(i, secs)| (st.tracks[i].path.clone(), ago(secs)))
                 .collect();
-            push_recent(&mut st, &weak);
+            push_recent(&mut st, &weak, None);
             app.set_sidebar_mode(2);
         }
         // Both histories present, in the Spotify view: RECENT must show only Spotify's.
         "recent-spotify" => {
             st.history_loaded = true;
             st.history = vec![(st.tracks[3].path.clone(), crate::play_history::now_iso())];
-            push_recent(&mut st, &weak);
+            push_recent(&mut st, &weak, None);
             let row = |n: &str, a: &str, t: &str| crate::SideRow { name: n.into(), artist: a.into(), time: t.into(), playing: false, selected: false, pending: 0 };
             app.set_sidebar_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(vec![
                 row("Spotify song one", "Spotify artist", "just now"),
@@ -2181,7 +2672,252 @@ mod tests {
             vec![(QSrc::Current, p("b")), (QSrc::User(0), p("q")), (QSrc::Order(2), p("c")), (QSrc::Order(3), p("d"))]
         );
         // What plays after "b" is the user's queue first.
-        assert_eq!(peek_next(&st), Some(p("q")));
+        assert_eq!(peek_next(&st), Some((NextSrc::Queue, p("q"))));
+    }
+
+    /// What the player's gapless handoffs do to the state: `set_next`'s choice, then
+    /// the `Track` for it (without the player, the history file or a cover thread).
+    fn hand_off(st: &mut LocalState) -> Option<PathBuf> {
+        st.next_src = peek_next(st);
+        let (_, p) = st.next_src.clone()?;
+        follow_next(st, &p);
+        Some(p)
+    }
+
+    #[test]
+    fn gapless_follows_a_playlist_with_repeats_by_position() {
+        let mut st = LocalState::default();
+        let p = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        st.order = vec![p("a"), p("b"), p("a"), p("c")];
+        st.pos = 0;
+        st.now = Some(p("a"));
+        let played: Vec<PathBuf> = std::iter::from_fn(|| hand_off(&mut st)).take(10).collect();
+        // Searching for the path went a, b, a(=0), b, a, ... for ever.
+        assert_eq!(played, [p("b"), p("a"), p("c")]);
+        assert_eq!(st.pos, 3);
+    }
+
+    #[test]
+    fn a_queued_copy_of_the_playing_track_plays_once() {
+        let mut st = LocalState::default();
+        let p = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        st.order = vec![p("a"), p("b")];
+        st.now = Some(p("a"));
+        st.user_queue = VecDeque::from([p("a")]);
+        let played: Vec<PathBuf> = std::iter::from_fn(|| hand_off(&mut st)).take(10).collect();
+        assert_eq!(played, [p("a"), p("b")]);
+        assert!(st.user_queue.is_empty());
+        // Repeat one plays the same file again without moving.
+        st.repeat = 2;
+        assert_eq!(hand_off(&mut st), Some(p("b")));
+        assert_eq!(st.pos, 1);
+    }
+
+    #[test]
+    fn a_handoff_the_player_got_too_late_is_found_after_the_current_place() {
+        let mut st = LocalState::default();
+        let p = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        st.order = vec![p("x"), p("a"), p("x"), p("y")];
+        st.pos = 1;
+        st.now = Some(p("a"));
+        // The player went on to "x" while the list had asked for something else.
+        st.next_src = Some((NextSrc::Queue, p("q")));
+        follow_next(&mut st, &p("x"));
+        assert_eq!(st.pos, 2, "the x after the current place, not the first one");
+    }
+
+    fn lib(names: &[&str]) -> Vec<LocalTrack> {
+        names.iter().map(|n| track(n, 1000)).collect()
+    }
+
+    #[test]
+    fn menu_actions_carry_what_was_right_clicked() {
+        let mut st = LocalState::default();
+        st.tracks = lib(&["a", "b", "c", "d"]);
+        let id = "lp1".to_string();
+        st.playlists = vec![LocalPlaylist {
+            id: id.clone(),
+            name: "Mix".into(),
+            tracks: ["c", "a", "c"].iter().map(|n| PathBuf::from(format!("C:/m/{n}"))).collect(),
+        }];
+        st.view = View::Playlist(id.clone());
+        build_shown(&mut st);
+        st.selected = BTreeSet::from([1, 2]);
+        let items = row_menu(&st, 2);
+        let path = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        let find = |pick: &dyn Fn(&LocalCmd) -> bool| items.iter().find(|i| matches!(&i.cmd, Cmd::Local(c) if pick(c))).map(|i| i.cmd.clone());
+        let Some(Cmd::Local(LocalCmd::MenuQueue(paths))) = find(&|c| matches!(c, LocalCmd::MenuQueue(_))) else { panic!("no queue item") };
+        assert_eq!(paths, [path("a"), path("c")]);
+        let Some(Cmd::Local(LocalCmd::MenuRemoveFromPlaylist(pid, entries))) = find(&|c| matches!(c, LocalCmd::MenuRemoveFromPlaylist(..))) else {
+            panic!("no remove item")
+        };
+        assert_eq!((pid, entries), (id.clone(), vec![(1, path("a")), (2, path("c"))]));
+        // The tree's items name the playlist, not a row.
+        push_tree(&mut st, &slint::Weak::default());
+        let at = st.nodes.iter().position(|n| n.2.as_deref() == Some("lp1")).unwrap();
+        assert!(node_menu(&st, at).iter().any(|i| matches!(&i.cmd, Cmd::Local(LocalCmd::NodeDelete(d)) if *d == id)));
+    }
+
+    #[test]
+    fn a_rebuilt_list_keeps_the_selection_on_the_same_tracks() {
+        let mut st = LocalState::default();
+        st.tracks = lib(&["b", "c", "d"]);
+        build_shown(&mut st);
+        st.selected = BTreeSet::from([1]); // "c"
+        st.anchor = Some(1);
+        let keys = selection_keys(&st);
+        // A scan found "a", which sorts first: every row moves down one.
+        st.tracks = lib(&["a", "b", "c", "d"]);
+        build_shown(&mut st);
+        remap_selection(&mut st, keys);
+        assert_eq!((st.selected.iter().copied().collect::<Vec<_>>(), st.anchor), (vec![2], Some(2)));
+        assert_eq!(row_of(&st, 1, Path::new("C:/m/c")), Some(2), "a menu's row follows its track");
+        // The track gone: nothing selected in its place.
+        let keys = selection_keys(&st);
+        st.tracks = lib(&["a", "b", "d"]);
+        build_shown(&mut st);
+        remap_selection(&mut st, keys);
+        assert!(st.selected.is_empty() && st.anchor.is_none());
+        assert_eq!(row_of(&st, 2, Path::new("C:/m/c")), None);
+    }
+
+    #[test]
+    fn queue_items_are_found_where_they_moved() {
+        let mut st = LocalState::default();
+        let p = |n: &str| PathBuf::from(format!("C:/m/{n}"));
+        st.order = vec![p("a"), p("b"), p("c")];
+        st.user_queue = VecDeque::from([p("q1"), p("q2")]);
+        st.now = Some(p("a"));
+        // The menu was opened on q2 at User(1); q1 has played since.
+        st.user_queue.pop_front();
+        assert_eq!(queue_item(&st, QSrc::User(1), &p("q2")), Some(QSrc::User(0)));
+        // Opened on "c" at Order(2); the list moved on to "b".
+        st.pos = 1;
+        st.now = Some(p("b"));
+        assert_eq!(queue_item(&st, QSrc::Order(2), &p("c")), Some(QSrc::Order(2)));
+        assert_eq!(queue_item(&st, QSrc::Order(1), &p("b")), None, "now playing, not in the queue part");
+        assert_eq!(queue_item(&st, QSrc::Current, &p("a")), None);
+    }
+
+    fn tx() -> (Tx, tokio::sync::mpsc::UnboundedReceiver<Cmd>) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    #[test]
+    fn a_row_click_follows_the_track_it_hit_not_the_row_number() {
+        let mut st = LocalState::default();
+        st.tracks = lib(&["b", "c", "d"]);
+        build_shown(&mut st);
+        let c = PathBuf::from("C:/m/c");
+        assert_eq!(clicked_row(&st, 1, Some(&c)), Some(1));
+        // A scan put "a" first before the worker read the click: "c" is row 2 now.
+        st.tracks = lib(&["a", "b", "c", "d"]);
+        build_shown(&mut st);
+        assert_eq!(clicked_row(&st, 1, Some(&c)), Some(2));
+        // Selecting by that click selects "c", not "b".
+        let (t, _rx) = tx();
+        handle(&mut st, LocalCmd::RowSelect(1, false, false, Some(c.clone())), &slint::Weak::default(), &t);
+        assert_eq!(st.selected.iter().copied().collect::<Vec<_>>(), [2]);
+        // Gone from the list: the click does nothing.
+        st.tracks = lib(&["a", "b", "d"]);
+        build_shown(&mut st);
+        assert_eq!(clicked_row(&st, 1, Some(&c)), None);
+        assert_eq!(clicked_row(&st, 1, None), Some(1), "no track known: the row as before");
+    }
+
+    #[test]
+    fn artist_counts_are_the_lists_they_open() {
+        let mut st = LocalState::default();
+        let t = |name: &str, artist: &str, album_artist: &str| LocalTrack {
+            artist: artist.into(),
+            album_artist: album_artist.into(),
+            ..track(name, 1000)
+        };
+        st.tracks = vec![t("a", "Ada", "Ada"), t("b", "Ada", "Ada"), t("c", "Ada", "Various"), t("d", "Bo", "Various"), t("e", "Cy", "Various")];
+        push_tree(&mut st, &slint::Weak::default());
+        for (i, (node, act, _)) in st.nodes.clone().into_iter().enumerate() {
+            if let NodeAct::View(v @ View::Artist(_)) = act {
+                st.view = v;
+                build_shown(&mut st);
+                assert_eq!(node.count.as_str(), st.shown.len().to_string(), "row {i}: {}", node.label);
+            }
+        }
+        // Ada: her two albums' tracks and the one on the compilation.
+        assert!(st.nodes.iter().any(|n| n.0.label.as_str() == "Ada" && n.0.count.as_str() == "3"));
+    }
+
+    #[test]
+    fn a_blank_name_keeps_the_prompt_asking() {
+        let mut st = LocalState::default();
+        let (t, _rx) = tx();
+        st.pending = Some(Pending::NewPlaylist(Vec::new()));
+        handle(&mut st, LocalCmd::Named(Some("   ".into())), &slint::Weak::default(), &t);
+        assert!(matches!(st.pending, Some(Pending::NewPlaylist(_))), "still waiting for a name");
+        handle(&mut st, LocalCmd::Named(None), &slint::Weak::default(), &t);
+        assert!(st.pending.is_none(), "cancel ends it");
+    }
+
+    #[test]
+    fn delete_playlist_asks_first() {
+        let mut st = LocalState::default();
+        let (t, _rx) = tx();
+        st.playlists = vec![LocalPlaylist { id: "lpx".into(), name: "Keep?".into(), tracks: Vec::new() }];
+        handle(&mut st, LocalCmd::NodeDelete("lpx".into()), &slint::Weak::default(), &t);
+        assert_eq!(st.delete_pending.as_deref(), Some("lpx"));
+        assert_eq!(st.playlists.len(), 1, "nothing deleted before Yes");
+        // An id that isn't a playlist opens nothing.
+        st.delete_pending = None;
+        handle(&mut st, LocalCmd::NodeDelete("nope".into()), &slint::Weak::default(), &t);
+        assert!(st.delete_pending.is_none());
+        // Yes with nothing asked: nothing happens.
+        handle(&mut st, LocalCmd::DeleteConfirmed, &slint::Weak::default(), &t);
+        assert_eq!(st.playlists.len(), 1);
+    }
+
+    #[test]
+    fn recent_looks_up_files_outside_the_library_off_the_worker() {
+        let mut st = LocalState::default();
+        st.history_loaded = true;
+        st.tracks = lib(&["in-lib"]);
+        let gone = PathBuf::from("Z:/nowhere/gone.flac");
+        let elsewhere = std::env::current_exe().unwrap();
+        st.history = vec![
+            (PathBuf::from("C:/m/in-lib"), crate::play_history::now_iso()),
+            (gone.clone(), crate::play_history::now_iso()),
+            (elsewhere.clone(), crate::play_history::now_iso()),
+        ];
+        let (t, mut rx) = tx();
+        // Not known yet: left out for now, and looked up on another thread.
+        push_recent(&mut st, &slint::Weak::default(), Some(&t));
+        assert_eq!(st.rview, [PathBuf::from("C:/m/in-lib")]);
+        assert!(st.recent_checking);
+        let Some(Cmd::Local(LocalCmd::RecentChecked(found))) = rx.blocking_recv() else { panic!("no lookup result") };
+        assert_eq!(found.len(), 2);
+        handle(&mut st, LocalCmd::RecentChecked(found), &slint::Weak::default(), &t);
+        assert_eq!(st.rview, [PathBuf::from("C:/m/in-lib"), elsewhere], "the one that exists shows, the gone one doesn't");
+        assert!(!st.recent_checking && rx.try_recv().is_err(), "nothing left to look up");
+    }
+
+    #[test]
+    fn a_local_history_that_cant_be_read_is_not_written_over() {
+        let dir = std::env::temp_dir().join(format!("lightify-local-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A folder where the file should be: there, but can't be read as one.
+        let file = dir.join("lightify_shell_local_history.json");
+        std::fs::create_dir(&file).unwrap();
+        let mut st = LocalState::default();
+        add_local_play_to(&mut st, PathBuf::from("C:/m/a"), &file);
+        assert!(!st.history_loaded && file.is_dir(), "not written over");
+        assert_eq!(st.history.len(), 1, "the play is kept meanwhile");
+        // Readable again: what it held goes under the play since.
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&vec![(PathBuf::from("C:/m/old"), "2026-11-01T10:00:00Z")]).unwrap()).unwrap();
+        add_local_play_to(&mut st, PathBuf::from("C:/m/b"), &file);
+        let saved: Vec<(PathBuf, String)> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let paths: Vec<PathBuf> = saved.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(paths, [PathBuf::from("C:/m/b"), PathBuf::from("C:/m/a"), PathBuf::from("C:/m/old")]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2198,7 +2934,7 @@ mod tests {
         st.shuffle = false;
         rebuild_order_keep_current(&mut st);
         assert_eq!(st.order, st.source);
-        assert_eq!((st.pos, peek_next(&st)), (0, Some(p("b"))));
+        assert_eq!((st.pos, peek_next(&st)), (0, Some((NextSrc::Order(1), p("b")))));
 
         // Playing a hand-queued song: the list resumes after the order's own place.
         st.shuffle = true;
@@ -2207,6 +2943,6 @@ mod tests {
         st.now = Some(p("q"));
         st.shuffle = false;
         rebuild_order_keep_current(&mut st);
-        assert_eq!((st.pos, peek_next(&st)), (2, Some(p("d"))));
+        assert_eq!((st.pos, peek_next(&st)), (2, Some((NextSrc::Order(3), p("d")))));
     }
 }

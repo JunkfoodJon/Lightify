@@ -36,7 +36,7 @@ isn't code-signed yet, so Windows SmartScreen may say the publisher is unknown; 
 PowerShell and compare:
 
 ```powershell
-Get-FileHash .\Lightify_2.3.13_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.22_x64-setup.exe -Algorithm SHA256
 ```
 
 If you'd rather not trust a prebuilt file, [build it yourself](#build-from-source).
@@ -118,7 +118,7 @@ itself closed and briefly play a few seconds at low volume on your account.
 | Path | What it is |
 |---|---|
 | `lightify-shell/` | The app: UI (`ui/app.slint`), worker, playback engine, Local library, Windows integration |
-| `lightify-shell/vendor/` | Two upstream crates with small patches (`librespot-connect`, Slint's software renderer), used through `[patch.crates-io]` |
+| `lightify-shell/vendor/` | Three upstream crates with small patches (`librespot-connect`, `librespot-core`, Slint's software renderer), used through `[patch.crates-io]` |
 | `lightify-core/` | Spotify session, sign-in, Web API client, Beatport client, update check, data models |
 | `lightify-installer/` | Lightify's own installer, updater and uninstaller, and the tools that pack and sign a release |
 | `lightify-i18n/` | The translation layer the app and the installer share: `.po` reader, plural rules, `tr!` / `trn!`, catalog checks |
@@ -130,8 +130,9 @@ The Downloads panel talks to an optional, separately distributed downloader brid
 is **not** part of this repository. In builds from this source, downloading reports that
 the downloader bridge wasn't found; everything else works as normal.
 
-A few code comments refer to design notes (`PARITY.md`, `UI-PLAN.md`, `LANGUAGE-PLAN.md`)
-that are kept out of this repository.
+A few code comments refer to design and bug-tracking notes (`PARITY.md`, `UI-PLAN.md`,
+`LANGUAGE-PLAN.md`, `ANDROID-PLAN.md`, `BUGS-PLAN.md`, `DESKTOP-BUGS-PLAN.md`) that are kept
+out of this repository.
 
 ## Privacy and security
 

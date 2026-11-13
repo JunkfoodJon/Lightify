@@ -1826,3 +1826,355 @@ msgstr "Mostra Lightify"
 #: src/tray.rs:69 src/tray.rs:81
 msgid "Quit"
 msgstr "Esci"
+
+#. machine translation
+#: ui/app.slint:5529
+msgid "Sign in again"
+msgstr "Accedi di nuovo"
+
+#. machine translation
+#: ui/app.slint:5807
+msgid "Starting the update to Lightify {}…"
+msgstr "Avvio dell'aggiornamento a Lightify {}…"
+
+#. machine translation
+#: ui/app.slint:6274
+msgid "Most features need a Spotify Premium account, including the player and the downloader. Local mode plays your own music files with any account."
+msgstr "La maggior parte delle funzioni richiede un account Spotify Premium, compresi il player e il downloader. La modalità Locale riproduce i tuoi file musicali con qualsiasi account."
+
+#. machine translation
+#: ui/app.slint:6290
+msgid "open"
+msgstr "apri"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copied"
+msgstr "copiato"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copy"
+msgstr "copia"
+
+#. machine translation
+#: ui/app.slint:6379
+msgid "No Spotify to hand? Play the music files on this PC."
+msgstr "Spotify non a portata di mano? Riproduci i file musicali di questo PC."
+
+#. machine translation
+#: ui/app.slint:6389
+msgid "Use Local mode"
+msgstr "Usa la modalità Locale"
+
+#. machine translation
+#: src/audio_engine.rs:350
+msgid "Spotify refused the song’s key: this account may have asked for too many songs too fast"
+msgstr "Spotify ha rifiutato la chiave del brano: forse questo account ha chiesto troppi brani troppo in fretta"
+
+#. machine translation
+#: src/audio_engine.rs:352
+msgid "couldn’t download it from Spotify’s audio servers: check the network, or a firewall or antivirus blocking them"
+msgstr "impossibile scaricarlo dai server audio di Spotify: controlla la rete, o se un firewall o un antivirus li blocca"
+
+#. machine translation
+#: src/audio_engine.rs:354
+msgid "it isn’t available to this account or in this country"
+msgstr "non è disponibile per questo account o in questo paese"
+
+#. machine translation
+#: src/audio_engine.rs:536
+msgid "Couldn’t play that — {}"
+msgstr "Impossibile riprodurlo — {}"
+
+#. machine translation
+#: src/audio_engine.rs:538
+msgid "That song wasn’t in the queue any more, so nothing was removed"
+msgstr "Quel brano non era più in coda, quindi non è stato rimosso nulla"
+
+#. machine translation
+#: src/audio_engine.rs:983
+msgid "Stopped: {} songs in a row couldn’t be played — {}"
+msgstr "Fermato: {} brani di fila non sono stati riprodotti — {}"
+
+#. machine translation
+#: src/audio_engine.rs:984
+msgid "Stopped: {} songs in a row couldn’t be played"
+msgstr "Fermato: {} brani di fila non sono stati riprodotti"
+
+#. machine translation
+#: src/audio_engine.rs:988
+msgid "Skipped a song Spotify can’t play — {}"
+msgstr "Saltato un brano che Spotify non può riprodurre — {}"
+
+#. machine translation
+#: src/audio_engine.rs:989
+msgid "Skipped a song Spotify can’t play"
+msgstr "Saltato un brano che Spotify non può riprodurre"
+
+#. machine translation
+#: src/audio_output.rs:520
+msgid "No sound: the audio output wouldn’t open — {}"
+msgstr "Nessun suono: l'uscita audio non si è aperta — {}"
+
+#. machine translation
+#: src/audio_output.rs:540
+msgid "No sound: Windows reports no audio output device. Plug in or turn on speakers or headphones."
+msgstr "Nessun suono: Windows non rileva alcun dispositivo di uscita audio. Collega o accendi altoparlanti o cuffie."
+
+#. machine translation
+#: src/downloader.rs:842
+msgid "The downloader is running but not answering. It may be busy; try again in a moment."
+msgstr "Il downloader è in esecuzione ma non risponde. Forse è occupato; riprova tra un momento."
+
+#. machine translation
+#: src/local_library.rs:88
+msgid "Unknown artist"
+msgstr "Artista sconosciuto"
+
+#. machine translation
+#: src/local_library.rs:89
+msgid "Unknown album"
+msgstr "Album sconosciuto"
+
+#. machine translation
+#: src/local_library.rs:956
+msgid "Music"
+msgstr "Musica"
+
+#. machine translation
+#: src/local_library.rs:962
+msgid "Desktop"
+msgstr "Desktop"
+
+#. machine translation
+#: src/local_library.rs:969
+msgid "OneDrive — Music"
+msgstr "OneDrive — Musica"
+
+#. machine translation
+#: src/local_library.rs:972
+msgid "Lightify downloads"
+msgstr "Download di Lightify"
+
+#. machine translation
+#: src/local_player.rs:221
+msgid "could not start the player thread: {}"
+msgstr "impossibile avviare il thread del player: {}"
+
+#. machine translation
+#: src/local_player.rs:354
+msgid "the file reports a sample rate of 0 Hz"
+msgstr "il file indica una frequenza di campionamento di 0 Hz"
+
+#. machine translation
+#: src/local_player.rs:356
+msgid "the decoder crashed on this file"
+msgstr "il decoder si è bloccato su questo file"
+
+#. machine translation
+#: src/local_player.rs:622
+msgid "could not open the file: {}"
+msgstr "impossibile aprire il file: {}"
+
+#. machine translation
+#: src/local_player.rs:631
+msgid "unsupported or unreadable audio file: {}"
+msgstr "file audio non supportato o illeggibile: {}"
+
+#. machine translation
+#: src/local_player.rs:637
+msgid "the file has no audio track"
+msgstr "il file non ha una traccia audio"
+
+#. machine translation
+#: src/local_player.rs:646
+msgid "unsupported audio codec: {}"
+msgstr "codec audio non supportato: {}"
+
+#. machine translation
+#: src/local_player.rs:689
+msgid "seek failed: {}"
+msgstr "spostamento non riuscito: {}"
+
+#. machine translation
+#: src/local_player.rs:734
+msgid "could not read the file: {}"
+msgstr "impossibile leggere il file: {}"
+
+#. machine translation
+#: src/local_player.rs:776
+msgid "too many undecodable frames"
+msgstr "troppi frame non decodificabili"
+
+#. machine translation
+#: src/local_player.rs:781
+msgid "could not decode the file: {}"
+msgstr "impossibile decodificare il file: {}"
+
+#. machine translation
+#: src/local_player.rs:809 src/local_player.rs:828 src/local_player.rs:838
+msgid "resampling failed: {}"
+msgstr "ricampionamento non riuscito: {}"
+
+#. machine translation
+#: src/local_player.rs:853
+msgid "the file reports a sample rate of {} Hz, which can’t be played"
+msgstr "il file indica una frequenza di campionamento di {} Hz, che non si può riprodurre"
+
+#. machine translation
+#: src/local_player.rs:865
+msgid "cannot resample from {0} Hz: {1}"
+msgstr "impossibile ricampionare da {0} Hz: {1}"
+
+#. machine translation
+#: src/local_ui.rs:1245
+msgid "Couldn’t save local playlists — their file can’t be read or written right now"
+msgstr "Impossibile salvare le playlist locali — il loro file non si può leggere o scrivere in questo momento"
+
+#. machine translation
+#: src/local_ui.rs:1736
+msgid "Delete “{}” from your local playlists?"
+msgstr "Eliminare «{}» dalle tue playlist locali?"
+
+#. machine translation
+#: src/local_ui.rs:2080
+msgid "Can’t play “{0}” — {1}. Stopped: {n} file in a row couldn’t be played"
+msgid_plural "Can’t play “{0}” — {1}. Stopped: {n} files in a row couldn’t be played"
+msgstr[0] "Impossibile riprodurre «{0}» — {1}. Fermato: {n} file di fila non è stato riprodotto"
+msgstr[1] "Impossibile riprodurre «{0}» — {1}. Fermato: {n} file di fila non sono stati riprodotti"
+
+#. machine translation
+#: src/local_ui.rs:2088
+msgid "Can’t play “{}” — {}. Skipped it"
+msgstr "Impossibile riprodurre «{}» — {}. Saltato"
+
+#. machine translation
+#: src/main.rs:3268
+msgid "Cleared finished downloads"
+msgstr "Download completati rimossi"
+
+#. machine translation
+#: src/main.rs:3277
+msgid "Download queued for retry"
+msgstr "Download in coda per un nuovo tentativo"
+
+#. machine translation
+#: src/main.rs:3289
+msgid "Download cancelled"
+msgstr "Download annullato"
+
+#. machine translation
+#: src/main.rs:3301
+msgid "Deleted downloaded file"
+msgstr "File scaricato eliminato"
+
+#. machine translation
+#: src/main.rs:3331
+msgid "Signing the downloader in to Spotify — if a Spotify page opens in your browser, click Agree."
+msgstr "Accesso del downloader a Spotify — se nel browser si apre una pagina di Spotify, fai clic su Accetta."
+
+#. machine translation
+#: src/main.rs:3802
+msgid "Playback engine isn’t running"
+msgstr "Il motore di riproduzione non è in esecuzione"
+
+#. machine translation
+#: src/main.rs:4639
+msgid "Couldn’t match the selection — {}"
+msgstr "Impossibile abbinare la selezione — {}"
+
+#. machine translation
+#: src/main.rs:5672
+msgid "Finish the Spotify streaming sign-in in your browser"
+msgstr "Completa l'accesso allo streaming di Spotify nel browser"
+
+#. machine translation
+#: src/main.rs:5913
+msgid "the system default"
+msgstr "il predefinito di sistema"
+
+#. machine translation
+#: src/main.rs:5955
+msgid "Sign in to Spotify in your browser with your Premium account"
+msgstr "Accedi a Spotify nel browser con il tuo account Premium"
+
+#. machine translation
+#: src/main.rs:9995 src/main.rs:11679
+msgid "{} / {} loaded"
+msgstr "{} / {} caricati"
+
+#. machine translation
+#: src/main.rs:11083
+msgid "Waiting for Spotify to confirm the new track — try again in a moment."
+msgstr "In attesa che Spotify confermi il nuovo brano — riprova tra un momento."
+
+#. machine translation
+#: src/main.rs:11442
+msgid "the engine registered but Spotify hasn’t listed it yet"
+msgstr "il motore è registrato, ma Spotify non lo elenca ancora"
+
+#. machine translation
+#: src/main.rs:11681
+msgid "{} loaded"
+msgstr "{} caricati"
+
+#. machine translation
+#: src/main.rs:12427
+msgid "Nothing to play"
+msgstr "Niente da riprodurre"
+
+#. machine translation
+#: src/main.rs:12473
+msgid "The player is signed in as “{}”, not the account Lightify uses (“{}”). Sign in again with the same account."
+msgstr "Il player ha eseguito l'accesso come «{}», non con l'account usato da Lightify («{}»). Accedi di nuovo con lo stesso account."
+
+#. machine translation
+#: src/main.rs:12604
+msgid "This is a Spotify Free account. Lightify’s player and downloader need Spotify Premium to work properly. Local mode works with any account."
+msgstr "Questo è un account Spotify Free. Il player e il downloader di Lightify richiedono Spotify Premium per funzionare bene. La modalità Locale funziona con qualsiasi account."
+
+#. machine translation
+#: src/main.rs:12606 src/main.rs:17615
+msgid "This account is Spotify Free. The player needs Spotify Premium, so songs may not play. Local mode works with any account."
+msgstr "Questo account è Spotify Free. Il player richiede Spotify Premium, quindi i brani potrebbero non essere riprodotti. La modalità Locale funziona con qualsiasi account."
+
+#. machine translation
+#: src/main.rs:12607 src/main.rs:17616
+msgid "This account is Spotify Free. The downloader needs Spotify Premium, so downloads may not work."
+msgstr "Questo account è Spotify Free. Il downloader richiede Spotify Premium, quindi i download potrebbero non funzionare."
+
+#. machine translation
+#: src/main.rs:13684
+msgid "Downloads — {}"
+msgstr "Download — {}"
+
+#. machine translation
+#: src/main.rs:14579
+msgid "Couldn't open your web browser to sign in."
+msgstr "Impossibile aprire il browser per l'accesso."
+
+#. machine translation
+#: src/main.rs:14590
+msgid "Timed out waiting for Spotify — click Authorise to try again."
+msgstr "Tempo scaduto in attesa di Spotify — fai clic su Autorizza per riprovare."
+
+#. machine translation
+#: src/main.rs:15120
+msgid "Couldn't start the update check"
+msgstr "Impossibile avviare la ricerca di aggiornamenti"
+
+#. machine translation
+#: src/main.rs:15144
+msgid "Update failed: {}"
+msgstr "Aggiornamento non riuscito: {}"
+
+#. machine translation
+#: src/main.rs:15147
+msgid "Couldn't check for updates: {}"
+msgstr "Impossibile cercare aggiornamenti: {}"
+
+#. machine translation
+#: src/main.rs:16621
+msgid "This playlist is already in your library"
+msgstr "Questa playlist è già nella tua libreria"

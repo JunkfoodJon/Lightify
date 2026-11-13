@@ -244,14 +244,17 @@ component ListRow inherits Rectangle {
     in property <bool> active: false;    // is the active playback source
     in property <bool> playing: false;   // …and playback is running (vs paused)
     in property <bool> liked: false;
-    callback clicked <=> ta.clicked;
-    // Double-click plays the whole playlist (the original's row `dblclick`); the
-    // single click still expands it first, exactly as in the browser.
-    callback double-clicked <=> ta.double-clicked;
+    // (x, y): where the press was, in window coordinates. Double-click plays the whole
+    // playlist (the original's row `dblclick`) while the single click still expands
+    // it first, exactly as in the browser — but the expand removes this row before the
+    // second press, so that press is caught by MainWindow's `dbl-armed` catcher, placed
+    // where this click was.
+    callback clicked(x: length, y: length);
     // Right-click → open the row menu at the pointer (window coordinates).
     callback menu(mx: length, my: length);
     height: 52px;
     ta := TouchArea {
+        clicked => { root.clicked(self.absolute-position.x + self.pressed-x, self.absolute-position.y + self.pressed-y); }
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
                 root.menu(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
@@ -1295,12 +1298,13 @@ component MiniSeekBar inherits Rectangle {
                 root.scrubbing = true;
             }
         }
+        // Left button only: a right or middle click must not seek.
         pointer-event(ev) => {
-            if (ev.kind == PointerEventKind.down) {
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                 root.scrub = clamp(self.mouse-x / root.width, 0.0, 1.0);
                 root.scrubbing = true;
             }
-            if (ev.kind == PointerEventKind.up) {
+            if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left && root.scrubbing) {
                 root.seek(root.scrub);
                 root.scrubbing = false;
             }
@@ -1339,6 +1343,45 @@ component Kicker inherits Text {
     vertical-alignment: center;
     horizontal-stretch: 1;
     overflow: elide;
+}
+
+// The language list under a LangPill (Settings and the first-run page): one row per
+// language, the active one ticked; `picked` gets the row.
+component LangRows inherits VerticalLayout {
+    in property <[DeviceRow]> languages;
+    callback picked(int);
+    for l[i] in root.languages : Rectangle {
+        height: 30px;
+        border-radius: 8px;
+        background: lngr.has-hover ? Pal.surface : transparent;
+        lngr := TouchArea {
+            clicked => {
+                root.picked(i);
+            }
+        }
+        HorizontalLayout {
+            padding-left: 10px; padding-right: 10px;
+            spacing: 14px;
+            Text {
+                text: l.name;
+                color: l.active || lngr.has-hover ? Pal.text : Pal.text2;
+                font-size: 13px; font-weight: l.active ? 600 : 500;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            if l.active : VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 14px; height: 14px;
+                    viewbox-width: 24; viewbox-height: 24;
+                    commands: Icons.check;
+                    fill: transparent; stroke: Pal.accent; stroke-width: 2px;
+                    stroke-line-cap: round; stroke-line-join: round;
+                }
+            }
+        }
+    }
 }
 
 // `.btn` ghost pill (secondary actions). `enabled: false` dims it and ignores clicks.
@@ -1878,32 +1921,43 @@ component LocalLenField inherits Rectangle {
     in-out property <string> text;
     in property <bool> invalid;
     callback commit(string);
+    // Enter: the keyboard goes back to the window (a bare `clear-focus` left nothing
+    // focused, and Ctrl+K went dead).
+    callback done();
+    // Focused with the pointer off it: a press now is a click away (`local-len-away`).
+    callback away-changed(bool);
+    property <bool> away: inp.has-focus && !fta.has-hover;
+    changed away => { root.away-changed(self.away); }
     height: 34px;
     border-radius: 9px;
     background: Pal.bg;
     border-width: 1px;
     border-color: root.invalid ? #e5484d : (inp.has-focus ? Pal.accent.with-alpha(0.6) : Pal.border);
-    // A click anywhere on the field (its label too) puts the cursor in it.
-    TouchArea { mouse-cursor: MouseCursor.text; clicked => { inp.focus(); } }
-    HorizontalLayout {
-        padding-left: 10px; padding-right: 10px; spacing: 6px;
-        Text { text: root.label; vertical-alignment: center; font-size: 11px; color: Pal.text3; overflow: elide; }
-        Rectangle {
-            horizontal-stretch: 1;
-            min-width: inp.preferred-width;
-            inp := TextInput {
-                text <=> root.text;
-                vertical-alignment: center;
-                horizontal-alignment: right;
-                color: Pal.text; font-size: 12px; font-family: Fonts.mono; single-line: true;
-                accepted => { self.clear-focus(); }
-                changed has-focus => { if (!self.has-focus) { root.commit(self.text); } }
-            }
-            if inp.text == "" && !inp.has-focus : Text {
-                width: 100%;
-                text: @tr("any");
-                vertical-alignment: center; horizontal-alignment: right;
-                font-size: 12px; font-family: Fonts.mono; color: Pal.faint;
+    // A click anywhere on the field (its label too) puts the cursor in it. The text
+    // sits INSIDE this area, so `has-hover` holds over the text input as well.
+    fta := TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { inp.focus(); }
+        HorizontalLayout {
+            padding-left: 10px; padding-right: 10px; spacing: 6px;
+            Text { text: root.label; vertical-alignment: center; font-size: 11px; color: Pal.text3; overflow: elide; }
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: inp.preferred-width;
+                inp := TextInput {
+                    text <=> root.text;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    color: Pal.text; font-size: 12px; font-family: Fonts.mono; single-line: true;
+                    accepted => { root.done(); }
+                    changed has-focus => { if (!self.has-focus) { root.commit(self.text); } }
+                }
+                if inp.text == "" && !inp.has-focus : Text {
+                    width: 100%;
+                    text: @tr("any");
+                    vertical-alignment: center; horizontal-alignment: right;
+                    font-size: 12px; font-family: Fonts.mono; color: Pal.faint;
+                }
             }
         }
     }
@@ -2155,6 +2209,10 @@ component LocalView inherits Rectangle {
     callback sort(int);
     callback find();
     callback rescan();
+    // The filter box's text lives on the window (`local-filter-text`): this view is
+    // rebuilt when Local mode or the mini player is reopened, and the box must still
+    // show the filter that is on.
+    in-out property <string> filter-text;
     callback filter-edited(string);
     callback toggle-play();
     callback prev();
@@ -2204,16 +2262,24 @@ component LocalView inherits Rectangle {
             root.collapsed = true;
         }
     }
-    // A hidden filter field must not keep taking keys.
-    changed collapsed => {
-        if (root.collapsed && fin.has-focus) { fin.clear-focus(); }
-    }
+    // A hidden filter field must not keep taking keys. The window's own key handler
+    // takes them instead (MainWindow's `changed left-collapsed`): `clear-focus` here
+    // left nothing focused.
+    // The keyboard back to the window (MainWindow's `hand-back-focus`).
+    callback release-keys();
+    // The window is too narrow for the tree, this view and the drawer together.
+    in property <bool> squeezed: false;
+    // A length field has the keyboard and the pointer is off it (`LocalLenField.away`).
+    in-out property <bool> len-away: false;
+    changed filters-open => { if (!root.filters-open) { root.len-away = false; } }
 
     background: Pal.bg;
     HorizontalLayout {
         // ── the library tree ──
         Rectangle {
-            width: root.collapsed ? 0px : 288px;
+            // Also out of the way of the drawer on a narrow window (MainWindow's
+            // `drawer-squeeze`) — but never while tracks are carried onto a playlist.
+            width: root.collapsed || (root.squeezed && !root.carry-active) ? 0px : 288px;
             background: Pal.panel;
             clip: true;
             // Slides like the Spotify view's left panel.
@@ -2252,6 +2318,7 @@ component LocalView inherits Rectangle {
                             Rectangle {
                                 horizontal-stretch: 1;
                                 fin := TextInput {
+                                    text <=> root.filter-text;
                                     vertical-alignment: center;
                                     color: Pal.text; font-size: 12.5px; single-line: true;
                                     edited => { root.filter-edited(self.text); }
@@ -2261,69 +2328,80 @@ component LocalView inherits Rectangle {
                         }
                     }
                 }
-                if root.filters-open : VerticalLayout {
+                if root.filters-open : ScrollView {
                     vertical-stretch: 0;
-                    padding-left: 12px; padding-right: 12px; padding-top: 2px; padding-bottom: 12px;
-                    Rectangle {
-                        background: Pal.card;
-                        border-radius: 12px;
-                        border-width: 1px;
-                        border-color: Pal.border;
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: 8px;
-                            HorizontalLayout {
+                    // Short of height the panel scrolls, and the tree keeps a couple of rows under
+                    // it (the 44 px header and filter box above, the 1 px rule below).
+                    height: min(fpanel.preferred-height, max(60px, root.height - 88px - 1px - 96px));
+                    viewport-height: fpanel.preferred-height;
+                    fpanel := VerticalLayout {
+                        width: parent.viewport-width;
+                        padding-left: 12px; padding-right: 12px; padding-top: 2px; padding-bottom: 12px;
+                        Rectangle {
+                            background: Pal.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Pal.border;
+                            VerticalLayout {
+                                padding: 12px;
                                 spacing: 8px;
-                                Text { text: @tr("Filters"); vertical-alignment: center; font-size: 13px; font-weight: 600; color: Pal.text; }
-                                Rectangle { horizontal-stretch: 1; }
-                                // Short of room, the note elides first; the title stays whole.
-                                Text { text: root.flt-note; vertical-alignment: center; overflow: elide; font-size: 10.5px; font-family: Fonts.mono; color: root.flt-active ? Pal.accent : Pal.faint; }
-                                if root.flt-custom : Rectangle {
-                                    width: rst.preferred-width + 14px; height: 22px; border-radius: 11px;
-                                    background: rta.has-hover ? Pal.surface : transparent;
-                                    rta := TouchArea { mouse-cursor: pointer; clicked => { root.flt-reset(); } }
-                                    rst := Text { x: 7px; y: (parent.height - self.height) / 2; text: @tr("Reset"); font-size: 11px; color: rta.has-hover ? Pal.text : Pal.text3; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: @tr("Filters"); vertical-alignment: center; font-size: 13px; font-weight: 600; color: Pal.text; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    // Short of room, the note elides first; the title stays whole.
+                                    Text { text: root.flt-note; vertical-alignment: center; overflow: elide; font-size: 10.5px; font-family: Fonts.mono; color: root.flt-active ? Pal.accent : Pal.faint; }
+                                    if root.flt-custom : Rectangle {
+                                        width: rst.preferred-width + 14px; height: 22px; border-radius: 11px;
+                                        background: rta.has-hover ? Pal.surface : transparent;
+                                        rta := TouchArea { mouse-cursor: pointer; clicked => { root.flt-reset(); } }
+                                        rst := Text { x: 7px; y: (parent.height - self.height) / 2; text: @tr("Reset"); font-size: 11px; color: rta.has-hover ? Pal.text : Pal.text3; }
+                                    }
                                 }
-                            }
-                            Text { text: @tr("SHOW"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
-                            HorizontalLayout {
-                                spacing: 4px; alignment: start;
-                                for m[i] in [@tr("All"), @tr("Music only"), @tr("Long sets")] : LocalChip { label: m; on: root.flt-mode == i; clicked => { root.flt-set-mode(i); } }
-                            }
-                            if root.flt-mode > 0 : Text {
-                                text: root.flt-mode == 1 ? @tr("Hides clips under 1:00 \u{2014} songs, long tracks and sets stay.") : @tr("Only tracks of 20:00 or more (mixes, sets).");
-                                font-size: 11px; color: Pal.text3; wrap: word-wrap;
-                            }
-                            Text { text: @tr("LENGTH"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                LocalLenField {
-                                    horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
-                                    label: @tr("Shortest"); text <=> root.flt-min-text; invalid: root.flt-min-bad;
-                                    commit(t) => { root.flt-set-len(false, t); }
+                                Text { text: @tr("SHOW"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                                HorizontalLayout {
+                                    spacing: 4px; alignment: start;
+                                    for m[i] in [@tr("All"), @tr("Music only"), @tr("Long sets")] : LocalChip { label: m; on: root.flt-mode == i; clicked => { root.flt-set-mode(i); } }
                                 }
-                                LocalLenField {
-                                    horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
-                                    label: @tr("Longest"); text <=> root.flt-max-text; invalid: root.flt-max-bad;
-                                    commit(t) => { root.flt-set-len(true, t); }
+                                if root.flt-mode > 0 : Text {
+                                    text: root.flt-mode == 1 ? @tr("Hides clips under 1:00 \u{2014} songs, long tracks and sets stay.") : @tr("Only tracks of 20:00 or more (mixes, sets).");
+                                    font-size: 11px; color: Pal.text3; wrap: word-wrap;
                                 }
-                            }
-                            Text {
-                                text: root.flt-min-bad || root.flt-max-bad ? @tr("Couldn't read that \u{2014} try 90, 1:30, 5m or 1:02:00.") : @tr("Type 90, 1:30, 5m or 1:02:00 \u{00b7} empty = any.");
-                                font-size: 10.5px; wrap: word-wrap;
-                                color: root.flt-min-bad || root.flt-max-bad ? #e5484d : Pal.faint;
-                            }
-                            if root.flt-types.length > 0 : Text { text: @tr("FILE TYPES"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
-                            // Four to a row, however many types the library has.
-                            if root.flt-types.length > 0 : Rectangle {
-                                property <length> cw: (self.width - 3 * 6px) / 4;
-                                height: ceil(root.flt-types.length / 4) * 30px - 6px;
-                                for c[i] in root.flt-types : LocalChip {
-                                    x: Math.mod(i, 4) * (parent.cw + 6px);
-                                    y: floor(i / 4) * 30px;
-                                    width: parent.cw;
-                                    label: c.label; on: c.on;
-                                    clicked => { root.flt-toggle-type(i); }
+                                Text { text: @tr("LENGTH"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    LocalLenField {
+                                        horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
+                                        label: @tr("Shortest"); text <=> root.flt-min-text; invalid: root.flt-min-bad;
+                                        commit(t) => { root.flt-set-len(false, t); }
+                                        done => { root.release-keys(); }
+                                        away-changed(a) => { root.len-away = a; }
+                                    }
+                                    LocalLenField {
+                                        horizontal-stretch: 1; preferred-width: 0px; min-width: 0px;
+                                        label: @tr("Longest"); text <=> root.flt-max-text; invalid: root.flt-max-bad;
+                                        commit(t) => { root.flt-set-len(true, t); }
+                                        done => { root.release-keys(); }
+                                        away-changed(a) => { root.len-away = a; }
+                                    }
+                                }
+                                Text {
+                                    text: root.flt-min-bad || root.flt-max-bad ? @tr("Couldn't read that \u{2014} try 90, 1:30, 5m or 1:02:00.") : @tr("Type 90, 1:30, 5m or 1:02:00 \u{00b7} empty = any.");
+                                    font-size: 10.5px; wrap: word-wrap;
+                                    color: root.flt-min-bad || root.flt-max-bad ? #e5484d : Pal.faint;
+                                }
+                                if root.flt-types.length > 0 : Text { text: @tr("FILE TYPES"); font-size: 10px; font-family: Fonts.mono; letter-spacing: 0.6px; color: Pal.faint; }
+                                // Four to a row, however many types the library has.
+                                if root.flt-types.length > 0 : Rectangle {
+                                    property <length> cw: (self.width - 3 * 6px) / 4;
+                                    height: ceil(root.flt-types.length / 4) * 30px - 6px;
+                                    for c[i] in root.flt-types : LocalChip {
+                                        x: Math.mod(i, 4) * (parent.cw + 6px);
+                                        y: floor(i / 4) * 30px;
+                                        width: parent.cw;
+                                        label: c.label; on: c.on;
+                                        clicked => { root.flt-toggle-type(i); }
+                                    }
                                 }
                             }
                         }
@@ -2583,6 +2661,22 @@ component LocalView inherits Rectangle {
             Text { text: @tr("Files stay where they are \u{2014} Lightify only indexes them. Drop a folder to add everything in it."); horizontal-alignment: center; font-size: 12.5px; color: Pal.text3; }
         }
     }
+    // A carry whose row went away mid-drag (the list changed under it): the row held
+    // the pointer and took the release with it, so the carry never ended. While a row
+    // still holds the pointer this gets nothing; once it is gone, the moves and the
+    // release land here and finish the carry the same way.
+    if root.carry-active : TouchArea {
+        width: 100%; height: 100%;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.move) {
+                // At this view's origin, so these are already view coordinates.
+                root.carry-move(self.mouse-x, self.mouse-y);
+            }
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                root.carry-end();
+            }
+        }
+    }
     // The chip that follows the pointer while tracks are carried.
     if root.carry-active : Rectangle {
         x: root.carry-x + 14px;
@@ -2632,7 +2726,13 @@ component LocalFind inherits Rectangle {
                 }
                 Rectangle { y: parent.height - 1px; height: 1px; background: Pal.surface2; }
             }
-            VerticalLayout {
+            // The suggestions scroll when there are more than fit; the buttons below
+            // always show.
+            ScrollView {
+                height: min(flist.preferred-height, max(60px, root.height - 40px - 56px - fbtns.preferred-height));
+                viewport-height: flist.preferred-height;
+            flist := VerticalLayout {
+                width: parent.viewport-width;
                 padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 4px;
                 spacing: 2px;
                 Text { text: root.busy ? @tr("// looking in the usual places\u{2026}") : @tr("// found in the usual places"); font-size: 11px; font-family: Fonts.mono; color: Pal.text3; }
@@ -2662,6 +2762,7 @@ component LocalFind inherits Rectangle {
                     }
                     Rectangle { y: parent.height - 1px; height: 1px; background: #191919; }
                 }
+            }
             }
             fbtns := HorizontalLayout {
                 padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 18px;
@@ -2868,6 +2969,18 @@ export component MainWindow inherits Window {
 
     // Window chrome (`minimized` / `maximized` are builtin Window properties).
     in-out property <bool> left-collapsed: false;
+    // The drawer is open and the window can't fit the 288 px left panel, the middle
+    // pane's ~310 px minimum (the transport row) and the 300 px drawer side by side:
+    // the left panel (or the Local tree) steps aside, so the drawer isn't pushed off
+    // the window's right edge. It comes back as the drawer closes or the window widens.
+    // Set from change handlers, not a binding: the panel's width is part of the
+    // window's own size request, so a binding on the window's width is a layout loop.
+    property <bool> drawer-squeeze: false;
+    function fit-drawer() {
+        root.drawer-squeeze = root.sidebar-mode != 0 && root.width < 288px + 310px + 300px;
+    }
+    changed width => { root.fit-drawer(); }
+    changed sidebar-mode => { root.fit-drawer(); }
 
     // Cover expand: double-click the cover (or the pane) and the art fills the whole
     // centre pane behind the controls; double-click again to shrink it. A double-click
@@ -2890,7 +3003,8 @@ export component MainWindow inherits Window {
     }
 
     // Self-update (lightify_core::update). state: "idle" | "checking" | "downloading"
-    // | "ready" | "current" | "error". `update-version` = the version on offer.
+    // | "ready" | "installing" (Restart pressed, handing over) | "current" | "error".
+    // `update-version` = the version on offer.
     in property <string> update-state: "idle";
     in property <string> update-version: "";
     in property <string> update-note: "";
@@ -2950,6 +3064,11 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm-open: false;
     in property <string> confirm-title: "DELETE PLAYLIST";
     in property <string> confirm-message: "Are you sure?";
+    // The dialog is open for a Local playlist: its Yes goes to `local-confirm-accept`.
+    // Cleared whenever it closes, so Spotify's next one answers `confirm-accept`.
+    in-out property <bool> confirm-local: false;
+    callback local-confirm-accept();
+    changed confirm-open => { if (!root.confirm-open) { root.confirm-local = false; } }
 
     in-out property <bool> palette-open: false;
     in-out property <[CmdRow]> cmdk-rows: [];
@@ -2991,6 +3110,8 @@ export component MainWindow inherits Window {
     // left list (playlists, or the open track list). The host does the filtering.
     in-out property <string> list-filter: "";
     in property <int> list-filter-count: -1;   // matches, -1 = no filter
+    // While the open track list is still paging: how much of it the matches come from.
+    in property <string> list-filter-note: "";
     callback list-filter-edited(string);
     pure callback is-printable(string) -> bool;
     pure callback chop-last(string) -> string;
@@ -2998,6 +3119,11 @@ export component MainWindow inherits Window {
     changed track-name => { root.media-changed(); }
     changed track-artist => { root.media-changed(); }
     changed playing => { root.media-changed(); root.local-bg-wake(); }
+    // The media flyout and the taskbar button follow the player on screen, which is
+    // Local's song while it is the one "now" (`local-present`).
+    changed mini-title => { root.media-changed(); }
+    changed mini-artist => { root.media-changed(); }
+    changed mini-playing => { root.media-changed(); }
 
     callback close-clicked();
     callback start-drag();
@@ -3052,6 +3178,14 @@ export component MainWindow inherits Window {
     callback settings-select-device(int);
     callback set-poll-rate(int);     // poll interval in ms
     callback restart-engine();       // relaunch the bundled playback engine
+    // Set when the player's own Spotify sign-in can't play (a Free account) or is not
+    // the account Lightify uses; empty when all is well.
+    in property <string> engine-account-problem;
+    // Spotify Free account (owner, 2026-11-05: tell them, change nothing): a note on the
+    // playback-engine and downloader cards. Empty on Premium.
+    in property <string> engine-plan-note;
+    in property <string> downloader-plan-note;
+    callback engine-sign-in-again();  // forget the player's sign-in and do it again
     callback settings-select-output(int); // pick the engine's audio output device
     callback settings-select-language(int); // row of settings-languages; switches live
     // Downloader (bundled OnTheSpot bridge).
@@ -3100,8 +3234,14 @@ export component MainWindow inherits Window {
     in-out property <length> local-glow-y;
     in-out property <length> local-glow-d;
     in property <bool> local-glow-baked;
+    // A backdrop is up in the Local view (the track list has rows, or the now-playing
+    // view is open): an empty list shows none, so the lava has nothing to draw for.
+    out property <bool> local-bg-shown: root.local-now-open || root.local-rows.length > 0;
+    changed local-bg-shown => { root.local-bg-wake(); }
     changed local-now-playing => { root.local-bg-wake(); }
-    changed local-mode => { root.local-bg-wake(); }
+    // The view going away may hold the keyboard (the Spotify search box, the Local
+    // filter box): hand it back to the window's shortcuts (`hand-back-focus`).
+    changed local-mode => { root.local-bg-wake(); root.hand-back-focus(); }
     // The same lava behind the Spotify now-playing pane (while it plays, cover not
     // expanded), and Settings › ascii lava, which turns both off.
     in property <image> np-bg;
@@ -3116,6 +3256,9 @@ export component MainWindow inherits Window {
     // (`playing` wakes it from its own change handler, above.)
     changed art-full => { root.local-bg-wake(); }
     changed lava-on => { root.local-bg-wake(); }
+    // Both lavas are off in the mini player; leaving it must start them again. The
+    // full window's text fields go with it, so the keyboard comes back here too.
+    changed mini-mode => { root.local-bg-wake(); root.hand-back-focus(); }
     // The ASCII lava screensaver (right-click the lava): the window goes full screen
     // with only the wall in it; any click or key ends it (`lava-saver-end`).
     in property <bool> lava-saver: false;
@@ -3171,6 +3314,7 @@ export component MainWindow inherits Window {
     callback local-sort(int);
     callback local-find();
     callback local-rescan();
+    in-out property <string> local-filter-text;
     callback local-filter-edited(string);
     callback local-toggle-play();
     callback local-prev();
@@ -3189,7 +3333,15 @@ export component MainWindow inherits Window {
     // Row menus: `kind` 0 = library row (0 = Liked Songs), 1 = drilled track row.
     callback open-context(int, int);
     callback run-context(int);       // run the menu row at this index
-    callback play-row(int);          // double-click a library row → play the whole thing
+    callback play-row(int);          // play a whole library row (the host's row index)
+    // The second press of a double-click on a library row, whose first press drilled
+    // into it (and removed the row): the host plays the playlist that first press
+    // opened. `dbl-armed` keeps a small catcher where that press was for about the
+    // double-click time, so a single click is never held back.
+    callback open-row-double();
+    property <bool> dbl-armed: false;
+    property <length> dbl-x;
+    property <length> dbl-y;
     callback confirm-accept();       // the confirm dialog's Yes
 
     // Sign-in page (`#auth-page`): shown when there's no usable Spotify session.
@@ -3202,6 +3354,9 @@ export component MainWindow inherits Window {
     callback signin-authorise(string);
     callback signin-retry();               // re-open the browser, or start over
     callback signin-open-dashboard();
+    // Copy the redirect URI; `signin-copied` reads "copied" on its button for a moment.
+    callback signin-copy-redirect();
+    in property <bool> signin-copied;
     // (surface, row, ctrl, shift). Surfaces match open-context's `kind`:
     // 1 = drilled tracks, 2 = search results, 3 = Beatport, 4 = sidebar.
     callback select-click(int, int, bool, bool);
@@ -3232,7 +3387,45 @@ export component MainWindow inherits Window {
     // Focus the root key handler on startup so Ctrl+K works before any click.
     forward-focus: rootkeys;
 
+    // The keyboard goes back to the window's shortcuts (Ctrl+K, type-to-filter). A
+    // text field that is removed or hidden while it has the focus leaves NOTHING
+    // focused, and Slint then delivers no key at all — so every overlay, view or
+    // field that can take the keyboard calls this as it goes away (the `changed`
+    // handlers below), rather than each close path doing it. Skipped while an overlay
+    // with its own text field is up: that field keeps the keyboard.
+    public function hand-back-focus() {
+        if (!root.palette-open && !root.name-prompt-open && !root.settings-open && !root.signin-open) {
+            rootkeys.focus();
+        }
+        // Whatever field it was has lost the keyboard now (or is gone).
+        root.local-len-away = false;
+    }
+    changed palette-open => { if (!root.palette-open) { root.hand-back-focus(); } }
+    changed name-prompt-open => { if (!root.name-prompt-open) { root.hand-back-focus(); } }
+    changed settings-open => { if (!root.settings-open) { root.hand-back-focus(); } }
+    changed signin-open => { root.hand-back-focus(); }
+    changed tab => { root.hand-back-focus(); }
+    // (`mini-mode` and `local-mode` hand it back from their own change handlers.)
+    // A collapsed left panel hides its search / filter box (still focusable at 0 px).
+    changed left-collapsed => { if (root.left-collapsed) { root.hand-back-focus(); } }
+    changed drawer-squeeze => { if (root.drawer-squeeze) { root.hand-back-focus(); } }
+    // A Local length field holds the keyboard and the pointer is off it: the host's
+    // window hook (`track_window_geometry`) hands the focus back on the next press, so
+    // a click anywhere else commits what was typed — as a browser's blur does.
+    in-out property <bool> local-len-away: false;
+
+    // Ctrl/Cmd+K, whatever the case (Caps Lock or Shift turn the key's text into "K").
+    // A layout without Latin letters is caught by the host's window hook instead,
+    // from the physical key (Slint only gives the layout's character).
+    pure function is-palette-key(e: KeyEvent) -> bool {
+        return (e.modifiers.control || e.modifiers.meta) && !e.modifiers.alt && (e.text == "k" || e.text == "K");
+    }
+    // The palette needs room and a window to act on: not over the sign-in page (no
+    // session for its commands) nor in the 136 px bar mini player (no room for a row).
     function open-palette() {
+        if (root.signin-open || root.mini-mode == "bar") {
+            return;
+        }
         root.palette-open = true;
         root.cmdk-selected = 0;
         root.load-palette();
@@ -3247,7 +3440,7 @@ export component MainWindow inherits Window {
         root.palette-open = false;
         rootkeys.focus();
     }
-    function toggle-palette() {
+    public function toggle-palette() {
         if (root.palette-open) {
             root.close-palette();
         } else {
@@ -3263,13 +3456,15 @@ export component MainWindow inherits Window {
     // Root key handler: global Ctrl/Cmd+K toggles the palette from anywhere.
     rootkeys := FocusScope {
         key-pressed(e) => {
-            if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") {
+            if (root.is-palette-key(e)) {
                 root.toggle-palette();
                 return accept;
             }
-            // Type-to-filter: only over the Library tab of the full window, with no
-            // overlay open (a focused text field takes its own keys before this).
-            if (root.tab == 0 && root.mini-mode == "off" && !root.palette-open && !root.settings-open
+            // Type-to-filter: only over the Library tab of the full window, while that
+            // tab is on screen (not Local mode, not a collapsed panel), with no overlay
+            // open (a focused text field takes its own keys before this).
+            if (root.tab == 0 && root.mini-mode == "off" && !root.local-mode && !root.left-collapsed
+                && !root.drawer-squeeze && !root.palette-open && !root.settings-open
                 && !root.signin-open && !root.ctx-open && !root.confirm-open && !root.name-prompt-open
                 && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
                 if (e.text == Key.Escape && root.list-filter != "") {
@@ -3471,9 +3666,10 @@ export component MainWindow inherits Window {
                     visible: root.local-fade < 0.999;
                     HorizontalLayout {
                         spacing: 0;
-            // Left panel (collapsible via the titlebar wordmark).
+            // Left panel (collapsible via the titlebar wordmark; yields to the drawer on a
+            // narrow window — `drawer-squeeze`).
             Rectangle {
-                width: root.left-collapsed ? 0px : 288px;
+                width: root.left-collapsed || root.drawer-squeeze ? 0px : 288px;
                 background: Pal.panel;
                 clip: true;
                 // Always slides (see Motion.slide) — never snaps open or shut.
@@ -3555,8 +3751,12 @@ export component MainWindow inherits Window {
                             active: pl.active;
                             playing: pl.playing;
                             liked: pl.liked;
-                            clicked => { root.open-row(i); }
-                            double-clicked => { root.play-row(i); }
+                            clicked(x, y) => {
+                                root.dbl-x = x;
+                                root.dbl-y = y;
+                                root.dbl-armed = true;
+                                root.open-row(i);
+                            }
                             menu(mx, my) => {
                                 root.ctx-x = mx;
                                 root.ctx-y = my;
@@ -3641,6 +3841,9 @@ export component MainWindow inherits Window {
                             // reopening is the signal that a page just landed.
                             property <bool> more: root.tracks-more;
                             changed more => { trklist.check-more(); }
+                            // A filter that shrinks the list moves neither of the above:
+                            // a short list must still pull the next page (M28).
+                            changed viewport-height => { trklist.check-more(); }
                             for t[i] in root.tracks : TrackRow {
                                 has-selection: root.sel-count > 0;
                                 clear-sel => { root.clear-selection(); }
@@ -3705,10 +3908,14 @@ export component MainWindow inherits Window {
                                             font-size: 13.5px;
                                             font-weight: 500;
                                             single-line: true;
-                                            text: root.search-text;
-                                            edited => { root.search-text = self.text; root.query-changed(self.text); }
+                                            // Two-way: a one-way binding breaks the first time
+                                            // the user types, and the box then stopped following
+                                            // the host (a recent search clicked, the palette's
+                                            // "Search …").
+                                            text <=> root.search-text;
+                                            edited => { root.query-changed(self.text); }
                                             key-pressed(e) => {
-                                                if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") {
+                                                if (root.is-palette-key(e)) {
                                                     root.toggle-palette();
                                                     return accept;
                                                 }
@@ -3718,7 +3925,6 @@ export component MainWindow inherits Window {
                                                     return accept;
                                                 }
                                                 if (e.text == Key.Escape && self.text != "") {
-                                                    self.text = "";
                                                     root.search-text = "";
                                                     root.query-changed("");
                                                     return accept;
@@ -4155,10 +4361,18 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                             overflow: elide;
                             horizontal-stretch: 1;
+                            // What was typed stays readable beside the loaded-so-far note.
+                            min-width: min(self.preferred-width, 64px);
                         }
                         Text {
                             text: root.list-filter-count < 0 ? "" : @tr("{n} match" | "{n} matches" % root.list-filter-count);
                             color: root.list-filter-count == 0 ? Pal.danger : Pal.text3;
+                            font-size: TypeScale.caption;
+                            vertical-alignment: center;
+                        }
+                        if root.list-filter-count >= 0 && root.list-filter-note != "" : Text {
+                            text: root.list-filter-note;
+                            color: Pal.text3;
                             font-size: TypeScale.caption;
                             vertical-alignment: center;
                         }
@@ -4424,12 +4638,13 @@ export component MainWindow inherits Window {
                                             root.scrubbing-progress = true;
                                         }
                                     }
+                                    // Left button only (as MiniSeekBar).
                                     pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down) {
+                                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                             root.scrub-progress = clamp(self.mouse-x / pbar.width, 0.0, 1.0);
                                             root.scrubbing-progress = true;
                                         }
-                                        if (ev.kind == PointerEventKind.up) {
+                                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left && root.scrubbing-progress) {
                                             root.seek(root.scrub-progress);
                                             root.scrubbing-progress = false;
                                         }
@@ -4501,12 +4716,13 @@ export component MainWindow inherits Window {
                                             root.scrubbing-volume = true;
                                         }
                                     }
+                                    // Left button only (as MiniSeekBar).
                                     pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down) {
+                                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                             root.scrub-volume = clamp(self.mouse-x / vbar.width, 0.0, 1.0);
                                             root.scrubbing-volume = true;
                                         }
-                                        if (ev.kind == PointerEventKind.up) {
+                                        if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left && root.scrubbing-volume) {
                                             root.set-volume(root.scrub-volume);
                                             root.scrubbing-volume = false;
                                         }
@@ -4588,6 +4804,10 @@ export component MainWindow inherits Window {
                     bg-w <=> root.local-bg-w;
                     bg-h <=> root.local-bg-h;
                     filters-open <=> root.local-filters-open;
+                    len-away <=> root.local-len-away;
+                    squeezed: root.drawer-squeeze;
+                    release-keys => { root.hand-back-focus(); }
+                    filter-text <=> root.local-filter-text;
                     flt-mode: root.local-flt-mode;
                     flt-min-text <=> root.local-flt-min-text;
                     flt-max-text <=> root.local-flt-max-text;
@@ -4991,7 +5211,7 @@ export component MainWindow inherits Window {
             }
             // An update that's downloaded and verified: "2.3.0 ready · Restart".
             upill := Rectangle {
-                visible: root.update-state == "ready";
+                visible: root.update-state == "ready" || root.update-state == "installing";
                 width: upl.preferred-width;
                 height: 28px;
                 x: parent.width - self.width - 10px;
@@ -5000,7 +5220,7 @@ export component MainWindow inherits Window {
                 background: upta.has-hover ? Pal.surface : Pal.card;
                 border-width: 1px;
                 border-color: Pal.border-hi;
-                upta := TouchArea { clicked => { root.update-restart(); } }
+                upta := TouchArea { enabled: root.update-state == "ready"; clicked => { root.update-restart(); } }
                 upl := HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 4px;
@@ -5017,7 +5237,8 @@ export component MainWindow inherits Window {
                             width: rtxt.preferred-width + 18px;
                             border-radius: 10px;
                             background: Pal.text;
-                            rtxt := Text { text: @tr("Restart"); color: Pal.ink; font-size: 11.5px; font-weight: 700;
+                            opacity: root.update-state == "installing" ? 0.45 : 1.0;
+                            rtxt := Text { text: root.update-state == "installing" ? @tr("Restarting\u{2026}") : @tr("Restart"); color: Pal.ink; font-size: 11.5px; font-weight: 700;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                         }
                     }
@@ -5196,6 +5417,31 @@ export component MainWindow inherits Window {
             }
         }
     }
+
+    // The double-click catcher (see `open-row-double`): 20 px square — Slint's own
+    // double-click radius — so a press anywhere else still reaches what is under it,
+    // and alive for about the double-click time after the first click. Slint's
+    // `double-clicked` can't be used: it only counts clicks on the SAME item, and the
+    // first went to the row. A left press here is the second click.
+    if root.dbl-armed : TouchArea {
+        x: root.dbl-x - 10px; y: root.dbl-y - 10px;
+        width: 20px; height: 20px;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.open-row-double();
+            }
+            // Gone once that press is over (it keeps the release, which ends here).
+            if (e.kind == PointerEventKind.up) {
+                root.dbl-armed = false;
+            }
+        }
+        // From the first click's release; with its press, about Windows' 500 ms.
+        Timer {
+            interval: 420ms;
+            running: true;
+            triggered => { root.dbl-armed = false; }
+        }
+    }
     }
     // end rootkeys FocusScope
 
@@ -5270,6 +5516,18 @@ export component MainWindow inherits Window {
                                     spacing: 8px;
                                     StatusDot { on: root.engine-ok; }
                                     Text { text: root.engine-status; color: root.engine-ok ? Pal.text : Pal.text2; font-size: 13.5px; font-weight: 500; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                }
+                                if root.engine-plan-note != "" : Text {
+                                    text: root.engine-plan-note;
+                                    color: Pal.danger; font-size: 12.5px; wrap: word-wrap;
+                                }
+                                if root.engine-account-problem != "" : Text {
+                                    text: root.engine-account-problem;
+                                    color: Pal.danger; font-size: 12.5px; wrap: word-wrap;
+                                }
+                                if root.engine-account-problem != "" : HorizontalLayout {
+                                    PillBtn { label: @tr("Sign in again"); clicked => { root.engine-sign-in-again(); } }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
                                 Text {
                                     text: @tr("Lightify decodes audio itself and registers as a Spotify Connect device \u{2014} the Spotify app is never required.");
@@ -5429,39 +5687,11 @@ export component MainWindow inherits Window {
                                         clicked => { root.settings-language-open = !root.settings-language-open; }
                                     }
                                 }
-                                if root.settings-language-open : VerticalLayout {
-                                    for l[i] in root.settings-languages : Rectangle {
-                                        height: 30px;
-                                        border-radius: 8px;
-                                        background: lngr.has-hover ? Pal.surface : transparent;
-                                        lngr := TouchArea {
-                                            clicked => {
-                                                root.settings-language-open = false;
-                                                root.settings-select-language(i);
-                                            }
-                                        }
-                                        HorizontalLayout {
-                                            padding-left: 10px; padding-right: 10px;
-                                            spacing: 14px;
-                                            Text {
-                                                text: l.name;
-                                                color: l.active || lngr.has-hover ? Pal.text : Pal.text2;
-                                                font-size: 13px; font-weight: l.active ? 600 : 500;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                                horizontal-stretch: 1;
-                                            }
-                                            if l.active : VerticalLayout {
-                                                alignment: center;
-                                                Path {
-                                                    width: 14px; height: 14px;
-                                                    viewbox-width: 24; viewbox-height: 24;
-                                                    commands: Icons.check;
-                                                    fill: transparent; stroke: Pal.accent; stroke-width: 2px;
-                                                    stroke-line-cap: round; stroke-line-join: round;
-                                                }
-                                            }
-                                        }
+                                if root.settings-language-open : LangRows {
+                                    languages: root.settings-languages;
+                                    picked(i) => {
+                                        root.settings-language-open = false;
+                                        root.settings-select-language(i);
                                     }
                                 }
                             }
@@ -5508,6 +5738,10 @@ export component MainWindow inherits Window {
                                         overflow: elide; horizontal-stretch: 1; vertical-alignment: center;
                                     }
                                 }
+                                if root.downloader-plan-note != "" : Text {
+                                    text: root.downloader-plan-note;
+                                    color: Pal.danger; font-size: 12.5px; wrap: word-wrap;
+                                }
                                 Kicker { text: @tr("download folder"); }
                                 // Download folder — shared with the shipped app (same config
                                 // key), so a path set in either one is what both write into.
@@ -5527,8 +5761,10 @@ export component MainWindow inherits Window {
                                                 font-size: 11.5px;
                                                 font-family: Fonts.mono;
                                                 single-line: true;
-                                                text: root.settings-download-path;
-                                                edited => { root.settings-download-path = self.text; }
+                                                // Two-way: typing keeps the setting in step, and the
+                                                // host's later writes still reach the field (a
+                                                // one-way binding breaks on the first keystroke).
+                                                text <=> root.settings-download-path;
                                                 accepted => { root.settings-apply-download-path(self.text); }
                                             }
                                         }
@@ -5554,8 +5790,9 @@ export component MainWindow inherits Window {
                                             : root.update-state == "available" ? @tr("Download")
                                             : root.update-state == "checking" ? @tr("Checking\u{2026}")
                                             : root.update-state == "downloading" ? @tr("Downloading\u{2026}")
+                                            : root.update-state == "installing" ? @tr("Restarting\u{2026}")
                                             : @tr("Check now");
-                                        enabled: root.update-state != "checking" && root.update-state != "downloading";
+                                        enabled: root.update-state != "checking" && root.update-state != "downloading" && root.update-state != "installing";
                                         clicked => {
                                             if (root.update-state == "ready") { root.update-restart(); }
                                             else { root.update-check(); }
@@ -5567,6 +5804,7 @@ export component MainWindow inherits Window {
                                     StatusDot { on: root.update-state == "ready" || root.update-state == "available"; }
                                     Text {
                                         text: root.update-state == "ready" ? @tr("Lightify {} downloaded \u{2014} restart to finish", root.update-version)
+                                            : root.update-state == "installing" ? @tr("Starting the update to Lightify {}\u{2026}", root.update-version)
                                             : root.update-state == "available" ? @tr("Lightify {} is available", root.update-version)
                                             : root.update-state == "checking" ? @tr("Checking lightify.stream\u{2026}")
                                             : root.update-state == "downloading" ? @tr("Downloading Lightify {}", root.update-version)
@@ -5692,7 +5930,7 @@ export component MainWindow inherits Window {
                                 if (e.text == Key.DownArrow) { root.palette-move(1); return accept; }
                                 if (e.text == Key.Return) { root.run-palette(); return accept; }
                                 if (e.text == Key.Escape) { root.close-palette(); return accept; }
-                                if ((e.modifiers.control || e.modifiers.meta) && e.text == "k") { root.close-palette(); return accept; }
+                                if (root.is-palette-key(e)) { root.close-palette(); return accept; }
                                 return reject;
                             }
                         }
@@ -5714,8 +5952,18 @@ export component MainWindow inherits Window {
                     Rectangle { y: parent.height - 1px; height: 1px; background: Pal.surface2; }
                 }
                 // Results.
-                if root.cmdk-rows.length > 0 : ListView {
+                if root.cmdk-rows.length > 0 : cmdlist := ListView {
                     vertical-stretch: 1;
+                    // The arrow keys' highlight stays in view: scroll just far enough to
+                    // show the selected 42 px row.
+                    property <int> sel: root.cmdk-selected;
+                    changed sel => {
+                        if (self.sel * 42px + self.viewport-y < 0px) {
+                            self.viewport-y = -self.sel * 42px;
+                        } else if ((self.sel + 1) * 42px + self.viewport-y > self.visible-height) {
+                            self.viewport-y = self.visible-height - (self.sel + 1) * 42px;
+                        }
+                    }
                     for r[i] in root.cmdk-rows : Rectangle {
                         height: 42px;
                         Rectangle {
@@ -5757,13 +6005,20 @@ export component MainWindow inherits Window {
             x: max(4px, min(root.ctx-x, root.width - self.width - 4px));
             y: max(4px, min(root.ctx-y, root.height - self.height - 4px));
             width: root.ctx-w;
-            height: root.ctx-items.length * 32px + 12px;      // 6px top/bottom padding
+            // 6px top/bottom padding. Never taller than the window: a long menu (a
+            // Local row's one item per playlist) scrolls instead of running off it.
+            property <length> full-h: root.ctx-items.length * 32px + 12px;
+            height: min(self.full-h, root.height - 8px);
             background: Pal.surface;
             border-width: 1px;
             border-color: Pal.border-hi;
             border-radius: 12px;
+            clip: true;
             TouchArea { }   // swallow clicks inside the panel
+            ScrollView {
+                viewport-height: parent.full-h;
             VerticalLayout {
+                width: parent.viewport-width;
                 padding: 6px;
                 for it[i] in root.ctx-items : Rectangle {
                     height: 32px;
@@ -5788,11 +6043,12 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+            }
         }
     }
 
     // ═══ Confirm dialog (`#confirm-overlay` / `#confirm-panel`) ═══
-    // Only "Delete playlist" uses it, and only because that call is destructive.
+    // Only "Delete playlist" uses it (Spotify's and Local's), because that is destructive.
     if root.confirm-open : Rectangle {
         width: 100%;
         height: 100%;
@@ -5836,7 +6092,15 @@ export component MainWindow inherits Window {
                         border-color: cyes.has-hover ? Pal.danger : #f8717166;
                         background: cyes.has-hover ? #f871711f : transparent;
                         cyes := TouchArea {
-                            clicked => { root.confirm-open = false; root.confirm-accept(); }
+                            clicked => {
+                                if (root.confirm-local) {
+                                    root.confirm-open = false;
+                                    root.local-confirm-accept();
+                                } else {
+                                    root.confirm-open = false;
+                                    root.confirm-accept();
+                                }
+                            }
                         }
                         ytxt := Text { text: @tr("Yes"); font-size: 13px; font-weight: 600; color: cyes.has-hover ? #ffd0d0 : Pal.danger;
                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
@@ -5956,11 +6220,17 @@ export component MainWindow inherits Window {
         height: parent.height - 36px;
         background: Pal.bg;
         TouchArea { }   // swallow clicks meant for the (hidden) player underneath
-        Rectangle {
-            width: min(parent.width - 40px, 480px);
+        // Centred when it fits; in a short window (460 px is allowed) it scrolls rather
+        // than running up under the titlebar and off the bottom.
+        authscroll := ScrollView {
+          width: 100%;
+          height: 100%;
+          viewport-height: max(self.visible-height, authcard.height + 24px);
+          authcard := Rectangle {
+            width: min(authscroll.visible-width - 40px, 480px);
             height: card.preferred-height;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            x: (authscroll.visible-width - self.width) / 2;
+            y: max(12px, (authscroll.visible-height - self.height) / 2);
             background: Pal.card;
             border-radius: 20px;
             border-width: 1px;
@@ -5968,10 +6238,42 @@ export component MainWindow inherits Window {
             card := VerticalLayout {
                 padding: 32px;
                 spacing: 22px;
+                // Language first (owner, 2026-11-06): the same list as Settings, top right as in
+                // the installer, before anything has to be read.
                 VerticalLayout {
                     spacing: 8px;
-                    Kicker { text: @tr("// first run"); }
-                    Text { text: @tr("Connect Spotify"); color: Pal.text; font-size: 26px; font-weight: 700; letter-spacing: -0.4px; }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        VerticalLayout {
+                            spacing: 8px;
+                            horizontal-stretch: 1;
+                            Kicker { text: @tr("// first run"); }
+                            Text { text: @tr("Connect Spotify"); color: Pal.text; font-size: 26px; font-weight: 700; letter-spacing: -0.4px; }
+                        }
+                        if root.settings-languages.length > 1 : VerticalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            horizontal-stretch: 0;
+                            Kicker { text: @tr("// language"); horizontal-alignment: right; }
+                            LangPill {
+                                text: root.settings-language-current;
+                                open: root.settings-language-open;
+                                clicked => { root.settings-language-open = !root.settings-language-open; }
+                            }
+                        }
+                    }
+                    if root.settings-language-open : LangRows {
+                        languages: root.settings-languages;
+                        picked(i) => {
+                            root.settings-language-open = false;
+                            root.settings-select-language(i);
+                        }
+                    }
+                    // Owner, 2026-11-06: say up front what needs Premium.
+                    Text {
+                        text: @tr("Most features need a Spotify Premium account, including the player and the downloader. Local mode plays your own music files with any account.");
+                        color: Pal.text2; font-size: 13px; wrap: word-wrap;
+                    }
                 }
                 VerticalLayout {
                     spacing: 16px;
@@ -5985,7 +6287,7 @@ export component MainWindow inherits Window {
                             Text { text: @tr("Go to"); color: Pal.text2; font-size: 14px; }
                             CodeBox {
                                 text: "developer.spotify.com/dashboard";
-                                action: "open";
+                                action: @tr("open");
                                 clicked => { root.signin-open-dashboard(); }
                             }
                         }
@@ -5997,7 +6299,12 @@ export component MainWindow inherits Window {
                             horizontal-stretch: 1;
                             spacing: 8px;
                             Text { text: @tr("Create an app \u{2014} set the redirect URI to"); color: Pal.text2; font-size: 14px; wrap: word-wrap; }
-                            CodeBox { text: "http://127.0.0.1:8901/callback"; }
+                            // A copy button, so nothing has to be typed by hand.
+                            CodeBox {
+                                text: "http://127.0.0.1:8901/callback";
+                                action: root.signin-copied ? @tr("copied") : @tr("copy");
+                                clicked => { root.signin-copy-redirect(); }
+                            }
                         }
                     }
                     HorizontalLayout {
@@ -6021,8 +6328,7 @@ export component MainWindow inherits Window {
                                         color: Pal.text;
                                         font-size: 13px;
                                         font-family: Fonts.mono;
-                                        text: root.signin-client-id;
-                                        edited => { root.signin-client-id = self.text; }
+                                        text <=> root.signin-client-id;
                                         accepted => { if (!root.signin-waiting) { root.signin-authorise(self.text); } }
                                     }
                                 }
@@ -6064,7 +6370,33 @@ export component MainWindow inherits Window {
                         color: root.signin-error ? Pal.danger : root.signin-ok ? Pal.accent : Pal.text3;
                     }
                 }
+                // Local mode needs no Spotify at all, and the footer's switch is under
+                // this page: the way in from here. Switching it on hides the page.
+                Rectangle { height: 1px; background: Pal.border; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        text: @tr("No Spotify to hand? Play the music files on this PC.");
+                        color: Pal.text3;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        PillBtn {
+                            label: @tr("Use Local mode");
+                            h: 32px;
+                            clicked => {
+                                root.local-mode = true;
+                                root.local-mode-changed(true);
+                            }
+                        }
+                    }
+                }
             }
+          }
         }
     }
 

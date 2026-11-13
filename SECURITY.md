@@ -49,7 +49,7 @@ Every release on [lightify.stream](https://lightify.stream) lists SHA-256 checks
 PowerShell:
 
 ```powershell
-Get-FileHash .\Lightify_2.3.13_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.22_x64-setup.exe -Algorithm SHA256
 ```
 
 The result must match the line for that file. The installer isn't code-signed yet, so

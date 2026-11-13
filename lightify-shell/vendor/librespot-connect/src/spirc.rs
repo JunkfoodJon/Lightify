@@ -37,8 +37,8 @@ use librespot_protocol::context_page::ContextPage;
 use protobuf::MessageField;
 use std::{
     future::Future,
-    sync::Arc,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, Mutex},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
@@ -101,6 +101,9 @@ struct SpircTask {
     /// is set when transferring, and used after resolving the contexts to finish the transfer
     pub transfer_state: Option<TransferState>,
 
+    /// Lightify patch: see `Spirc::keep_removed_on_next_load`.
+    keep_removed_next: bool,
+
     /// when set to true, it will update the volume after [VOLUME_UPDATE_DELAY],
     /// when no other future resolves, otherwise resets the delay
     update_volume: bool,
@@ -110,7 +113,35 @@ struct SpircTask {
     update_state: bool,
 
     spirc_id: usize,
+
+    /// Lightify patch: see [`Spirc::on_command_failed`].
+    failure_listener: FailureListener,
+    /// Lightify patch: why the last context failed to resolve, for the load waiting on it.
+    last_context_error: Option<String>,
+    /// Lightify patch: see [`Spirc::shuffling`].
+    shuffling: Arc<AtomicBool>,
 }
+
+/// Lightify patch: a command [`Spirc`] accepted that then didn't happen. Its methods only
+/// put a command on a channel, so their `Ok` says nothing about how that went.
+#[derive(Debug, Clone)]
+pub enum CommandFailure {
+    /// [`Spirc::load`] failed. What was playing, if anything, keeps playing, with nothing
+    /// lined up after it.
+    Load {
+        /// What went wrong.
+        reason: String,
+    },
+    /// [`Spirc::remove_from_queue`] found nothing to remove.
+    RemoveFromQueue {
+        /// The track asked for.
+        uri: String,
+        /// Which occurrence of it was asked for.
+        nth: usize,
+    },
+}
+
+type FailureListener = Arc<Mutex<Option<Arc<dyn Fn(CommandFailure) + Send + Sync>>>>;
 
 static SPIRC_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -141,6 +172,10 @@ enum SpircCommand {
     RemoveFromQueue { uri: String, nth: usize },
     // Lightify patch: see `Spirc::replace_next_tracks`.
     ReplaceNextTracks { uris: Vec<String> },
+    // Lightify patch: see `Spirc::keep_removed_on_next_load`.
+    KeepRemovedOnNextLoad,
+    // Lightify patch: see `Spirc::skip_to`.
+    SkipTo { uri: String },
 }
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
@@ -153,6 +188,9 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 /// The spotify connect handle
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
+    // Lightify patch: see `Spirc::on_command_failed` and `Spirc::shuffling`.
+    failure_listener: FailureListener,
+    shuffling: Arc<AtomicBool>,
 }
 
 impl Spirc {
@@ -232,6 +270,9 @@ impl Spirc {
 
         let player_events = player.get_player_event_channel();
 
+        let failure_listener = FailureListener::default();
+        let shuffling = Arc::new(AtomicBool::new(false));
+
         let mut task = SpircTask {
             player,
             mixer,
@@ -260,13 +301,22 @@ impl Spirc {
             session,
 
             transfer_state: None,
+            keep_removed_next: false,
             update_volume: false,
             update_state: false,
 
             spirc_id,
+
+            failure_listener: Arc::clone(&failure_listener),
+            last_context_error: None,
+            shuffling: Arc::clone(&shuffling),
         };
 
-        let spirc = Spirc { commands: cmd_tx };
+        let spirc = Spirc {
+            commands: cmd_tx,
+            failure_listener,
+            shuffling,
+        };
 
         let initial_volume = task.connect_state.device_info().volume;
         task.connect_state.set_volume(0);
@@ -284,6 +334,22 @@ impl Spirc {
         Ok((spirc, task.run()))
     }
 
+    /// Lightify patch: call `listener` when a command accepted earlier then fails. It runs
+    /// on the Spirc task, so it must not block. Nothing is kept for a caller who never sets
+    /// one.
+    pub fn on_command_failed(&self, listener: impl Fn(CommandFailure) + Send + Sync + 'static) {
+        *self
+            .failure_listener
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(listener));
+    }
+
+    /// Lightify patch: was shuffle on as of the last state this device sent out? Commands
+    /// still on their way aren't counted.
+    pub fn shuffling(&self) -> bool {
+        self.shuffling.load(Ordering::SeqCst)
+    }
+
     /// Safely shutdowns the spirc.
     ///
     /// This pauses the playback, disconnects the connect device and
@@ -295,6 +361,9 @@ impl Spirc {
     /// Resumes the playback
     ///
     /// Does nothing if we are not the active device, or it isn't paused.
+    ///
+    /// Lightify patch: stopped (the list ended, say) with a current track, starts that
+    /// track from the top.
     pub fn play(&self) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Play)?)
     }
@@ -316,7 +385,7 @@ impl Spirc {
     /// Seeks to the beginning or skips to the previous track.
     ///
     /// Seeks to the beginning when the current track position
-    /// is greater than 3 seconds.
+    /// is greater than 3 seconds, or (Lightify patch) when there is nothing to go back to.
     ///
     /// Does nothing if we are not the active device.
     pub fn prev(&self) -> Result<(), Error> {
@@ -419,9 +488,11 @@ impl Spirc {
     }
 
     /// Lightify patch: remove one upcoming track — the `nth` (0-based) occurrence of
-    /// `uri` in what plays next — without touching the rest of the queue or the
-    /// context. Neither the Web API nor upstream librespot can drop a single item.
-    /// Does nothing if we are not the active device.
+    /// `uri` in what plays next, anywhere in the queue or the context ahead — without
+    /// touching the rest. A context track stays gone through repeat and a shuffle change,
+    /// until something is loaded. Neither the Web API nor upstream librespot can drop a
+    /// single item. Finding nothing to remove, or not being the active device, is reported
+    /// to [`Spirc::on_command_failed`].
     pub fn remove_from_queue(&self, uri: String, nth: usize) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::RemoveFromQueue { uri, nth })?)
     }
@@ -433,6 +504,22 @@ impl Spirc {
     /// Does nothing if we are not the active device or nothing is loaded.
     pub fn replace_next_tracks(&self, uris: Vec<String>) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::ReplaceNextTracks { uris })?)
+    }
+
+    /// Lightify patch: the next load keeps the tracks removed from the list by hand gone.
+    /// Every load otherwise brings them back ("playing a list again"), which is wrong for a
+    /// jump to a later row of the list already playing (BUGS-PLAN QD5). Send it right
+    /// before that load; it applies to that one load only.
+    pub fn keep_removed_on_next_load(&self) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::KeepRemovedOnNextLoad)?)
+    }
+
+    /// Lightify patch: play `uri` from up next now, as the Spotify app's "skip to" does:
+    /// the tracks before it are skipped without being loaded (no audio key each), and the
+    /// list after it stays whole. Does nothing unless `uri` is in up next (BUGS-PLAN QD8:
+    /// a QUEUE jump re-played the panel's ~20 rows as a new list, cutting the rest).
+    pub fn skip_to(&self, uri: String) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::SkipTo { uri })?)
     }
 
     /// Disconnects the current device and pauses the playback according the value.
@@ -485,6 +572,10 @@ impl SpircTask {
             return;
         }
 
+        // Lightify patch (BUGS-PLAN DA3): the context resolve in flight, as its own task. It
+        // lives across loop turns, so another branch firing first no longer drops it.
+        let mut resolving: Option<(ResolveContext, tokio::task::JoinHandle<Result<Context, Error>>)> = None;
+
         while !self.session.is_invalid() && !self.shutdown {
             let commands = self.commands.as_mut();
             let player_events = self.player_events.as_mut();
@@ -492,6 +583,27 @@ impl SpircTask {
             // when state and volume update have a higher priority than context resolving
             // because of that the context resolving has to wait, so that the other tasks can finish
             let allow_context_resolving = !self.update_state && !self.update_volume;
+            // A load since replaced the queue: the request in flight is for nothing now.
+            if resolving.as_ref().is_some_and(|(which, _)| !self.context_resolver.next_is(which)) {
+                if let Some((_, task)) = resolving.take() {
+                    task.abort();
+                }
+            }
+            if resolving.is_none() && allow_context_resolving && self.context_resolver.has_next() {
+                let connect_state = &self.connect_state;
+                resolving = self
+                    .context_resolver
+                    .next_request(|| {
+                        // Sending local file URIs to this endpoint results in a Bad Request status.
+                        // It's likely appropriate to filter them out anyway; Spotify's backend
+                        // has no knowledge about these tracks and so can't do anything with them.
+                        connect_state.recent_track_uris()
+                            .into_iter()
+                            .filter(|t| !t.starts_with("spotify:local"))
+                            .collect::<Vec<_>>()
+                    })
+                    .map(|(which, request)| (which, tokio::spawn(request)));
+            }
 
             tokio::select! {
                 // startup of the dealer requires a connection_id, which is retrieved at the very beginning
@@ -589,17 +701,14 @@ impl SpircTask {
                 //
                 // to circumvent this behavior, we request each context separately here and
                 // finish after we received our last item of a type
-                next_context = async {
-                    self.context_resolver.get_next_context(|| {
-                        // Sending local file URIs to this endpoint results in a Bad Request status.
-                        // It's likely appropriate to filter them out anyway; Spotify's backend
-                        // has no knowledge about these tracks and so can't do anything with them.
-                        self.connect_state.recent_track_uris()
-                            .into_iter()
-                            .filter(|t| !t.starts_with("spotify:local"))
-                            .collect::<Vec<_>>()
-                    }).await
-                }, if allow_context_resolving && self.context_resolver.has_next() => {
+                done = async { (&mut resolving.as_mut().expect("checked by the condition").1).await }, if resolving.is_some() => {
+                    let (which, _) = resolving.take().expect("checked by the condition");
+                    // A new load replaced the queue meanwhile: this answer is for nothing now.
+                    if !self.context_resolver.next_is(&which) {
+                        debug!("dropped a context resolved for a queue since replaced");
+                        continue;
+                    }
+                    let next_context = done.unwrap_or_else(|e| Err(Error::internal(e)));
                     let update_state = self.handle_next_context(next_context);
                     if update_state {
                         if let Err(why) = self.notify().await {
@@ -631,7 +740,11 @@ impl SpircTask {
             Err(why) => {
                 self.context_resolver.mark_next_unavailable();
                 self.context_resolver.remove_used_and_invalid();
+                // A transfer waiting on this context can't finish now; left set, the next
+                // load took its old queue over (Lightify patch, DA5).
+                self.transfer_state = None;
                 error!("{why}");
+                self.last_context_error = Some(why.to_string());
                 return false;
             }
             Ok(ctx) => ctx,
@@ -649,7 +762,8 @@ impl SpircTask {
                 }
             }
             Err(why) => {
-                error!("{why}")
+                error!("{why}");
+                self.last_context_error = Some(why.to_string());
             }
         }
 
@@ -705,7 +819,16 @@ impl SpircTask {
                 warn!("SpircCommand::{cmd:?} will be ignored while already active")
             }
             _ if !self.connect_state.is_active() => {
-                warn!("SpircCommand::{cmd:?} will be ignored while Not Active")
+                warn!("SpircCommand::{cmd:?} will be ignored while Not Active");
+                match cmd {
+                    SpircCommand::Load(_) => self.report_failure(CommandFailure::Load {
+                        reason: "this device isn't the active one".to_string(),
+                    }),
+                    SpircCommand::RemoveFromQueue { uri, nth } => {
+                        self.report_failure(CommandFailure::RemoveFromQueue { uri, nth })
+                    }
+                    _ => {}
+                }
             }
             SpircCommand::Disconnect { pause } => {
                 if pause {
@@ -725,14 +848,45 @@ impl SpircTask {
             SpircCommand::RepeatTrack(repeat) => self.handle_repeat_track(repeat),
             SpircCommand::SetPosition(position) => self.handle_seek(position),
             SpircCommand::SetVolume(volume) => self.set_volume(volume),
-            SpircCommand::Load(command) => self.handle_load(command, None, None).await?,
+            SpircCommand::Load(command) => {
+                self.last_context_error = None;
+                if let Err(why) = self.handle_load(command, None, None).await {
+                    let reason = self
+                        .last_context_error
+                        .take()
+                        .unwrap_or_else(|| why.to_string());
+                    self.report_failure(CommandFailure::Load { reason });
+                    return Err(why);
+                }
+            }
             SpircCommand::AppendTracks { anchor, uris } => self.handle_append_tracks(&anchor, uris)?,
             SpircCommand::AddToQueue { uris } => self.handle_add_to_queue(uris),
-            SpircCommand::RemoveFromQueue { uri, nth } => self.handle_remove_from_queue(&uri, nth)?,
+            SpircCommand::RemoveFromQueue { uri, nth } => self.handle_remove_from_queue(uri, nth)?,
             SpircCommand::ReplaceNextTracks { uris } => self.handle_replace_next_tracks(uris)?,
+            SpircCommand::KeepRemovedOnNextLoad => self.keep_removed_next = true,
+            SpircCommand::SkipTo { uri } => {
+                if self.connect_state.has_up_next(&uri) {
+                    self.handle_next(Some(uri))?
+                } else {
+                    warn!("skip to {uri} ignored: it isn't up next");
+                }
+            }
         };
 
         self.notify().await
+    }
+
+    // Lightify patch: see `Spirc::on_command_failed`.
+    fn report_failure(&self, failure: CommandFailure) {
+        warn!("command failed: {failure:?}");
+        let listener = self
+            .failure_listener
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(listener) = listener {
+            listener(failure);
+        }
     }
 
     fn handle_player_event(&mut self, event: PlayerEvent) -> Result<(), Error> {
@@ -1318,12 +1472,38 @@ impl SpircTask {
         );
     }
 
+    /// Lightify patch (BUGS-PLAN DA4): a load that fails part-way had already reset the
+    /// context but kept the old next tracks; at the song's end there was nothing to refill
+    /// from, the player stopped with no Stopped event, and the screens stayed on "playing".
+    /// Now the old window goes too, so the song playing ends the list cleanly.
     async fn handle_load(
         &mut self,
         cmd: LoadRequest,
         page: Option<ContextPage>,
         fallback_index: Option<usize>,
     ) -> Result<(), Error> {
+        // A transfer still finishing belongs to what played before this load: its queue
+        // would otherwise come back on top of the new list (DA5).
+        self.transfer_state = None;
+        let loaded = self.handle_load_inner(cmd, page, fallback_index).await;
+        if loaded.is_err() {
+            self.connect_state.clear_next_tracks();
+        }
+        loaded
+    }
+
+    async fn handle_load_inner(
+        &mut self,
+        cmd: LoadRequest,
+        page: Option<ContextPage>,
+        fallback_index: Option<usize>,
+    ) -> Result<(), Error> {
+        // Lightify patch: playing a list again brings back what was removed from it; a jump
+        // inside the list playing doesn't (`keep_removed_on_next_load`, QD5).
+        if !std::mem::take(&mut self.keep_removed_next) {
+            self.connect_state.forget_removed_tracks();
+        }
+
         self.connect_state
             .reset_context(if let PlayContext::Uri(ref uri) = cmd.context {
                 ResetContext::WhenDifferent(uri)
@@ -1339,7 +1519,15 @@ impl SpircTask {
                 self.load_context_from_uri(uri, page.as_ref(), autoplay)
                     .await?
             }
-            PlayContext::Tracks(tracks) => self.load_context_from_tracks(tracks)?,
+            PlayContext::Tracks(tracks) => {
+                // Lightify patch: a context still resolving for what played before (a
+                // transfer's, e.g. Lightify taking over the paused session at launch, or a
+                // pick in the Spotify app) would replace this list when it lands, and every
+                // append to the list would then be refused (BUGS-PLAN DA17). A load from a
+                // uri already clears it (`load_context_from_uri`).
+                self.context_resolver.clear();
+                self.load_context_from_tracks(tracks)?
+            }
         }
 
         let cmd_options = cmd.options;
@@ -1416,7 +1604,10 @@ impl SpircTask {
             self.load_track(cmd_options.start_playing, cmd_options.seek_to)?;
         } else {
             info!("No active track, stopping");
-            self.handle_stop()
+            self.handle_stop();
+            self.report_failure(CommandFailure::Load {
+                reason: "nothing in it can be played".to_string(),
+            });
         }
 
         Ok(())
@@ -1452,7 +1643,14 @@ impl SpircTask {
 
         let current_context_uri = self.connect_state.context_uri();
 
-        if current_context_uri == &context_uri && fallback == context_uri {
+        // Lightify patch: "didn't change" only once the context is really here. A transfer
+        // sets the uri at once and fetches the context afterwards, so a click in the same
+        // list in between (or after that fetch failed) found no context and the load
+        // failed (BUGS-PLAN QD4).
+        if current_context_uri == &context_uri
+            && fallback == context_uri
+            && self.connect_state.get_context(update_context).is_ok()
+        {
             debug!("context <{current_context_uri}> didn't change, no resolving required")
         } else {
             debug!("resolving context for load command");
@@ -1488,9 +1686,9 @@ impl SpircTask {
     }
 
     // Lightify patch: see `Spirc::remove_from_queue`.
-    fn handle_remove_from_queue(&mut self, uri: &str, nth: usize) -> Result<(), Error> {
-        if !self.connect_state.remove_next_track(uri, nth) {
-            warn!("remove ignored: {uri} (#{nth}) is not in the next tracks");
+    fn handle_remove_from_queue(&mut self, uri: String, nth: usize) -> Result<(), Error> {
+        if !self.connect_state.remove_next_track(&uri, nth) {
+            self.report_failure(CommandFailure::RemoveFromQueue { uri, nth });
             return Ok(());
         }
         // Top the window back up from the context and preload whatever is next now.
@@ -1517,10 +1715,24 @@ impl SpircTask {
             return Ok(());
         }
         let n = uris.len();
+        // The list had already run out (a chart whose matching fell behind the song):
+        // stopped at its end, the appended songs would never be reached, and the next
+        // Play started the list over. The first new one is made ready instead, paused, so
+        // Play goes on with the chart (BUGS-PLAN DA11). Nothing starts by itself.
+        let ended = matches!(self.play_status, SpircPlayStatus::Stopped);
+        let first = uris[0].clone();
         self.connect_state.fill_context_from_page(uris.into())?;
+        // Ended: Spirc went back to the list's start, so "next" would be its second song;
+        // the first appended one is made current instead (QD3).
+        if ended && self.connect_state.go_to_appended(&first)? {
+            self.connect_state.update_queue_revision();
+            self.load_track(false, 0)?;
+            debug!("appended {n} tracks after the list had ended: the first is ready");
+            return Ok(());
+        }
         // `next_tracks` only holds a window of the context; pull the new tail into it
-        // (a no-op while the window is already full) and preload whatever is next now.
-        self.connect_state.fill_up_next_tracks()?;
+        // (rebuilt when repeat had wrapped it, QD1) and preload whatever is next now.
+        self.connect_state.fill_up_after_append()?;
         self.connect_state.update_queue_revision();
         self.handle_preload_next_track();
         debug!("appended {n} tracks to the playing list");
@@ -1594,6 +1806,17 @@ impl SpircTask {
                 self.player.play();
                 self.play_status = SpircPlayStatus::LoadingPlay { position_ms };
             }
+            // Lightify patch: nothing is loaded after a stop, but `handle_stop` left a
+            // current track to start from. Upstream only did this for a remote's Resume, so
+            // Play after a list ended did nothing at all.
+            SpircPlayStatus::Stopped if self.connect_state.current_track(MessageField::is_some) => {
+                if let Err(why) = self.load_track(true, 0) {
+                    self.report_failure(CommandFailure::Load {
+                        reason: why.to_string(),
+                    });
+                    return;
+                }
+            }
             _ => return,
         }
 
@@ -1605,13 +1828,13 @@ impl SpircTask {
 
     fn handle_play_pause(&mut self) {
         match self.play_status {
-            SpircPlayStatus::Paused { .. } | SpircPlayStatus::LoadingPause { .. } => {
-                self.handle_play()
-            }
+            // Lightify patch: Stopped, see `handle_play`.
+            SpircPlayStatus::Paused { .. }
+            | SpircPlayStatus::LoadingPause { .. }
+            | SpircPlayStatus::Stopped => self.handle_play(),
             SpircPlayStatus::Playing { .. } | SpircPlayStatus::LoadingPlay { .. } => {
                 self.handle_pause()
             }
-            _ => (),
         }
     }
 
@@ -1758,6 +1981,11 @@ impl SpircTask {
         if !has_next_track {
             has_next_track = loop {
                 let index = self.connect_state.next_track()?;
+                // Lightify patch: the end of the queue ends the search; it looped forever
+                // when `track_uri` wasn't in it.
+                if index.is_none() && self.connect_state.current_track(|t| t.uri.is_empty()) {
+                    break false;
+                }
 
                 let current_uri = self.connect_state.current_track(|t| &t.uri);
                 if matches!(track_uri, Some(ref track_uri) if current_uri != track_uri) {
@@ -1783,13 +2011,12 @@ impl SpircTask {
         // Under 3s it goes to the previous song (starts playing)
         // Over 3s it seeks to zero (retains previous play status)
         if self.position() < 3000 {
-            let repeat_context = self.connect_state.repeat_context();
             match self.connect_state.prev_track()? {
-                None if repeat_context => self.connect_state.reset_playback_to_position(None)?,
-                None => {
-                    self.connect_state.reset_playback_to_position(None)?;
-                    self.handle_stop()
-                }
+                // Lightify patch: nothing to go back to restarts this track, retaining the
+                // play status like the seek below. Upstream stopped, and jumped to the
+                // first track of the list when `prev_tracks`' cap of 10 was what ran out.
+                None if matches!(self.play_status, SpircPlayStatus::Stopped) => (),
+                None => self.handle_seek(0),
                 Some(_) => self.load_track(self.connect_state.is_playing(), 0)?,
             }
         } else {
@@ -1929,6 +2156,8 @@ impl SpircTask {
 
     async fn notify(&mut self) -> Result<(), Error> {
         self.connect_state.set_status(&self.play_status);
+        self.shuffling
+            .store(self.connect_state.shuffling_context(), Ordering::SeqCst);
 
         if self.connect_state.is_playing() {
             self.connect_state

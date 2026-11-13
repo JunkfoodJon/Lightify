@@ -139,7 +139,7 @@ thread_local! {
     static TIMER: slint::Timer = slint::Timer::default();
 }
 
-/// Settings › ascii lava, on unless switched off.
+/// Settings › ascii lava, on unless switched off (written whole, `write_atomic`).
 fn setting_path() -> std::path::PathBuf {
     lightify_core::config::data_dir().join("lightify_shell_lava.txt")
 }
@@ -150,7 +150,7 @@ fn setting_path() -> std::path::PathBuf {
 pub fn install(app: &MainWindow) {
     app.set_lava_on(std::fs::read_to_string(setting_path()).map(|s| s.trim() != "off").unwrap_or(true));
     app.on_set_lava_on(|on| {
-        let _ = std::fs::write(setting_path(), if on { "on" } else { "off" });
+        let _ = lightify_core::config::write_atomic(&setting_path(), if on { "on" } else { "off" }.as_bytes());
     });
     let weak = app.as_weak();
     app.on_lava_saver_end(move || {
@@ -210,15 +210,18 @@ fn wake(weak: &slint::Weak<MainWindow>) {
     });
 }
 
-/// Which surfaces want the lava now: Local while local audio plays in Local mode, the
-/// Spotify pane while Spotify plays (cover not expanded, not the mini player) — both
-/// only with the setting on — and the screensaver while it is up.
+/// Which surfaces want the lava now: Local while local audio plays in Local mode and
+/// the view has a backdrop up (the track list with rows in it, or the now-playing
+/// view; an empty list shows none), the Spotify pane while Spotify plays (cover not
+/// expanded) — both only with the setting on and not in the mini player, which shows
+/// neither view — and the screensaver while it is up. (`mini-mode` and
+/// `local-bg-shown` changes wake the timer, so the lava comes back with its view.)
 fn wanted(app: &MainWindow) -> [bool; 3] {
-    let on = app.get_lava_on();
+    let on = app.get_lava_on() && app.get_mini_mode() == "off";
     let local = app.get_local_mode();
     [
-        on && local && app.get_local_now_playing(),
-        on && !local && app.get_playing() && !app.get_art_full() && app.get_mini_mode() == "off",
+        on && local && app.get_local_now_playing() && app.get_local_bg_shown(),
+        on && !local && app.get_playing() && !app.get_art_full(),
         app.get_lava_saver(),
     ]
 }

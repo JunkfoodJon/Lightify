@@ -164,6 +164,22 @@ impl PayloadReader {
     }
 }
 
+/// Unpack one file of `exe`'s payload to `dest`, checked like any other read. False when
+/// the payload has no file of that name, or `exe` has no payload.
+pub fn extract_file(exe: &Path, name: &str, dest: &Path) -> io::Result<bool> {
+    let Some(mut r) = PayloadReader::open(exe)? else { return Ok(false) };
+    while let Some(entry) = r.peek() {
+        if entry.name.eq_ignore_ascii_case(name) {
+            let mut out = File::create(dest)?;
+            r.next_file(&mut out, &mut |_| {})?;
+            out.flush()?;
+            return Ok(true);
+        }
+        r.next_file(&mut io::sink(), &mut |_| {})?;
+    }
+    Ok(false)
+}
+
 fn sha256_of(path: &Path) -> io::Result<(String, u64)> {
     let mut f = File::open(path)?;
     let mut h = Sha256::new();
@@ -291,6 +307,13 @@ mod tests {
         let out2 = d.join("setup2.exe");
         write_payload(&out, &out2, "2.3.1", &files, 3, 1).unwrap();
         assert_eq!(locate(&out2).unwrap().unwrap().0, offset);
+
+        // One file comes out on its own (what stage-release.ps1 reads the app's version from).
+        let got = d.join("got.exe");
+        assert!(extract_file(&out, "lightify.exe", &got).unwrap());
+        assert_eq!(std::fs::read(&got).unwrap(), big);
+        assert!(!extract_file(&out, "nope.exe", &got).unwrap());
+        assert!(!extract_file(&stub, "Lightify.exe", &got).unwrap());
 
         // A flipped byte inside the payload is caught.
         let mut bytes = std::fs::read(&out).unwrap();

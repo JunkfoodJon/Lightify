@@ -3,7 +3,9 @@
 //! A second launch used to start a second process — and with it a second "Lightify"
 //! Spotify Connect device on the account. Now the first instance owns a named mutex;
 //! a later launch finds it taken, signals the first instance's named event (which
-//! restores and focuses the window, even from the tray), and exits.
+//! restores and focuses the window, even from the tray), and exits — unless that
+//! instance's window has already closed and it is shutting down, in which case the
+//! later launch waits for it to exit and then runs instead (`claim`).
 //!
 //! Only the interactive app takes part: `--shot*`, `--probe*` and `--selftest*` all
 //! return from `main` before this runs, so they keep working next to a running app.
@@ -14,9 +16,10 @@ use slint::ComponentHandle;
 
 use crate::MainWindow;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
+    CreateEventW, CreateMutexW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
+    SYNCHRONIZATION_SYNCHRONIZE as SYNCHRONIZE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
 
@@ -24,7 +27,24 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW
 /// the process exits, however it exits, so a crash never locks out the next launch.
 pub struct Guard {
     _mutex: HANDLE,
+    /// Manual-reset, set once the window is gone and shutdown has begun (`closing`).
+    closing: HANDLE,
 }
+
+impl Guard {
+    /// The event loop has ended: from now on a later launch can't be brought forward
+    /// here, so it waits for this process to exit and then runs itself.
+    pub fn closing(&self) {
+        if !self.closing.is_null() {
+            unsafe { SetEvent(self.closing) };
+        }
+    }
+}
+
+/// How long a launch waits for an instance that is shutting down, and how often it
+/// looks. Shutdown stops the engine and the downloader bridge — a few seconds at most.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -48,16 +68,45 @@ fn scope() -> String {
 /// to come to the front, so the caller should exit.
 ///
 /// If the mutex can't be created at all, this errs on the side of running.
+///
+/// An instance that is already shutting down (`Guard::closing`) can't come forward, so
+/// signalling it would make this launch simply vanish: it is waited out instead (up
+/// to `SHUTDOWN_WAIT`), and this launch then becomes the first instance.
 pub fn claim() -> Option<Guard> {
     let scope = scope();
     let mutex_name = wide(&format!("Local\\Lightify.SingleInstance{scope}"));
     let event_name = wide(&format!("Local\\Lightify.Activate{scope}"));
+    let closing_name = wide(&format!("Local\\Lightify.Closing{scope}"));
     unsafe {
-        let mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+        let mut mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
         if mutex.is_null() {
-            return Some(Guard { _mutex: mutex });
+            return Some(Guard { _mutex: mutex, closing: std::ptr::null_mut() });
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            let closing = OpenEventW(SYNCHRONIZE, 0, closing_name.as_ptr());
+            let shutting_down = !closing.is_null() && WaitForSingleObject(closing, 0) == WAIT_OBJECT_0;
+            if !closing.is_null() {
+                // Our own handle would keep the old instance's event alive (and set).
+                CloseHandle(closing);
+            }
+            if shutting_down {
+                let start = std::time::Instant::now();
+                loop {
+                    // Our handle keeps the mutex object alive too: let go, then retry.
+                    CloseHandle(mutex);
+                    if start.elapsed() > SHUTDOWN_WAIT {
+                        return None;
+                    }
+                    std::thread::sleep(SHUTDOWN_POLL);
+                    mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+                    if mutex.is_null() {
+                        return None;
+                    }
+                    if GetLastError() != ERROR_ALREADY_EXISTS {
+                        return Some(Guard { _mutex: mutex, closing: closing_event(&closing_name) });
+                    }
+                }
+            }
             let ev = OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr());
             if !ev.is_null() {
                 // This process was just launched by the user, so it holds the
@@ -70,7 +119,20 @@ pub fn claim() -> Option<Guard> {
             CloseHandle(mutex);
             return None;
         }
-        Some(Guard { _mutex: mutex })
+        Some(Guard { _mutex: mutex, closing: closing_event(&closing_name) })
+    }
+}
+
+/// The first instance's "shutting down" flag, created clear.
+fn closing_event(name: &[u16]) -> HANDLE {
+    unsafe {
+        // Manual-reset: once set it stays set for every later launch that looks.
+        let ev = CreateEventW(std::ptr::null(), 1, 0, name.as_ptr());
+        if !ev.is_null() {
+            // Only this process can hold it (we own the mutex), but be sure it starts clear.
+            ResetEvent(ev);
+        }
+        ev
     }
 }
 

@@ -7,12 +7,16 @@
 //! (Explorer restarted, or the button didn't exist yet on the first try).
 //!
 //! Glyphs are the same Material shapes the in-app transport uses, rasterised here at
-//! the small-icon size for the window's DPI, in a colour that suits the taskbar theme.
-//! Everything lives on the UI thread (the window's thread), hence `thread_local!`.
+//! the small-icon size for the window's DPI, in a colour that suits the taskbar theme —
+//! redrawn when Windows switches between light and dark (`WM_SETTINGCHANGE`,
+//! "ImmersiveColorSet") and when the window's DPI changes (`WM_DPICHANGED`: another
+//! monitor, or a new scale), so they stay sharp. The same messages tell the tray icon
+//! to check its own size (`tray::rescale`). The tooltips are in the app's language (`relabel` after a
+//! switch). Everything lives on the UI thread (the window's thread), hence `thread_local!`.
 
 use std::cell::{Cell, RefCell};
 
-use windows::core::{w, BOOL};
+use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
@@ -25,7 +29,8 @@ use windows::Win32::UI::Shell::{
     THB_TOOLTIP, THUMBBUTTON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, RegisterWindowMessageW, HICON, ICONINFO, SM_CXSMICON, WM_COMMAND,
+    CreateIconIndirect, DestroyIcon, RegisterWindowMessageW, HICON, ICONINFO, SM_CXSMICON, WM_COMMAND, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_SETTINGCHANGE,
 };
 
 use crate::Cmd;
@@ -34,14 +39,44 @@ const ID_PREV: u32 = 1;
 const ID_PLAY: u32 = 2;
 const ID_NEXT: u32 = 3;
 
-struct State {
-    list: ITaskbarList3,
-    hwnd: HWND,
-    tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
+/// The toolbar's glyphs, in one theme's colour.
+#[derive(Clone, Copy)]
+struct Glyphs {
     prev: HICON,
     play: HICON,
     pause: HICON,
     next: HICON,
+}
+
+impl Glyphs {
+    /// At `size` px: near-black on a light taskbar, white on a dark one.
+    unsafe fn make(size: i32, light: bool) -> windows::core::Result<Self> {
+        let rgb = if light { (0x20, 0x20, 0x20) } else { (0xff, 0xff, 0xff) };
+        unsafe {
+            Ok(Self {
+                prev: make_icon(&glyph_prev(), size, rgb)?,
+                play: make_icon(&glyph_play(), size, rgb)?,
+                pause: make_icon(&glyph_pause(), size, rgb)?,
+                next: make_icon(&glyph_next(), size, rgb)?,
+            })
+        }
+    }
+
+    unsafe fn destroy(self) {
+        for icon in [self.prev, self.play, self.pause, self.next] {
+            let _ = unsafe { DestroyIcon(icon) };
+        }
+    }
+}
+
+struct State {
+    list: ITaskbarList3,
+    hwnd: HWND,
+    tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
+    /// The glyphs' size in px, for the window's DPI now.
+    size: Cell<i32>,
+    light: Cell<bool>,
+    glyphs: Cell<Glyphs>,
     playing: Cell<bool>,
     created_msg: u32,
 }
@@ -175,17 +210,68 @@ fn button(id: u32, icon: HICON, text: &str) -> THUMBBUTTON {
 
 impl State {
     fn play_button(&self) -> THUMBBUTTON {
+        let g = self.glyphs.get();
         if self.playing.get() {
-            button(ID_PLAY, self.pause, "Pause")
+            button(ID_PLAY, g.pause, &lightify_i18n::tr!("Pause"))
         } else {
-            button(ID_PLAY, self.play, "Play")
+            button(ID_PLAY, g.play, &lightify_i18n::tr!("Play"))
         }
     }
 
-    fn add(&self) -> windows::core::Result<()> {
-        let buttons = [button(ID_PREV, self.prev, "Previous"), self.play_button(), button(ID_NEXT, self.next, "Next")];
-        unsafe { self.list.ThumbBarAddButtons(self.hwnd, &buttons) }
+    fn buttons(&self) -> [THUMBBUTTON; 3] {
+        let g = self.glyphs.get();
+        [
+            button(ID_PREV, g.prev, &lightify_i18n::tr!("Previous track")),
+            self.play_button(),
+            button(ID_NEXT, g.next, &lightify_i18n::tr!("Next track")),
+        ]
     }
+
+    fn add(&self) -> windows::core::Result<()> {
+        unsafe { self.list.ThumbBarAddButtons(self.hwnd, &self.buttons()) }
+    }
+
+    /// All three buttons again: new tooltips (a language switch) or new glyphs.
+    fn update_all(&self) {
+        unsafe {
+            let _ = self.list.ThumbBarUpdateButtons(self.hwnd, &self.buttons());
+        }
+    }
+
+    /// Windows switched between light and dark: redraw the glyphs if the taskbar's
+    /// side of it changed.
+    fn retheme(&self) {
+        let light = taskbar_is_light();
+        if light == self.light.get() {
+            return;
+        }
+        if let Ok(g) = unsafe { Glyphs::make(self.size.get(), light) } {
+            let old = self.glyphs.replace(g);
+            self.light.set(light);
+            self.update_all();
+            unsafe { old.destroy() };
+        }
+    }
+
+    /// The window moved to a monitor with another scale, or its scale changed: draw the
+    /// glyphs again at that DPI's size instead of letting Windows stretch the old ones.
+    fn rescale(&self, dpi: u32) {
+        let size = icon_px(dpi);
+        if size == self.size.get() {
+            return;
+        }
+        if let Ok(g) = unsafe { Glyphs::make(size, self.light.get()) } {
+            let old = self.glyphs.replace(g);
+            self.size.set(size);
+            self.update_all();
+            unsafe { old.destroy() };
+        }
+    }
+}
+
+/// The small-icon size (px) at `dpi`, which the toolbar's glyphs are drawn at.
+fn icon_px(dpi: u32) -> i32 {
+    unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi.max(96)) }.max(16)
 }
 
 unsafe extern "system" fn subclass_proc(
@@ -209,6 +295,17 @@ unsafe extern "system" fn subclass_proc(
             let _ = st.tx.send(cmd);
             return true;
         }
+        // The theme broadcast names the setting it is about in `lParam`.
+        if msg == WM_SETTINGCHANGE
+            && lparam.0 != 0
+            && unsafe { PCWSTR(lparam.0 as *const u16).to_string() }.is_ok_and(|s| s == "ImmersiveColorSet")
+        {
+            st.retheme();
+        }
+        if msg == WM_DPICHANGED {
+            // The new DPI is in wParam's high word (x and y are the same).
+            st.rescale(((wparam.0 >> 16) & 0xffff) as u32);
+        }
         if msg == st.created_msg {
             // First creation or an Explorer restart: the (new) button has no toolbar.
             unsafe {
@@ -221,6 +318,11 @@ unsafe extern "system" fn subclass_proc(
     if handled {
         return LRESULT(0);
     }
+    // The tray icon is drawn for the primary monitor's DPI: these are when that can
+    // have changed (its window sees none of them itself). Outside `STATE`'s borrow.
+    if matches!(msg, WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE) {
+        crate::tray::rescale();
+    }
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
@@ -232,17 +334,15 @@ pub fn attach(hwnd: HWND, tx: tokio::sync::mpsc::UnboundedSender<Cmd>) -> window
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let list: ITaskbarList3 = CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER)?;
         list.HrInit()?;
-        let dpi = GetDpiForWindow(hwnd).max(96);
-        let size = GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16);
-        let rgb = if taskbar_is_light() { (0x20, 0x20, 0x20) } else { (0xff, 0xff, 0xff) };
+        let size = icon_px(GetDpiForWindow(hwnd));
+        let light = taskbar_is_light();
         let st = State {
             list,
             hwnd,
             tx,
-            prev: make_icon(&glyph_prev(), size, rgb)?,
-            play: make_icon(&glyph_play(), size, rgb)?,
-            pause: make_icon(&glyph_pause(), size, rgb)?,
-            next: make_icon(&glyph_next(), size, rgb)?,
+            size: Cell::new(size),
+            light: Cell::new(light),
+            glyphs: Cell::new(Glyphs::make(size, light)?),
             playing: Cell::new(false),
             created_msg: RegisterWindowMessageW(w!("TaskbarButtonCreated")),
         };
@@ -256,6 +356,15 @@ pub fn attach(hwnd: HWND, tx: tokio::sync::mpsc::UnboundedSender<Cmd>) -> window
         }
     }
     Ok(())
+}
+
+/// After a language switch: the tooltips in the new language.
+pub fn relabel() {
+    STATE.with(|s| {
+        if let Some(st) = s.borrow().as_ref() {
+            st.update_all();
+        }
+    });
 }
 
 /// Flip the middle button between Play and Pause. No-op when unchanged.

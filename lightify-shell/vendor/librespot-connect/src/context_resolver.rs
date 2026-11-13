@@ -134,6 +134,56 @@ const RETRY_UNAVAILABLE: Duration = Duration::from_secs(3600);
 const RESOLVE_RETRY_BACKOFF: [Duration; 2] =
     [Duration::from_millis(500), Duration::from_millis(1500)];
 
+// Lightify patch: contexts fetched ahead of a load (`prepare_context`), so a click on a
+// list the user is looking at starts its track without first waiting for the list
+// (measured at ~0.7 s for a 4,000-track Liked Songs). Kept briefly, so an edit to the
+// list made since is picked up again soon; only a few, the lists last opened.
+const PREPARED_FOR: Duration = Duration::from_secs(300);
+const PREPARED_MAX: usize = 4;
+
+static PREPARED: std::sync::Mutex<Vec<(String, std::time::Instant, Context)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A context `prepare_context` fetched for `uri` within the last few minutes, taken: it
+/// serves the one load it was fetched for, never a later refresh (a playlist edit, a
+/// like), which would get the copy from before the change (BUGS-PLAN DA2).
+fn take_prepared(uri: &str) -> Option<Context> {
+    let mut list = PREPARED.lock().ok()?;
+    list.retain(|(_, at, _)| at.elapsed() < PREPARED_FOR);
+    let at = list.iter().position(|(u, _, _)| u == uri)?;
+    Some(list.remove(at).2)
+}
+
+/// A list opened again this soon (a double tap) isn't fetched again.
+const PREPARE_AGAIN_AFTER: Duration = Duration::from_secs(15);
+
+fn prepared_within(uri: &str, within: Duration) -> bool {
+    PREPARED.lock().is_ok_and(|list| list.iter().any(|(u, at, _)| u == uri && at.elapsed() < within))
+}
+
+fn keep_prepared(uri: &str, ctx: Context) {
+    if let Ok(mut list) = PREPARED.lock() {
+        list.retain(|(u, _, _)| u != uri);
+        list.push((uri.to_string(), std::time::Instant::now(), ctx));
+        let excess = list.len().saturating_sub(PREPARED_MAX);
+        list.drain(..excess);
+    }
+}
+
+/// Lightify patch: fetch `context_uri` now and keep it, so a load of it in the next few
+/// minutes skips the resolve. Costs one context request, no audio key and no Web-API
+/// quota; a failure only means the load resolves it itself, as before.
+pub async fn prepare_context(session: &Session, context_uri: &str) -> Result<(), Error> {
+    // Opened again: fetched again, so the copy has what changed since (a song liked or
+    // added); upstream-patch kept the first copy for 5 minutes and played the old list (DA2).
+    if prepared_within(context_uri, PREPARE_AGAIN_AFTER) {
+        return Ok(());
+    }
+    let ctx = session.spclient().get_context(context_uri).await?;
+    keep_prepared(context_uri, ctx);
+    Ok(())
+}
+
 impl ContextResolver {
     pub fn new(session: Session) -> Self {
         Self {
@@ -218,17 +268,57 @@ impl ContextResolver {
         &self,
         recent_track_uri: impl Fn() -> Vec<String>,
     ) -> Result<Context, Error> {
-        let (next, resolve_uri, _) = self.find_next().ok_or(ContextResolverError::NoNext)?;
+        let (next, _, _) = self.find_next().ok_or(ContextResolverError::NoNext)?;
+        let recent = Self::recent_for(next, recent_track_uri);
+        Self::resolve(self.session.clone(), next.clone(), recent).await
+    }
 
+    /// Lightify patch (BUGS-PLAN DA3): the next resolve as a future that owns everything it
+    /// needs, so Spirc runs it as its own task. Built inside its `select!` loop, it was
+    /// dropped whenever another branch fired first (a player event every 500 ms on the
+    /// desktop), so a page or autoplay request slower than that never finished, and the
+    /// retry backoff never elapsed.
+    pub fn next_request(
+        &self,
+        recent_track_uri: impl Fn() -> Vec<String>,
+    ) -> Option<(ResolveContext, impl std::future::Future<Output = Result<Context, Error>> + Send + 'static)> {
+        let (next, _, _) = self.find_next()?;
+        let recent = Self::recent_for(next, recent_track_uri);
+        Some((next.clone(), Self::resolve(self.session.clone(), next.clone(), recent)))
+    }
+
+    /// Whether `resolve` is still the next one queued: a result for one that a new load
+    /// replaced meanwhile is dropped (Lightify patch, DA3).
+    pub fn next_is(&self, resolve: &ResolveContext) -> bool {
+        self.find_next().is_some_and(|(next, _, _)| next == resolve)
+    }
+
+    fn recent_for(next: &ResolveContext, recent_track_uri: impl Fn() -> Vec<String>) -> Vec<String> {
+        match next.update {
+            ContextType::Autoplay => recent_track_uri(),
+            ContextType::Default => Vec::new(),
+        }
+    }
+
+    async fn resolve(session: Session, next: ResolveContext, recent: Vec<String>) -> Result<Context, Error> {
+        let resolve_uri = next.resolve_uri().ok_or(ContextResolverError::NoNext)?.to_string();
+        let resolve_uri = resolve_uri.as_str();
         match next.update {
             ContextType::Default => {
-                let mut ctx = self.session.spclient().get_context(resolve_uri).await;
+                // Lightify patch: a context fetched ahead of this load needs no request.
+                let mut ctx = match take_prepared(resolve_uri) {
+                    Some(ctx) => {
+                        debug!("{resolve_uri} was prepared ahead, no resolve needed");
+                        Ok(ctx)
+                    }
+                    None => session.spclient().get_context(resolve_uri).await,
+                };
                 for backoff in RESOLVE_RETRY_BACKOFF {
                     match &ctx {
                         Err(why) if Self::is_transient(why) => {
                             debug!("resolving {resolve_uri} failed ({why}), retrying in {backoff:?}");
                             tokio::time::sleep(backoff).await;
-                            ctx = self.session.spclient().get_context(resolve_uri).await;
+                            ctx = session.spclient().get_context(resolve_uri).await;
                         }
                         _ => break,
                     }
@@ -251,10 +341,10 @@ impl ContextResolver {
 
                 let request = AutoplayContextRequest {
                     context_uri: Some(resolve_uri.to_string()),
-                    recent_track_uri: recent_track_uri(),
+                    recent_track_uri: recent,
                     ..Default::default()
                 };
-                self.session.spclient().get_autoplay_context(&request).await
+                session.spclient().get_autoplay_context(&request).await
             }
         }
     }
@@ -371,5 +461,42 @@ impl ContextResolver {
         state.update_queue_revision();
 
         true
+    }
+}
+
+
+// Lightify patch: the contexts kept by `prepare_context`.
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+
+    fn ctx(uri: &str) -> Context {
+        Context { uri: Some(uri.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_prepared_context_is_found_and_only_the_last_few_are_kept() {
+        for n in 0..PREPARED_MAX + 2 {
+            keep_prepared(&format!("spotify:playlist:p{n}"), ctx(&format!("spotify:playlist:p{n}")));
+        }
+        // The oldest two made room for the newest.
+        assert!(take_prepared("spotify:playlist:p0").is_none());
+        assert!(take_prepared("spotify:playlist:p1").is_none());
+        let last = format!("spotify:playlist:p{}", PREPARED_MAX + 1);
+        // Offering the same list again replaces it rather than keeping two.
+        keep_prepared(&last, ctx("spotify:playlist:fresh"));
+        assert!(prepared_within(&last, PREPARE_AGAIN_AFTER), "just prepared: not fetched again on a double open");
+        assert_eq!(take_prepared(&last).and_then(|c| c.uri).as_deref(), Some("spotify:playlist:fresh"));
+        assert!(take_prepared("spotify:playlist:never").is_none());
+    }
+
+    /// DA2: a prepared copy serves the one load it was made for, never a later refresh
+    /// (a like or an edit afterwards would be answered with the copy from before).
+    #[test]
+    fn a_prepared_context_serves_one_load_only() {
+        keep_prepared("spotify:playlist:once", ctx("spotify:playlist:once"));
+        assert!(take_prepared("spotify:playlist:once").is_some(), "the load gets it");
+        assert!(take_prepared("spotify:playlist:once").is_none(), "a refresh after it resolves again");
+        assert!(!prepared_within("spotify:playlist:once", PREPARE_AGAIN_AFTER), "opened again: fetched again");
     }
 }

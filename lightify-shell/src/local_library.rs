@@ -82,8 +82,21 @@ const FOLDERS_FILE: &str = "lightify_shell_local_folders.json";
 const INDEX_FILE: &str = "lightify_shell_local_index.json";
 const PLAYLISTS_FILE: &str = "lightify_shell_local_playlists.json";
 
-const UNKNOWN_ARTIST: &str = "Unknown artist";
-const UNKNOWN_ALBUM: &str = "Unknown album";
+/// What a missing artist / album tag is stored as. The index cache holds these in
+/// English (caches written before translation hold them too); `shown` says them in the
+/// active language.
+const UNKNOWN_ARTIST: &str = lightify_i18n::tr_noop!("Unknown artist");
+const UNKNOWN_ALBUM: &str = lightify_i18n::tr_noop!("Unknown album");
+
+/// An artist or album as shown: the stored "Unknown artist" / "Unknown album" in the
+/// active language, anything else as it is.
+pub fn shown(v: &str) -> String {
+    if v == UNKNOWN_ARTIST || v == UNKNOWN_ALBUM {
+        lightify_i18n::translate(v)
+    } else {
+        v.to_string()
+    }
+}
 
 /// Serialises read-modify-write of the state files (the UI and the worker may both
 /// edit sources or playlists).
@@ -99,6 +112,8 @@ thread_local! {
     static TEST_STATE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     /// Stand-in for the downloader's folder in tests (`None` = no such folder).
     static TEST_DOWNLOAD_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    /// Folders tests treat as drive roots (see `volume_root`).
+    static TEST_VOLUMES: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn state_dir() -> PathBuf {
@@ -132,16 +147,59 @@ fn downloader_folder() -> Option<PathBuf> {
     }
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
-    let bytes = fs::read(state_dir().join(name)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+/// A state file: `Ok(None)` when there is none, `Err` when it is there but can't be
+/// read right now (locked, a disk error), so callers must not write over it. One that
+/// reads but doesn't parse is moved aside to `<name>.corrupt` (as lightify-core does
+/// with its config) and counts as none.
+fn read_state<T: serde::de::DeserializeOwned>(name: &str) -> std::io::Result<Option<T>> {
+    let path = state_dir().join(name);
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            eprintln!("local library: can't read {name}: {e}");
+            return Err(e);
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            eprintln!("local library: {name} is unreadable ({e}); moved aside to {name}.corrupt");
+            let mut aside = path.clone().into_os_string();
+            aside.push(".corrupt");
+            fs::rename(&path, &aside)?;
+            Ok(None)
+        }
+    }
 }
 
-fn write_json<T: serde::Serialize>(name: &str, value: &T, pretty: bool) {
+fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+    read_state(name).ok().flatten()
+}
+
+/// Can this path go into a state file? JSON holds UTF-8 only, and a Windows name may
+/// hold UTF-16 that isn't (an unpaired surrogate): such a path is left out of what is
+/// saved, rather than the whole save failing.
+fn savable(p: &Path) -> bool {
+    p.to_str().is_some()
+}
+
+/// Whether the file was written.
+fn write_json<T: serde::Serialize>(name: &str, value: &T, pretty: bool) -> bool {
     let bytes = if pretty { serde_json::to_vec_pretty(value) } else { serde_json::to_vec(value) };
-    if let Ok(bytes) = bytes {
-        let _ = lightify_core::config::write_atomic(&state_dir().join(name), &bytes);
+    let res = match bytes {
+        Ok(bytes) => lightify_core::config::write_atomic(&state_dir().join(name), &bytes).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = &res {
+        eprintln!("local library: can't save {name}: {e}");
     }
+    res.is_ok()
+}
+
+fn write_sources(s: &Sources) -> bool {
+    let keep = |v: &[PathBuf]| v.iter().filter(|p| savable(p)).cloned().collect();
+    write_json(FOLDERS_FILE, &Sources { folders: keep(&s.folders), files: keep(&s.files) }, true)
 }
 
 fn now_secs() -> u64 {
@@ -212,8 +270,14 @@ pub fn is_audio(path: &Path) -> bool {
 /// (`lightify_core::config` `download_path`, or the default downloads folder the
 /// downloader uses) when it exists.
 pub fn sources() -> Sources {
-    if let Some(s) = read_json::<Sources>(FOLDERS_FILE) {
-        return s;
+    sources_checked().unwrap_or_default()
+}
+
+/// `sources`, or `Err` when the folders file is there but can't be read now (nothing
+/// may be written over it, and a scan must not take the library for empty).
+fn sources_checked() -> std::io::Result<Sources> {
+    if let Some(s) = read_state::<Sources>(FOLDERS_FILE)? {
+        return Ok(s);
     }
     let mut s = Sources::default();
     if let Some(dl) = downloader_folder() {
@@ -221,12 +285,12 @@ pub fn sources() -> Sources {
             s.folders.push(dl);
         }
     }
-    s
+    Ok(s)
 }
 
 pub fn set_sources(s: &Sources) {
     let _guard = state_lock();
-    write_json(FOLDERS_FILE, s, true);
+    write_sources(s);
 }
 
 /// Add dropped / picked paths: folders join `Sources::folders` (unless already inside
@@ -234,11 +298,16 @@ pub fn set_sources(s: &Sources) {
 /// counted as skipped. Persists. Does not scan — call `scan` afterwards.
 pub fn add_paths(paths: &[PathBuf]) -> AddResult {
     let _guard = state_lock();
-    let mut s = sources();
     let mut r = AddResult::default();
+    let Ok(mut s) = sources_checked() else {
+        r.skipped = paths.len();
+        return r;
+    };
     for p in paths {
         let p = absolute(p);
-        let Ok(meta) = fs::metadata(&p) else {
+        // A path the folders file can't hold would be gone on the next read.
+        let meta = if savable(&p) { fs::metadata(&p).ok() } else { None };
+        let Some(meta) = meta else {
             r.skipped += 1;
             continue;
         };
@@ -262,7 +331,7 @@ pub fn add_paths(paths: &[PathBuf]) -> AddResult {
             r.skipped += 1;
         }
     }
-    write_json(FOLDERS_FILE, &s, true);
+    write_sources(&s);
     r
 }
 
@@ -270,10 +339,10 @@ pub fn add_paths(paths: &[PathBuf]) -> AddResult {
 /// never touched on disk).
 pub fn remove_folder(path: &Path) {
     let _guard = state_lock();
-    let mut s = sources();
+    let Ok(mut s) = sources_checked() else { return };
     let target = comps(path);
     s.folders.retain(|f| comps(f) != target);
-    write_json(FOLDERS_FILE, &s, true);
+    write_sources(&s);
 }
 
 // ── Walking ─────────────────────────────────────────────────────────────────
@@ -306,14 +375,57 @@ enum WalkEnd {
     Stopped,
 }
 
+/// The root of the drive or share `p` is on (`D:\`, `\\server\share\`).
+fn volume_root(p: &Path) -> PathBuf {
+    #[cfg(test)]
+    {
+        // Tests stand a folder in for a drive, so "unplugging" it can be acted out.
+        let v = TEST_VOLUMES.with(|v| v.borrow().iter().find(|v| same_or_inside(p, v)).cloned());
+        if let Some(v) = v {
+            return v;
+        }
+    }
+    p.ancestors().last().unwrap_or(p).to_path_buf()
+}
+
+fn can_list(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok()
+}
+
+/// A watched folder or loose file that is really gone (renamed or deleted), not just
+/// out of reach: it isn't there, while its parent folder (or the drive it is on) can
+/// be listed. An unplugged drive or an offline share can't be listed, so what came
+/// from it stays in the library.
+fn source_gone(p: &Path) -> bool {
+    match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            p.parent().is_some_and(can_list) || {
+                let v = volume_root(p);
+                v.as_path() != p && can_list(&v)
+            }
+        }
+        _ => false,
+    }
+}
+
+/// An audio file a folder scan takes: not the downloader's `~name` file still being
+/// written (it is renamed into place when done).
+fn is_scannable(path: &Path, name: &str) -> bool {
+    !name.starts_with('~') && is_audio(path)
+}
+
 /// Depth-first walk of `root` calling `on_file` for each audio file (with its
 /// metadata, following file links). Skips dot-names and hidden/system folders; follows
 /// folder links/junctions but never enters the same real folder twice (`visited`
 /// holds canonical paths), so link loops end. `on_file` returns `false` to stop.
+/// Whatever couldn't be looked at (a folder that can't be listed, `root` itself on a
+/// drive that isn't there, an entry whose details can't be read) goes in
+/// `unreadable`: what is below it is unknown, not gone.
 fn walk_audio(
     root: &Path,
     visited: &mut HashSet<PathBuf>,
     deadline: Option<Instant>,
+    unreadable: &mut Vec<PathBuf>,
     on_file: &mut dyn FnMut(PathBuf, &fs::Metadata) -> bool,
 ) -> WalkEnd {
     let mut stack = vec![root.to_path_buf()];
@@ -325,14 +437,27 @@ fn walk_audio(
         if !visited.insert(canon) {
             continue;
         }
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let Ok(rd) = fs::read_dir(&dir) else {
+            unreadable.push(dir);
+            continue;
+        };
         let mut subdirs = Vec::new();
-        for entry in rd.flatten() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
+        let mut listed_all = true;
+        for entry in rd {
+            let Ok(entry) = entry else {
+                listed_all = false;
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
                 continue;
             }
-            let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
+            let Ok(ft) = entry.file_type() else {
+                unreadable.push(path);
+                continue;
+            };
             if ft.is_symlink() {
                 // Link or junction: look at the target.
                 match fs::metadata(&path) {
@@ -344,25 +469,36 @@ fn walk_audio(
                         }
                         subdirs.push(path);
                     }
-                    Ok(m) if m.is_file() && is_audio(&path) => {
+                    Ok(m) if m.is_file() && is_scannable(&path, &name) => {
                         if !on_file(path, &m) {
                             return WalkEnd::Stopped;
                         }
                     }
-                    _ => {}
+                    Ok(_) => {}
+                    // Its target is somewhere that can't be reached now.
+                    Err(_) => unreadable.push(path),
                 }
             } else if ft.is_dir() {
-                let Ok(meta) = entry.metadata() else { continue };
+                let Ok(meta) = entry.metadata() else {
+                    unreadable.push(path);
+                    continue;
+                };
                 if attrs(&meta) & (ATTR_HIDDEN | ATTR_SYSTEM) != 0 {
                     continue;
                 }
                 subdirs.push(path);
-            } else if ft.is_file() && is_audio(&path) {
-                let Ok(meta) = entry.metadata() else { continue };
+            } else if ft.is_file() && is_scannable(&path, &name) {
+                let Ok(meta) = entry.metadata() else {
+                    unreadable.push(path);
+                    continue;
+                };
                 if !on_file(path, &meta) {
                     return WalkEnd::Stopped;
                 }
             }
+        }
+        if !listed_all {
+            unreadable.push(dir);
         }
         // Reverse so the stack pops them in directory order.
         stack.extend(subdirs.into_iter().rev());
@@ -384,22 +520,24 @@ struct Tags {
     duration_ms: u64,
 }
 
-fn probe(path: &Path) -> Option<symphonia::core::probe::ProbeResult> {
+/// `Err` when the file can't be opened (missing, or locked by whatever is writing
+/// it); `Ok(None)` when it opens but isn't a format symphonia recognises.
+fn probe(path: &Path) -> std::io::Result<Option<symphonia::core::probe::ProbeResult>> {
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    let file = fs::File::open(path).ok()?;
+    let file = fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
     let fmt_opts = FormatOptions { enable_gapless: false, ..Default::default() };
-    symphonia::default::get_probe()
+    Ok(symphonia::default::get_probe()
         .format(&hint, mss, &fmt_opts, &MetadataOptions::default())
-        .ok()
+        .ok())
 }
 
 fn clean(v: &symphonia::core::meta::Value) -> Option<String> {
@@ -446,10 +584,10 @@ fn apply_tags(out: &mut Tags, rev: &symphonia::core::meta::MetadataRevision) {
     }
 }
 
-/// Tags + duration from headers only (no audio is decoded). `None` when the file
-/// can't be opened or isn't a format symphonia recognises.
-fn read_tags(path: &Path) -> Option<Tags> {
-    let mut probed = probe(path)?;
+/// Tags + duration from headers only (no audio is decoded). `Err` when the file can't
+/// be opened, `Ok(None)` when it isn't a format symphonia recognises.
+fn read_tags(path: &Path) -> std::io::Result<Option<Tags>> {
+    let Some(mut probed) = probe(path)? else { return Ok(None) };
     let mut tags = Tags::default();
     if let Some(mut m) = probed.metadata.get() {
         if let Some(rev) = m.skip_to_latest() {
@@ -473,7 +611,7 @@ fn read_tags(path: &Path) -> Option<Tags> {
             };
         }
     }
-    Some(tags)
+    Ok(Some(tags))
 }
 
 fn stem(path: &Path) -> String {
@@ -504,7 +642,8 @@ struct CacheEntry {
     size: u64,
     /// Modification time, nanoseconds since the unix epoch.
     mtime: u64,
-    /// Not opened yet (a cloud-only placeholder): re-read once it is local.
+    /// Not read yet (a cloud-only placeholder, or a file that couldn't be opened, e.g.
+    /// locked while being written): read again on the next scan.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     partial: bool,
 }
@@ -559,17 +698,23 @@ struct Job {
 }
 
 fn run_job(job: &Job) -> CacheEntry {
-    let tags = if job.cloud_only {
-        None
+    let (tags, partial) = if job.cloud_only {
+        (None, true)
     } else {
         // A malformed file must not take the scan down with it.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_tags(&job.path))).ok().flatten()
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_tags(&job.path))) {
+            Ok(Ok(tags)) => (tags, false),
+            // Couldn't open it: unknown, not "no tags" (an unchanged size and mtime
+            // would otherwise keep "Unknown artist" for good).
+            Ok(Err(_)) => (None, true),
+            Err(_) => (None, false),
+        }
     };
     CacheEntry {
         track: track_from(&job.path, tags.unwrap_or_default(), job.added_at),
         size: job.size,
         mtime: job.mtime,
-        partial: job.cloud_only,
+        partial,
     }
 }
 
@@ -616,9 +761,20 @@ const PROGRESS_EVERY: usize = 100;
 
 /// `scan`, also returning how many files were opened (for tests).
 fn scan_counted(progress: &dyn Fn(usize)) -> (Vec<LocalTrack>, usize) {
-    let src = sources();
-    let mut old: HashMap<String, CacheEntry> =
-        load_index().into_iter().map(|e| (path_key(&e.track.path), e)).collect();
+    // Without the folders list there is nothing to tell a gone track from one not
+    // looked for: keep the library as it was.
+    let Ok(src) = sources_checked() else { return (cached(), 0) };
+    // An index that can't be read now is not written over (it holds `added_at`).
+    let index = read_state::<IndexFile>(INDEX_FILE);
+    let index_ok = index.is_ok();
+    let mut old: HashMap<String, CacheEntry> = index
+        .ok()
+        .flatten()
+        .map(|i| i.entries)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (path_key(&e.track.path), e))
+        .collect();
     let now = now_secs();
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -654,17 +810,26 @@ fn scan_counted(progress: &dyn Fn(usize)) -> (Vec<LocalTrack>, usize) {
     };
 
     let mut visited = HashSet::new();
+    let mut unreadable: Vec<PathBuf> = Vec::new();
     for folder in &src.folders {
-        walk_audio(folder, &mut visited, None, &mut |p, m| {
+        // Renamed or deleted: its tracks leave (an unplugged drive's stay, below).
+        if source_gone(folder) {
+            continue;
+        }
+        walk_audio(folder, &mut visited, None, &mut unreadable, &mut |p, m| {
             consider(p, m, &mut tick);
             true
         });
     }
     for file in &src.files {
-        if let Ok(meta) = fs::metadata(file) {
-            if meta.is_file() && is_audio(file) {
-                consider(file.clone(), &meta, &mut tick);
+        match fs::metadata(file) {
+            Ok(meta) => {
+                if meta.is_file() && is_audio(file) {
+                    consider(file.clone(), &meta, &mut tick);
+                }
             }
+            Err(_) if source_gone(file) => {}
+            Err(_) => unreadable.push(file.clone()),
         }
     }
 
@@ -673,10 +838,19 @@ fn scan_counted(progress: &dyn Fn(usize)) -> (Vec<LocalTrack>, usize) {
     kept.extend(fresh);
     progress(done);
 
+    // Tracks under anything that couldn't be looked at stay as they were, `added_at`
+    // and all: a drive that isn't plugged in is not deleted music.
+    if !unreadable.is_empty() {
+        kept.extend(old.into_values().filter(|e| inside_any(&e.track.path, &unreadable)));
+    }
+
     kept.sort_by_cached_key(|e| path_key(&e.track.path));
     let mut tracks: Vec<LocalTrack> = kept.iter().map(|e| e.track.clone()).collect();
     sort_tracks(&mut tracks);
-    write_json(INDEX_FILE, &IndexFile { version: 1, entries: kept }, false);
+    if index_ok {
+        kept.retain(|e| savable(&e.track.path));
+        write_json(INDEX_FILE, &IndexFile { version: 1, entries: kept }, false);
+    }
     (tracks, opened)
 }
 
@@ -692,7 +866,7 @@ pub fn scan(progress: &dyn Fn(usize)) -> Vec<LocalTrack> {
 
 fn embedded_cover(path: &Path) -> Option<Vec<u8>> {
     use symphonia::core::meta::{StandardVisualKey, Visual};
-    let mut probed = probe(path)?;
+    let mut probed = probe(path).ok().flatten()?;
     let mut visuals: Vec<Visual> = Vec::new();
     if let Some(mut m) = probed.metadata.get() {
         if let Some(rev) = m.skip_to_latest() {
@@ -773,26 +947,29 @@ fn fixed_drive_roots() -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// The suggested folders. Their names are English keys, said in the active language
+/// where the Find dialog shows them (`local_ui::find_rows`, `translate`), so an open
+/// dialog follows a language switch; drive paths ("D:\Music") are names as they are.
 fn candidate_folders() -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     if let Some(d) = dirs::audio_dir() {
-        out.push(("Music".into(), d));
+        out.push((lightify_i18n::tr_noop!("Music").into(), d));
     }
     if let Some(d) = dirs::download_dir() {
-        out.push(("Downloads".into(), d));
+        out.push((lightify_i18n::tr_noop!("Downloads").into(), d));
     }
     if let Some(d) = dirs::desktop_dir() {
-        out.push(("Desktop".into(), d));
+        out.push((lightify_i18n::tr_noop!("Desktop").into(), d));
     }
     let onedrive = std::env::var_os("OneDrive")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| dirs::home_dir().map(|h| h.join("OneDrive")));
     if let Some(od) = onedrive {
-        out.push(("OneDrive — Music".into(), od.join("Music")));
+        out.push((lightify_i18n::tr_noop!("OneDrive \u{2014} Music").into(), od.join("Music")));
     }
     if let Some(d) = downloader_folder() {
-        out.push(("Lightify downloads".into(), d));
+        out.push((lightify_i18n::tr_noop!("Lightify downloads").into(), d));
     }
     for root in fixed_drive_roots() {
         for sub in ["Music", "Audio"] {
@@ -825,7 +1002,7 @@ fn find_candidates_in(folders: Vec<(String, PathBuf)>, budget: Duration, cap: us
         let deadline = Instant::now() + remaining / (total - i) as u32;
         let mut count = 0usize;
         let mut visited = HashSet::new();
-        let end = walk_audio(&path, &mut visited, Some(deadline), &mut |_, _| {
+        let end = walk_audio(&path, &mut visited, Some(deadline), &mut Vec::new(), &mut |_, _| {
             count += 1;
             count < cap
         });
@@ -846,24 +1023,25 @@ fn find_candidates_in(folders: Vec<(String, PathBuf)>, budget: Duration, cap: us
 
 // ── Playlists ───────────────────────────────────────────────────────────────
 
-fn load_playlists() -> Vec<LocalPlaylist> {
-    read_json(PLAYLISTS_FILE).unwrap_or_default()
-}
-
-fn edit_playlists<R>(f: impl FnOnce(&mut Vec<LocalPlaylist>) -> R) -> R {
+/// Apply an edit to the saved playlists. `None` (and nothing written) when the file is
+/// there but can't be read now, or the save failed: an empty list must never be
+/// written over playlists that only couldn't be read.
+fn edit_playlists<R>(f: impl FnOnce(&mut Vec<LocalPlaylist>) -> R) -> Option<R> {
     let _guard = state_lock();
-    let mut all = load_playlists();
+    let mut all: Vec<LocalPlaylist> = read_state(PLAYLISTS_FILE).ok()?.unwrap_or_default();
     let r = f(&mut all);
-    write_json(PLAYLISTS_FILE, &all, true);
-    r
+    for p in &mut all {
+        p.tracks.retain(|t| savable(t));
+    }
+    write_json(PLAYLISTS_FILE, &all, true).then_some(r)
 }
 
 pub fn playlists() -> Vec<LocalPlaylist> {
-    load_playlists()
+    read_json(PLAYLISTS_FILE).unwrap_or_default()
 }
 
-/// Create a playlist; returns its id.
-pub fn create_playlist(name: &str, tracks: &[PathBuf]) -> String {
+/// Create a playlist; returns its id (`None`: not saved, see `edit_playlists`).
+pub fn create_playlist(name: &str, tracks: &[PathBuf]) -> Option<String> {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     edit_playlists(|all| {
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
@@ -880,19 +1058,23 @@ pub fn create_playlist(name: &str, tracks: &[PathBuf]) -> String {
     })
 }
 
-pub fn add_to_playlist(id: &str, tracks: &[PathBuf]) {
+/// The edits below return whether they were saved.
+pub fn add_to_playlist(id: &str, tracks: &[PathBuf]) -> bool {
     edit_playlists(|all| {
         if let Some(p) = all.iter_mut().find(|p| p.id == id) {
             p.tracks.extend_from_slice(tracks);
         }
     })
+    .is_some()
 }
 
-/// Remove the entries at these indices (positions in `LocalPlaylist::tracks`).
-pub fn remove_from_playlist(id: &str, indices: &[usize]) {
-    let drop: HashSet<usize> = indices.iter().copied().collect();
+/// Remove entries by position in `LocalPlaylist::tracks`, each only while that position
+/// still holds the path it was picked with (the list may have changed since).
+pub fn remove_from_playlist(id: &str, entries: &[(usize, PathBuf)]) -> bool {
     edit_playlists(|all| {
         if let Some(p) = all.iter_mut().find(|p| p.id == id) {
+            let drop: HashSet<usize> =
+                entries.iter().filter(|(i, path)| p.tracks.get(*i) == Some(path)).map(|(i, _)| *i).collect();
             let mut i = 0;
             p.tracks.retain(|_| {
                 let keep = !drop.contains(&i);
@@ -901,18 +1083,20 @@ pub fn remove_from_playlist(id: &str, indices: &[usize]) {
             });
         }
     })
+    .is_some()
 }
 
-pub fn rename_playlist(id: &str, name: &str) {
+pub fn rename_playlist(id: &str, name: &str) -> bool {
     edit_playlists(|all| {
         if let Some(p) = all.iter_mut().find(|p| p.id == id) {
             p.name = name.to_string();
         }
     })
+    .is_some()
 }
 
-pub fn delete_playlist(id: &str) {
-    edit_playlists(|all| all.retain(|p| p.id != id))
+pub fn delete_playlist(id: &str) -> bool {
+    edit_playlists(|all| all.retain(|p| p.id != id)).is_some()
 }
 
 #[cfg(test)]
@@ -949,6 +1133,7 @@ mod tests {
         fn drop(&mut self) {
             TEST_STATE_DIR.with(|d| *d.borrow_mut() = None);
             TEST_DOWNLOAD_DIR.with(|d| *d.borrow_mut() = None);
+            TEST_VOLUMES.with(|v| v.borrow_mut().clear());
             let _ = fs::remove_dir_all(&self.root);
         }
     }
@@ -1191,13 +1376,14 @@ mod tests {
     fn playlist_crud() {
         let _env = Env::new("pl");
         let p = |s: &str| PathBuf::from(s);
-        let id = create_playlist("Mix", &[p("a"), p("b")]);
-        let id2 = create_playlist("Other", &[]);
+        let id = create_playlist("Mix", &[p("a"), p("b")]).unwrap();
+        let id2 = create_playlist("Other", &[]).unwrap();
         assert_ne!(id, id2);
-        add_to_playlist(&id, &[p("c"), p("a"), p("d")]);
+        assert!(add_to_playlist(&id, &[p("c"), p("a"), p("d")]));
         assert_eq!(playlists()[0].tracks, [p("a"), p("b"), p("c"), p("a"), p("d")]);
-        // Indices, not paths: only the second "a" goes; out-of-range ignored.
-        remove_from_playlist(&id, &[3, 1, 99]);
+        // Positions, not paths: only the second "a" goes; out-of-range ignored, and so
+        // is a position that no longer holds the path it was picked with.
+        assert!(remove_from_playlist(&id, &[(3, p("a")), (1, p("b")), (99, p("x")), (2, p("d"))]));
         assert_eq!(playlists()[0].tracks, [p("a"), p("c"), p("d")]);
         rename_playlist(&id, "Renamed");
         assert_eq!(playlists()[0].name, "Renamed");
@@ -1209,5 +1395,174 @@ mod tests {
         add_to_playlist("nope", &[p("x")]);
         delete_playlist("nope");
         assert_eq!(playlists(), all);
+    }
+
+    fn backdate_index(at: u64) {
+        let mut idx: IndexFile = read_json(INDEX_FILE).unwrap();
+        for e in &mut idx.entries {
+            e.track.added_at = at;
+        }
+        write_json(INDEX_FILE, &idx, false);
+    }
+
+    #[test]
+    fn scan_keeps_tracks_of_a_source_that_cant_be_reached() {
+        let env = Env::new("unreach");
+        // "Drive" and "Other" stand in for two drives (unplugging one = renaming it).
+        TEST_VOLUMES.with(|v| *v.borrow_mut() = vec![env.root.join("Drive"), env.root.join("Other")]);
+        let music = env.dir("Drive/Music");
+        let a = music.join("a.wav");
+        wav(&a, 800, Some("Kept"), Some("Artist"));
+        let loose_dir = env.dir("Other");
+        let loose = loose_dir.join("loose.wav");
+        wav(&loose, 800, None, None);
+        add_paths(&[music.clone(), loose.clone()]);
+        assert_eq!(scan(&|_| {}).len(), 2);
+        backdate_index(42);
+
+        // The "drive" goes away: the folder and the loose file's folder are both gone.
+        let away = env.root.join("Unplugged");
+        fs::rename(env.root.join("Drive"), &away).unwrap();
+        fs::rename(&loose_dir, env.root.join("OtherAway")).unwrap();
+        let (tracks, opened) = scan_counted(&|_| {});
+        assert_eq!(opened, 0);
+        assert_eq!(tracks.len(), 2, "unreachable sources keep their tracks: {tracks:#?}");
+        assert!(tracks.iter().all(|t| t.added_at == 42), "and their added_at");
+        assert_eq!(tracks.iter().find(|t| t.path == a).unwrap().title, "Kept");
+        assert_eq!(cached(), tracks, "and they stay in the index");
+
+        // Back again: still the same tracks, nothing reopened.
+        fs::rename(&away, env.root.join("Drive")).unwrap();
+        fs::rename(env.root.join("OtherAway"), &loose_dir).unwrap();
+        let (tracks, opened) = scan_counted(&|_| {});
+        assert_eq!((tracks.len(), opened), (2, 0));
+        assert!(tracks.iter().all(|t| t.added_at == 42));
+
+        // A file deleted from a folder that can be read is really gone, loose or not.
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&loose).unwrap();
+        assert!(scan(&|_| {}).is_empty());
+    }
+
+    #[test]
+    fn a_renamed_or_deleted_watched_folder_leaves_no_ghost_tracks() {
+        let env = Env::new("gone");
+        // One "drive" that stays plugged in.
+        TEST_VOLUMES.with(|v| *v.borrow_mut() = vec![env.root.join("Drive")]);
+        let music = env.dir("Drive/Music");
+        let deep = env.dir("Drive/Old/Deep");
+        let loose_dir = env.dir("Drive/Loose/Sub");
+        wav(&music.join("a.wav"), 800, None, None);
+        wav(&deep.join("b.wav"), 800, None, None);
+        let loose = loose_dir.join("c.wav");
+        wav(&loose, 800, None, None);
+        add_paths(&[music.clone(), deep.clone(), loose.clone()]);
+        assert_eq!(scan(&|_| {}).len(), 3);
+
+        // Renamed (its parent lists fine), its parent folder deleted with it (only the
+        // drive lists), and a loose file whose folder went the same way.
+        fs::rename(&music, env.root.join("Drive/Music (old)")).unwrap();
+        fs::remove_dir_all(env.root.join("Drive/Old")).unwrap();
+        fs::remove_dir_all(env.root.join("Drive/Loose")).unwrap();
+        assert!(scan(&|_| {}).is_empty(), "nothing left behind");
+        assert!(cached().is_empty());
+        // The folders stay watched (they may come back), just with nothing in them.
+        assert_eq!(sources().folders.len(), 2);
+    }
+
+    #[test]
+    fn unknown_tags_are_said_in_the_active_language_not_stored_in_it() {
+        // Stored in English (old caches hold exactly these), shown through `translate`.
+        assert_eq!(track_from(Path::new("x.wav"), Tags::default(), 0).artist, "Unknown artist");
+        assert_eq!(shown(UNKNOWN_ARTIST), lightify_i18n::translate("Unknown artist"));
+        assert_eq!(shown(UNKNOWN_ALBUM), lightify_i18n::translate("Unknown album"));
+        assert_eq!(shown("Ellis Marrow"), "Ellis Marrow");
+    }
+
+    #[test]
+    fn scan_skips_the_downloaders_temp_files() {
+        let env = Env::new("tilde");
+        let music = env.dir("Music");
+        wav(&music.join("~Song Being Written.wav"), 10, None, None);
+        wav(&music.join("Song.wav"), 10, None, None);
+        add_paths(&[music]);
+        let titles: Vec<String> = scan(&|_| {}).into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, ["Song"]);
+    }
+
+    #[test]
+    fn a_corrupt_playlists_file_is_set_aside_not_lost() {
+        let env = Env::new("plcorrupt");
+        let file = env.root.join("state").join(PLAYLISTS_FILE);
+        fs::write(&file, b"{ not json").unwrap();
+        assert!(playlists().is_empty());
+        let id = create_playlist("New", &[PathBuf::from("a")]).expect("saved");
+        assert_eq!(playlists().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        let aside = env.root.join("state").join(format!("{PLAYLISTS_FILE}.corrupt"));
+        assert_eq!(fs::read(aside).unwrap(), b"{ not json");
+    }
+
+    /// Opens `path` so nothing else can open it until the handle is dropped (what the
+    /// downloader's writer or another app can do to a file).
+    #[cfg(windows)]
+    fn lock_file(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_playlists_file_that_cant_be_read_is_not_written_over() {
+        let _env = Env::new("pllocked");
+        let id = create_playlist("Keep me", &[PathBuf::from("a")]).unwrap();
+        let file = state_dir().join(PLAYLISTS_FILE);
+        let before = fs::read(&file).unwrap();
+        let lock = lock_file(&file);
+        assert_eq!(create_playlist("Other", &[]), None);
+        assert!(!add_to_playlist(&id, &[PathBuf::from("b")]));
+        assert!(!delete_playlist(&id));
+        drop(lock);
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(playlists()[0].name, "Keep me");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_file_is_read_again_on_the_next_scan() {
+        let env = Env::new("locked");
+        let music = env.dir("Music");
+        let a = music.join("busy.wav");
+        wav(&a, 800, Some("Real Title"), Some("Real Artist"));
+        add_paths(&[music]);
+        let lock = lock_file(&a);
+        let (tracks, opened) = scan_counted(&|_| {});
+        assert_eq!((tracks.len(), opened), (1, 1));
+        assert_eq!(tracks[0].artist, UNKNOWN_ARTIST);
+        drop(lock);
+        let (tracks, opened) = scan_counted(&|_| {});
+        assert_eq!(opened, 1, "reopened although size and mtime didn't change");
+        assert_eq!((tracks[0].title.as_str(), tracks[0].artist.as_str()), ("Real Title", "Real Artist"));
+        let (_, opened) = scan_counted(&|_| {});
+        assert_eq!(opened, 0, "read once it could be: cached again");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_json_cant_hold_is_left_out_not_the_whole_save() {
+        use std::os::windows::ffi::OsStringExt;
+        let env = Env::new("utf16");
+        let music = env.dir("Music");
+        // "bad" + an unpaired surrogate + ".wav": a legal NTFS name with no UTF-8 form.
+        let name: Vec<u16> = "bad".encode_utf16().chain([0xD800]).chain(".wav".encode_utf16()).collect();
+        let bad = music.join(std::ffi::OsString::from_wide(&name));
+        wav(&bad, 10, None, None);
+        let good = music.join("good.wav");
+        wav(&good, 10, None, None);
+        add_paths(&[music]);
+        assert_eq!(scan(&|_| {}).len(), 2, "the file still plays this session");
+        assert_eq!(cached().iter().map(|t| t.path.clone()).collect::<Vec<_>>(), [good.clone()], "the index was saved");
+        let id = create_playlist("Mix", &[bad.clone(), good.clone()]).expect("saved");
+        assert_eq!(playlists().iter().find(|p| p.id == id).unwrap().tracks, [good]);
+        assert_eq!(add_paths(&[bad]).skipped, 1);
     }
 }

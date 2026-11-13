@@ -33,7 +33,7 @@ Lightify signs in through your own free Spotify developer app. That keeps your l
 
 ## Step 2: Install Lightify
 
-1. Download `Lightify_2.3.12_x64-setup.exe` from [lightify.stream](https://lightify.stream).
+1. Download `Lightify_2.3.22_x64-setup.exe` from [lightify.stream](https://lightify.stream).
 2. Run it. The installer isn't code-signed yet, so Windows may show **"Windows protected your PC"**. Click **More info**, then **Run anyway**.
 3. Choose whether to install for just you or everyone on the PC, tick **I accept the licence**, then click **Install**.
 
@@ -42,7 +42,7 @@ Lightify keeps itself up to date: when a new version is ready, a **Restart** but
 To make sure the file wasn't changed on the way to you, compare it with `SHA256SUMS.txt` on the download page:
 
 ```powershell
-Get-FileHash .\Lightify_2.3.12_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Lightify_2.3.22_x64-setup.exe -Algorithm SHA256
 ```
 
 ---

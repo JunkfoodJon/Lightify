@@ -12,12 +12,19 @@
 //! **logical** pixels, so a window keeps its look when it lands on a monitor with a
 //! different scale.
 //!
+//! A restore is fitted to the screen as it is now: a window maximized on another
+//! monitor than its normal rect comes back maximized there (`restore_rect`, from
+//! `max_at`), and once the restored window has settled it is pulled inside its
+//! monitor's work area — shrunk if it has to be — so a smaller monitor or the taskbar
+//! no longer hides part of it (`fit_if_pending`).
+//!
 //! What is deliberately NOT recorded: a minimized window (Windows reports it at
 //! -32000,-32000), a maximized window's size (it would become the "restore" size), the
 //! mini player's size (fixed per layout), and anything smaller than the full window's
 //! minimum (a frame caught mid-switch).
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// The full window's minimum, in logical px (matches `MainWindow`'s `min-width`/`min-height`).
@@ -48,7 +55,15 @@ pub struct Geom {
     /// The mini player's outer top-left, physical px.
     #[serde(default)]
     pub mini_pos: Option<(i32, i32)>,
+    /// The maximized window's centre, physical px: which monitor it was maximized on
+    /// (the normal rect may sit on another one).
+    #[serde(default)]
+    pub max_at: Option<(i32, i32)>,
 }
+
+/// A monitor's work area (the screen less the taskbar): left, top, right, bottom in
+/// physical px.
+pub type Area = (i32, i32, i32, i32);
 
 static GEOM: Mutex<Option<Geom>> = Mutex::new(None);
 /// What is on disk, so an unchanged record is never rewritten.
@@ -129,7 +144,12 @@ pub fn capture(w: &slint::winit_030::winit::window::Window, mini: bool) {
     }
     if w.is_maximized() {
         // The normal rect stays what it was: it is what un-maximizing returns to.
-        update(|g| g.maximized = true);
+        let sz = w.outer_size();
+        let at = (pos.x + sz.width as i32 / 2, pos.y + sz.height as i32 / 2);
+        update(|g| {
+            g.maximized = true;
+            g.max_at = Some(at);
+        });
         return;
     }
     let sf = w.scale_factor();
@@ -164,6 +184,124 @@ pub fn on_screen(x: i32, y: i32) -> bool {
     }
 }
 
+/// The normal rect to restore: as saved, unless the window was maximized on another
+/// monitor — then the rect moves onto that one (keeping its place in the work area
+/// as far as it fits), so the window maximizes there and un-maximizes there too.
+pub fn restore_rect(g: &Geom) -> Option<Rect> {
+    let r = g.normal?;
+    #[cfg(windows)]
+    if let Some((mx, my)) = g.max_at.filter(|_| g.maximized) {
+        if let Some((to_mon, to)) = monitor_at(mx, my) {
+            let from = monitor_at(r.x + 24, r.y + 12);
+            if from.map(|f| f.0) != Some(to_mon) {
+                let (x, y) = move_to_area(r.x, r.y, from.map_or(to, |f| f.1), to);
+                return Some(Rect { x, y, ..r });
+            }
+        }
+    }
+    Some(r)
+}
+
+/// `(x, y)` keeps its offset from `from`'s top-left, now from `to`'s; clamped so at
+/// least the title bar's start stays inside `to`.
+pub fn move_to_area(x: i32, y: i32, from: Area, to: Area) -> (i32, i32) {
+    let nx = to.0 + (x - from.0);
+    let ny = to.1 + (y - from.1);
+    (nx.clamp(to.0, (to.2 - 200).max(to.0)), ny.clamp(to.1, (to.3 - 100).max(to.1)))
+}
+
+/// `(x, y, w, h)` (physical px) inside `work`: shrunk to it first if larger, then
+/// moved in.
+pub fn fit_rect((x, y, w, h): (i32, i32, i32, i32), work: Area) -> (i32, i32, i32, i32) {
+    let (l, t, r, b) = work;
+    let w = w.min(r - l).max(1);
+    let h = h.min(b - t).max(1);
+    (x.clamp(l, r - w), y.clamp(t, b - h), w, h)
+}
+
+/// Set by a restore (`fit_next`), taken by the next settled capture.
+static FIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The window was just restored: fit it once it has settled (`fit_if_pending`).
+pub fn fit_next() {
+    FIT_PENDING.store(true, Ordering::SeqCst);
+}
+
+/// Whether the pending fit runs now: only on the full window in its normal state. A
+/// window restored maximized (or minimized, full screen, the mini player) keeps the fit
+/// pending until it first settles un-maximized, so the normal rect it returns to is
+/// pulled inside the work area then.
+fn take_fit(mini: bool, maximized: bool, minimized: bool, fullscreen: bool) -> bool {
+    if mini || maximized || minimized || fullscreen {
+        return false;
+    }
+    FIT_PENDING.swap(false, Ordering::SeqCst)
+}
+
+/// Once after a restore: pull the full (not maximized) window inside the work area of
+/// the monitor it landed on. Run when the window has settled, so the monitor's own
+/// scale is already applied to its size.
+pub fn fit_if_pending(w: &slint::winit_030::winit::window::Window, mini: bool) {
+    use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
+    if !take_fit(mini, w.is_maximized(), w.is_minimized() == Some(true), w.fullscreen().is_some()) {
+        return;
+    }
+    let Ok(pos) = w.outer_position() else { return };
+    let (outer, inner) = (w.outer_size(), w.inner_size());
+    let (ow, oh) = (outer.width as i32, outer.height as i32);
+    let Some(work) = work_area_near(pos.x + ow / 2, pos.y + oh / 2) else { return };
+    let (x, y, fw, fh) = fit_rect((pos.x, pos.y, ow, oh), work);
+    if (fw, fh) != (ow, oh) {
+        let _ = w.request_inner_size(PhysicalSize::new(
+            (inner.width as i32 - (ow - fw)).max(1) as u32,
+            (inner.height as i32 - (oh - fh)).max(1) as u32,
+        ));
+    }
+    if (x, y) != (pos.x, pos.y) {
+        w.set_outer_position(PhysicalPosition::new(x, y));
+    }
+}
+
+/// The monitor under (x, y) and its work area; `None` off every monitor.
+#[cfg(windows)]
+fn monitor_at(x: i32, y: i32) -> Option<(usize, Area)> {
+    use windows_sys::Win32::Graphics::Gdi::MONITOR_DEFAULTTONULL;
+    monitor_info(x, y, MONITOR_DEFAULTTONULL)
+}
+
+/// The work area of the monitor under (or nearest to) (x, y).
+fn work_area_near(x: i32, y: i32) -> Option<Area> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST;
+        monitor_info(x, y, MONITOR_DEFAULTTONEAREST).map(|m| m.1)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (x, y);
+        None
+    }
+}
+
+#[cfg(windows)]
+fn monitor_info(x: i32, y: i32, flags: windows_sys::Win32::Graphics::Gdi::MONITOR_FROM_FLAGS) -> Option<(usize, Area)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO};
+    unsafe {
+        let mon = MonitorFromPoint(POINT { x, y }, flags);
+        if mon.is_null() {
+            return None;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(mon, &mut mi) == 0 {
+            return None;
+        }
+        let r = mi.rcWork;
+        Some((mon as usize, (r.left, r.top, r.right, r.bottom)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +312,7 @@ mod tests {
             normal: Some(Rect { x: 0, y: 0, w: 200.0, h: 100.0 }),
             maximized: true,
             mini_pos: Some((5, 5)),
+            max_at: None,
         };
         let s = sanitize(bad);
         assert_eq!(s.normal, None);
@@ -188,6 +327,42 @@ mod tests {
     #[test]
     fn an_older_or_partial_file_still_loads() {
         let g: Geom = serde_json::from_str(r#"{"maximized":true}"#).unwrap();
-        assert!(g.maximized && g.normal.is_none() && g.mini_pos.is_none());
+        assert!(g.maximized && g.normal.is_none() && g.mini_pos.is_none() && g.max_at.is_none());
+    }
+
+    #[test]
+    fn a_window_is_fitted_inside_the_work_area() {
+        // A 1920x1040 work area (a 1080p screen less a 40 px taskbar).
+        let work = (0, 0, 1920, 1040);
+        // Already inside: untouched.
+        assert_eq!(fit_rect((100, 80, 980, 660), work), (100, 80, 980, 660));
+        // Hanging off the right and under the taskbar: moved in, same size.
+        assert_eq!(fit_rect((1500, 700, 980, 660), work), (940, 380, 980, 660));
+        // Saved on a bigger monitor: shrunk to the work area, then placed in it.
+        assert_eq!(fit_rect((-50, -20, 2560, 1400), work), (0, 0, 1920, 1040));
+        // A second monitor to the left (negative coordinates) works the same.
+        assert_eq!(fit_rect((-2000, 10, 980, 660), (-1920, 0, 0, 1080)), (-1920, 10, 980, 660));
+    }
+
+    #[test]
+    fn a_window_restored_maximized_is_fitted_once_it_is_un_maximized() {
+        fit_next();
+        // Restored maximized: nothing to fit yet, and the fit is not used up.
+        assert!(!take_fit(false, true, false, false));
+        assert!(!take_fit(false, false, true, false), "minimized: still waiting");
+        assert!(!take_fit(true, false, false, false), "mini player: still waiting");
+        // The first settle as a normal window fits it, once.
+        assert!(take_fit(false, false, false, false));
+        assert!(!take_fit(false, false, false, false));
+    }
+
+    #[test]
+    fn a_rect_moves_onto_the_monitor_it_was_maximized_on() {
+        let left = (-1920, 0, 0, 1040);
+        let right = (0, 0, 2560, 1400);
+        // Same offset into the other monitor's work area.
+        assert_eq!(move_to_area(-1800, 100, left, right), (120, 100));
+        // An offset the target can't take is clamped so the title bar stays on it.
+        assert_eq!(move_to_area(2400, 1300, right, left), (-200, 940));
     }
 }

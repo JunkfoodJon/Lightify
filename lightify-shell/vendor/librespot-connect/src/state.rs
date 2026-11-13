@@ -30,7 +30,7 @@ use crate::{
 use log::LevelFilter;
 use protobuf::{EnumOrUnknown, MessageField};
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashSet, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -131,6 +131,15 @@ pub(super) struct ConnectState {
 
     /// The volume adjustment per step when handling individual volume adjustments.
     pub volume_step_size: u16,
+
+    /// Lightify patch: queued tracks that don't fit in `next_tracks` (Spotify's limit of
+    /// [SPOTIFY_MAX_NEXT_TRACKS_SIZE]), in play order, moved over as room appears.
+    queue_overflow: VecDeque<ProvidedTrack>,
+    /// Lightify patch: context tracks the user removed from what plays next, by uid. The
+    /// context itself keeps them (its shuffle bookkeeping depends on its length), so
+    /// filling up skips them: they stay gone through repeat and a shuffle change, until
+    /// something is loaded.
+    removed_uids: HashSet<String>,
 }
 
 impl ConnectState {
@@ -215,6 +224,7 @@ impl ConnectState {
     fn reset(&mut self) {
         self.set_active(false);
         self.queue_count = 0;
+        self.queue_overflow.clear();
 
         // preserve the session_id
         let session_id = self.player().session_id.clone();
@@ -395,7 +405,8 @@ impl ConnectState {
             self.active_context, self.fill_up_context
         );
 
-        let new_index = new_index.unwrap_or(0);
+        // Lightify patch: "from the start" means the first track not removed by hand.
+        let new_index = new_index.unwrap_or_else(|| self.first_kept_index());
         self.update_current_index(|i| i.track = new_index as u32);
         self.update_context_index(self.active_context, new_index + 1)?;
         self.fill_up_context = self.active_context;
@@ -410,15 +421,18 @@ impl ConnectState {
             let context = self.get_context(self.active_context)?;
 
             let before_new_track = context.tracks.len() - new_index;
-            self.player_mut().prev_tracks = context
+            let mut prev_tracks: Vec<_> = context
                 .tracks
                 .iter()
                 .rev()
                 .skip(before_new_track)
+                // Lightify patch: a track removed by hand doesn't return by going back.
+                .filter(|t| !self.removed_uids.contains(&t.uid))
                 .take(SPOTIFY_MAX_PREV_TRACKS_SIZE)
-                .rev()
                 .cloned()
                 .collect();
+            prev_tracks.reverse();
+            self.player_mut().prev_tracks = prev_tracks;
             debug!("has {} prev tracks", self.prev_tracks().len())
         }
 

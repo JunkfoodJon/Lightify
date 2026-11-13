@@ -523,7 +523,8 @@ export component InstallerWindow inherits Window {
     background: Pal.bg;
     default-font-family: "Space Grotesk";
     width: root.mode == "update" ? 420px : 600px;
-    height: root.mode == "update" ? 172px : 440px;
+    // Install is 80px taller than uninstall for the welcome page's Premium line (2026-11-06).
+    height: root.mode == "update" ? 172px : (root.mode == "install" ? 520px : 440px);
 
     property <bool> busy: root.page == "installing" || root.page == "removing" || root.closing;
 
@@ -670,6 +671,13 @@ export component InstallerWindow inherits Window {
                         }
                     }
                 }
+            }
+            // Owner, 2026-11-06: say up front what needs Premium.
+            Text {
+                text: @tr("Most features need a Spotify Premium account, including the player and the downloader. Local mode plays your own music files with any account.");
+                font-size: 13px;
+                color: Pal.muted;
+                wrap: word-wrap;
             }
             VerticalLayout {
                 spacing: 8px;

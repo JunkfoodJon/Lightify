@@ -64,6 +64,9 @@ pub struct PkceAuth {
     client_id: String,
     verifier: String,
     challenge: String,
+    /// Sent to Spotify and expected back on the redirect. Port 8901 is open to every page
+    /// the browser has loaded, so without it any of them could end a sign-in.
+    state: String,
 }
 
 /// The claimed redirect port. Bound *before* the browser opens, so a fast redirect
@@ -81,23 +84,25 @@ impl PkceAuth {
         let bytes: Vec<u8> = (0..64).map(|_| rand::thread_rng().gen::<u8>()).collect();
         let verifier = URL_SAFE_NO_PAD.encode(bytes);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        Self { client_id: client_id.to_string(), verifier, challenge }
+        let state = URL_SAFE_NO_PAD.encode(rand::thread_rng().gen::<[u8; 32]>());
+        Self { client_id: client_id.to_string(), verifier, challenge, state }
     }
 
     pub fn auth_url(&self) -> String {
         format!(
-            "{AUTH_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge_method=S256&code_challenge={}",
+            "{AUTH_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge_method=S256&code_challenge={}&state={}",
             enc(&self.client_id),
             enc(REDIRECT_URI),
             enc(SCOPES),
             enc(&self.challenge),
+            enc(&self.state),
         )
     }
 
     /// Wait for the browser redirect, then exchange, verify and save. Returns the
     /// account's display name.
     pub async fn finish(&self, callback: Callback) -> Result<String, String> {
-        let code = wait_for_code(callback.0).await?;
+        let code = wait_for_code(callback.0, &self.state).await?;
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(8))
             .timeout(std::time::Duration::from_secs(20))
@@ -153,7 +158,10 @@ impl PkceAuth {
         let dir = config::data_dir();
         let cid = self.client_id.clone();
         config::update_config(&dir, |c| c.client_id = cid)?;
-        config::save_token(&dir, &token);
+        // The session is loaded back from this file next, so a failed write is a failed
+        // sign-in, not something to find out about from "No cached Spotify session".
+        config::save_token_checked(&dir, &token)
+            .map_err(|e| format!("Spotify signed you in, but Lightify couldn't save it: {e}"))?;
         Ok(token.cached_display_name.clone())
     }
 }
@@ -183,10 +191,11 @@ fn parse_token(body: &serde_json::Value) -> Result<TokenInfo, String> {
     })
 }
 
-/// Serve the redirect until it carries a `code` (or an `error`). Other requests —
-/// a browser's favicon probe, say — get a 404 and the wait continues. No timeout
+/// Serve the redirect until it carries a `code` (or an `error`) with the `state` this
+/// sign-in sent. Other requests — a browser's favicon probe, say — get a 404, and a
+/// redirect with the wrong `state` is refused: the wait continues either way. No timeout
 /// here: the caller races this against the user cancelling.
-async fn wait_for_code(listener: TcpListener) -> Result<String, String> {
+async fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<String, String> {
     loop {
         let (mut stream, _) = listener.accept().await.map_err(|e| format!("Sign-in callback: {e}"))?;
         // Bounded: browsers open speculative connections that never send a request,
@@ -215,6 +224,10 @@ async fn wait_for_code(listener: TcpListener) -> Result<String, String> {
             let _ = respond(&mut stream, "404 Not Found", "Not found").await;
             continue;
         }
+        if !state_matches(query_param(query, "state").as_deref(), expected_state) {
+            let _ = respond(&mut stream, "400 Bad Request", &page("That wasn't this sign-in", "This request didn't come from the sign-in Lightify started, so it was ignored. Finish signing in from the page Lightify opened.")).await;
+            continue;
+        }
         if let Some(code) = query_param(query, "code") {
             let _ = respond(&mut stream, "200 OK", &page("You're signed in", "You can close this tab and go back to Lightify.")).await;
             return Ok(code);
@@ -228,6 +241,14 @@ async fn wait_for_code(listener: TcpListener) -> Result<String, String> {
             format!("Spotify sign-in failed: {error}")
         });
     }
+}
+
+/// Compares every byte whatever the first difference, so the time taken says nothing
+/// about how much of a guess was right.
+fn state_matches(got: Option<&str>, expected: &str) -> bool {
+    got.is_some_and(|got| {
+        got.len() == expected.len() && got.bytes().zip(expected.bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    })
 }
 
 /// The `error` value comes straight from the redirect's query string; it must not be
@@ -314,13 +335,13 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let waiter = tokio::spawn(wait_for_code(listener));
+        let waiter = tokio::spawn(async move { wait_for_code(listener, "st").await });
         for (req, want) in [
             ("GET /favicon.ico HTTP/1.1
 Host: x
 
 ", "404"),
-            ("GET /callback?error=access_denied HTTP/1.1
+            ("GET /callback?error=access_denied&state=st HTTP/1.1
 Host: x
 
 ", "400"),
@@ -340,9 +361,9 @@ Host: x
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let waiter = tokio::spawn(wait_for_code(listener));
+        let waiter = tokio::spawn(async move { wait_for_code(listener, "st").await });
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET /callback?code=AQB%2Dx HTTP/1.1
+        s.write_all(b"GET /callback?code=AQB%2Dx&state=st HTTP/1.1
 Host: x
 
 ").await.unwrap();
@@ -350,6 +371,50 @@ Host: x
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.contains("signed in"), "{out}");
         assert_eq!(waiter.await.unwrap().unwrap(), "AQB-x");
+    }
+
+    /// Any page the browser has open can reach port 8901. A redirect without this
+    /// sign-in's `state`, whether it carries a code or an error, gets no success page
+    /// and doesn't end the wait; the real one still lands afterwards.
+    #[tokio::test]
+    async fn callback_with_the_wrong_state_is_refused_and_the_wait_goes_on() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let waiter = tokio::spawn(async move { wait_for_code(listener, "good-state").await });
+        for query in [
+            "code=forged",
+            "code=forged&state=bad-state!",
+            "code=forged&state=good-stat",
+            "error=access_denied",
+            "error=access_denied&state=bad-state!",
+        ] {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(format!("GET /callback?{query} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).await.unwrap();
+            assert!(out.starts_with("HTTP/1.1 400"), "{query}: {out}");
+            assert!(!out.contains("signed in"), "{query}: {out}");
+            assert!(!waiter.is_finished(), "{query} ended the wait");
+        }
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /callback?code=real&state=good-state HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.contains("signed in"), "{out}");
+        assert_eq!(waiter.await.unwrap().unwrap(), "real");
+    }
+
+    #[test]
+    fn state_is_random_sent_and_compared_whole() {
+        let (a, b) = (PkceAuth::new("c"), PkceAuth::new("c"));
+        assert_ne!(a.state, b.state);
+        assert!(a.state.len() >= 43, "32 random bytes, {}", a.state);
+        assert!(a.auth_url().ends_with(&format!("&state={}", enc(&a.state))));
+        assert!(state_matches(Some("abc"), "abc"));
+        for wrong in [None, Some(""), Some("abd"), Some("ab"), Some("abcd")] {
+            assert!(!state_matches(wrong, "abc"), "{wrong:?}");
+        }
     }
 
     #[test]

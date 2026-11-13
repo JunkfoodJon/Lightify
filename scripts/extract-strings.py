@@ -12,6 +12,18 @@ which is what a translator starts a `<lang>/LC_MESSAGES/<domain>.po` from. Place
 block right above a call that has a line starting `Translators:` becomes the entry's `#.`
 note (from that line to the end of the block).
 
+The Android app has a domain of its own (ANDROID-PLAN.md §6a), written to
+
+    lightify-android/translations/lightify-android.pot
+
+from its English resources (`app/src/main/res/values/strings*.xml`) and the Rust strings
+of `lightify-android/rust/src` (`tr!` / `trn!` / `tr_noop!`). Android's `%1$s` becomes the
+`.po` convention: one argument `{}`, several `{0}` `{1}` … in argument order, and in a
+`<plurals>` the count (its highest-numbered `%d`) `{n}`. Gradle turns the catalogs back
+into `values-<lang>/strings.xml` with the same rules (app/build.gradle.kts, PoResources).
+Strings marked `translatable="false"`, or with no letters, stay out; a
+`<!-- msgctxt: … -->` comment right above a string gives it a context.
+
     python scripts/extract-strings.py                    write both templates
     python scripts/extract-strings.py lightify-shell     write just that one
     python scripts/extract-strings.py --check            are they up to date? (lists the
@@ -31,7 +43,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOMAINS = {
     "lightify-shell": os.path.join(ROOT, "lightify-shell"),
     "lightify-installer": os.path.join(ROOT, "lightify-installer"),
+    "lightify-android": os.path.join(ROOT, "lightify-android"),
 }
+ANDROID = "lightify-android"
 SKIP_DIRS = {"target", "vendor", "translations", "node_modules", "__pycache__"}
 
 
@@ -188,6 +202,8 @@ def translator_note(text, at):
 
 def collect(domain):
     """{(context, msgid): entry} in first-seen order, plus problems found on the way."""
+    if domain == ANDROID:
+        return collect_android()
     crate = DOMAINS[domain]
     entries, problems = {}, []
     files = list(sources(crate, ".slint")) + list(sources(crate, ".rs"))
@@ -206,6 +222,133 @@ def collect(domain):
     return list(entries.values()), counts, problems
 
 
+# ── Android ───────────────────────────────────────────────────────────────────
+
+ANDROID_RES = re.compile(
+    r'(?:<!--\s*msgctxt:\s*(?P<ctx>.*?)\s*-->\s*)?'
+    r'<(?P<tag>string|plurals)\s+name="(?P<name>[^"]+)"(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>',
+    re.S,
+)
+ANDROID_ITEM = re.compile(r'<item\s+quantity="(\w+)"\s*>(.*?)</item>', re.S)
+# A format argument as Android writes it (`%1$s`, `%2$,d`); `%%` is a literal percent.
+ANDROID_ARG = re.compile(r"%%|%(\d+)\$([-#+ 0,(]*\d*(?:\.\d+)?[a-zA-Z])")
+
+
+def android_text(raw):
+    """A resource value as aapt2 compiles it: XML entities, `\\'` `\\"` `\\n` `\\t` `\\uXXXX`
+    escapes, unescaped double quotes dropped, whitespace runs one space (not inside
+    quotes), the ends trimmed."""
+    raw = re.sub(r"&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);", lambda m: {
+        "amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'",
+    }.get(m.group(1)) or chr(int(m.group(1)[2:], 16) if m.group(1)[1] == "x" else int(m.group(1)[1:])), raw)
+    out, quoted, i = [], False, 0
+    while i < len(raw):
+        c = raw[i]
+        if c == "\\" and i + 1 < len(raw):
+            e = raw[i + 1]
+            if e == "u":
+                out.append(chr(int(raw[i + 2:i + 6], 16)))
+                i += 6
+                continue
+            out.append({"n": "\n", "t": "\t"}.get(e, e))
+            i += 2
+            continue
+        if c == '"':
+            quoted = not quoted
+        elif c.isspace() and not quoted:
+            if not out or out[-1] != " ":
+                out.append(" ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out).strip(" ")
+
+
+def android_to_po(forms, plural):
+    """Android's format arguments in `forms` (one string, or a plural's forms) in the `.po`
+    convention (module docstring). Returns the converted forms, or raises ValueError."""
+    nums = {int(m.group(1)) for f in forms for m in ANDROID_ARG.finditer(f) if m.group(1)}
+    count = None
+    if plural:
+        ints = [int(m.group(1)) for f in forms for m in ANDROID_ARG.finditer(f) if m.group(1) and m.group(2)[-1] == "d"]
+        count = max(ints) if ints else None
+    others = sorted(n for n in nums if n != count)
+    out = []
+    for f in forms:
+        bare = ANDROID_ARG.sub("", f)
+        if "%" in bare:
+            raise ValueError(f"a % that isn't %1$s-style or %%: {f!r}")
+        f = f.replace("{", "{{").replace("}", "}}")
+
+        def name(m):
+            if not m.group(1):
+                return "%"
+            n = int(m.group(1))
+            if n == count:
+                return "{n}"
+            return "{}" if len(others) == 1 else "{%d}" % others.index(n)
+
+        out.append(ANDROID_ARG.sub(name, f))
+    return out
+
+
+def collect_android():
+    """The Android app's strings: its English resources, then its Rust `tr!` calls."""
+    app = DOMAINS[ANDROID]
+    entries, problems = {}, []
+    counts = {"xml": 0, "rust": 0}
+
+    def add(ctx, msgid, plural, ref, note=""):
+        e = entries.setdefault((ctx, msgid), {"ctx": ctx, "id": msgid, "plural": plural, "refs": [], "notes": []})
+        if e["plural"] != plural:
+            problems.append(f"{ref}: {msgid!r} used with two different plurals ({e['plural']!r}, {plural!r})")
+        e["refs"].append(ref)
+        if note and note not in e["notes"]:
+            e["notes"].append(note)
+
+    values = os.path.join(app, "app", "src", "main", "res", "values")
+    for f in sorted(os.listdir(values)):
+        if not (f.startswith("strings") and f.endswith(".xml")):
+            continue
+        rel = f"app/src/main/res/values/{f}"
+        text = open(os.path.join(values, f), encoding="utf-8").read()
+        for m in ANDROID_RES.finditer(text):
+            if 'translatable="false"' in m.group("attrs"):
+                continue
+            ref = f"{rel}:{text.count(chr(10), 0, m.start('tag')) + 1}"
+            ctx = m.group("ctx") or ""
+            if m.group("tag") == "string":
+                forms = [android_text(m.group("body"))]
+            else:
+                items = dict((q, android_text(v)) for q, v in ANDROID_ITEM.findall(m.group("body")))
+                if set(items) != {"one", "other"}:
+                    problems.append(f"{ref}: <plurals name=\"{m.group('name')}\"> needs exactly one and other in English")
+                    continue
+                forms = [items["one"], items["other"]]
+            if not re.search(r"[^\W\d_]", ANDROID_ARG.sub("", forms[-1])):
+                continue  # symbols only (↗, A → Z): nothing to translate
+            try:
+                forms = android_to_po(forms, m.group("tag") == "plurals")
+            except ValueError as e:
+                problems.append(f"{ref}: {e}")
+                continue
+            counts["xml"] += 1
+            add(ctx, forms[0], forms[1] if len(forms) > 1 else None, ref)
+
+    rust = os.path.join(app, "rust", "src")
+    for dirpath, dirs, files in os.walk(rust):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for f in sorted(files):
+            if not f.endswith(".rs"):
+                continue
+            path = os.path.join(dirpath, f)
+            rel = os.path.relpath(path, app).replace(os.sep, "/")
+            for line, ctx, msgid, plural, note in calls(path, True):
+                counts["rust"] += 1
+                add(ctx, msgid, plural, f"{rel}:{line}", note)
+    return list(entries.values()), counts, problems
+
+
 def quote(s):
     s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\t", "\\t").replace("\r", "\\r")
     if "\n" not in s:
@@ -217,8 +360,13 @@ def quote(s):
 
 
 def write_po(path, domain, entries, header_extra, translate):
+    about = (
+        "the Android resources (res/values) and Rust (tr!/trn!) halves."
+        if domain == ANDROID
+        else "the .slint (@tr) and Rust (tr!/trn!) halves."
+    )
     out = [
-        f"# {domain}: every string Lightify shows, the .slint (@tr) and Rust (tr!/trn!) halves.",
+        f"# {domain}: every string Lightify shows, {about}",
         "# Generated by scripts/extract-strings.py; edit the source, not this file.",
         "# {} {0} {n} are placeholders: keep each one, as written, in the translation.",
         'msgid ""',
@@ -362,9 +510,10 @@ def main(argv):
         path = os.path.join(crate, "translations", domain + ".pot")
         write_po(path, domain, entries, ["Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;"], lambda s: "")
         plurals = sum(1 for e in entries if e["plural"] is not None)
+        first = f"{counts['xml']} resources" if domain == ANDROID else f"{counts['slint']} @tr"
         print(
             f"{os.path.relpath(path, ROOT)}: {len(entries)} strings ({plurals} plural) from "
-            f"{counts['slint']} @tr + {counts['rust']} tr!/trn!/tr_noop! calls"
+            f"{first} + {counts['rust']} tr!/trn!/tr_noop! calls"
         )
     sys.exit(1 if failed else 0)
 

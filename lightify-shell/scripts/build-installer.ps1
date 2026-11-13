@@ -30,7 +30,8 @@ param(
     [switch]$NoDownloader,
     # Skip ffmpeg (~202 MB). The bridge falls back to an ffmpeg on PATH.
     [switch]$NoFfmpeg,
-    # Package whatever is already built (shell, bridge, installer stub) instead of rebuilding.
+    # Package what is already built (shell, bridge, installer stub) instead of rebuilding.
+    # The shell and stub must still match Cargo.toml's version.
     [switch]$SkipBuild
 )
 
@@ -97,6 +98,16 @@ $pack = Join-Path $installerCrate 'target\release\lightify-pack.exe'
 foreach ($p in $stub, $pack) {
     if (-not (Test-Path $p)) { Fail "Missing $p - build lightify-installer first (drop -SkipBuild)." }
 }
+# -SkipBuild (or a build that produced nothing new) can leave old binaries here. Packed under
+# this version, an old Lightify.exe still reports the old one, sees its own update as newer
+# after installing, and offers it on every start.
+foreach ($p in $exe, $stub) {
+    $built = (Get-Item $p).VersionInfo.ProductVersion
+    if (-not $built) { Fail "$p has no version resource (rc.exe missing when it was built?), so it can't be checked against $version." }
+    if (($built -split '[^0-9.]')[0].TrimEnd('.') -notin @($version, "$version.0")) {
+        Fail "$p is version $built, not $version - rebuild it (drop -SkipBuild)."
+    }
+}
 # The pseudo language (LIGHTIFY_PSEUDO, LANGUAGE-PLAN.md Phase 1) is a test build only.
 foreach ($p in $exe, $stub) {
     if (Select-String -Path $p -Pattern 'qps-ploc' -SimpleMatch -Quiet) {
@@ -120,7 +131,12 @@ if (-not $NoDownloader) {
     $bridgeTime = (Get-Item $bridge).LastWriteTime
     $onthespotSrc = Join-Path $repo 'lightify-tauri\docs\onthespot-master\onthespot-master\src'
     if (Test-Path $onthespotSrc) {
+        # Python's own byte-code cache isn't source: running the bridge (or its tests)
+        # from source writes __pycache__\*.pyc newer than any build, and -SkipBuild then
+        # refused a bridge built from that very source (DC22). The bridge build purges
+        # them before PyInstaller runs, so they never reach the bridge either.
         $newestSrc = Get-ChildItem $onthespotSrc -Recurse -File |
+            Where-Object { $_.FullName -notmatch '[\\/]__pycache__[\\/]' -and $_.Extension -notin '.pyc', '.pyo' } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($newestSrc -and $newestSrc.LastWriteTime -gt $bridgeTime) {
             Fail ("Downloader bridge at $bridge ($bridgeTime) predates a newer source file " +

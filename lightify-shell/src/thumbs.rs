@@ -50,22 +50,70 @@ thread_local! {
 /// (url, size) pairs already delivered or in flight for search rows.
 static REQUESTED_URLS: Mutex<Option<HashSet<(String, u32)>>> = Mutex::new(None);
 
-/// URLs already delivered or in flight — a batch never re-requests them.
-static REQUESTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// (playlist id, cover URL) pairs already delivered or in flight — a batch never
+/// re-requests them. Keyed by the pair, not the URL alone: two playlists can share a
+/// cover, and keyed by URL only the first of them ever got it.
+static REQUESTED: Mutex<Option<HashSet<(String, String)>>> = Mutex::new(None);
+
+/// The playlists in `playlists` whose cover isn't delivered or in flight yet,
+/// grouped by URL so a cover shared by several is fetched once. Marks them as
+/// requested in `seen`.
+fn new_requests<'a>(
+    seen: &mut HashSet<(String, String)>,
+    playlists: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Vec<(String, Vec<String>)> {
+    let mut todo: Vec<(String, Vec<String>)> = Vec::new();
+    for (id, url) in playlists {
+        if url.is_empty() || !seen.insert((id.to_string(), url.to_string())) {
+            continue;
+        }
+        match todo.iter_mut().find(|(u, _)| u == url) {
+            Some((_, ids)) => ids.push(id.to_string()),
+            None => todo.push((url.to_string(), vec![id.to_string()])),
+        }
+    }
+    todo
+}
+
+/// A cover that failed to load may be asked for again by the next library refresh,
+/// instead of staying blank until relaunch.
+fn forget_requests(seen: &mut HashSet<(String, String)>, url: &str, ids: &[String]) {
+    for id in ids {
+        seen.remove(&(id.clone(), url.to_string()));
+    }
+}
 
 fn cache_dir() -> PathBuf {
     lightify_core::config::data_dir().join("thumbs")
 }
 
 fn cache_path(url: &str, size: u32) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    url.hash(&mut h);
-    // The 64px files predate the size parameter; keep their names valid.
+    cache_dir().join(format!("{:016x}.png", cache_key(url, size)))
+}
+
+/// FNV-1a over the URL (and the size when it isn't the default): the same name on every
+/// build. `DefaultHasher` may change between Rust releases, and then every cover was
+/// downloaded again (BUGS-PLAN DC20). The switch itself renames the cache once.
+fn cache_key(url: &str, size: u32) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(url.as_bytes());
     if size != SIZE {
-        size.hash(&mut h);
+        eat(&size.to_le_bytes());
     }
-    cache_dir().join(format!("{:016x}.png", h.finish()))
+    h
+}
+
+/// Covers that came back but couldn't be decoded this run: not fetched again on every
+/// refresh (DC20).
+fn undecodable() -> &'static std::sync::Mutex<HashSet<String>> {
+    static V: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
 }
 
 fn to_pixels(img: &image::RgbaImage) -> Pixels {
@@ -81,8 +129,14 @@ fn load_cached_sized(url: &str, size: u32) -> Option<Pixels> {
     if url.is_empty() {
         return None;
     }
-    let bytes = std::fs::read(cache_path(url, size)).ok()?;
+    let path = cache_path(url, size);
+    let bytes = std::fs::read(&path).ok()?;
     let img = image::load_from_memory(&bytes).ok()?.into_rgba8();
+    // Used now: pruning goes by age, and a cover read from the cache every launch (the
+    // library's) was the oldest file and went first (DC20).
+    if let Ok(f) = std::fs::File::options().write(true).open(&path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
     Some(to_pixels(&img))
 }
 
@@ -95,11 +149,15 @@ async fn fetch_sized(client: &reqwest::Client, url: &str, size: u32) -> Option<P
     if let Some(px) = load_cached_sized(url, size) {
         return Some(px);
     }
+    if undecodable().lock().unwrap_or_else(|p| p.into_inner()).contains(url) {
+        return None;
+    }
     let bytes = client.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
-    let img = image::load_from_memory(&bytes)
-        .ok()?
-        .resize_to_fill(size, size, image::imageops::FilterType::Triangle)
-        .into_rgba8();
+    let Ok(decoded) = image::load_from_memory(&bytes) else {
+        undecodable().lock().unwrap_or_else(|p| p.into_inner()).insert(url.to_string());
+        return None;
+    };
+    let img = decoded.resize_to_fill(size, size, image::imageops::FilterType::Triangle).into_rgba8();
     let _ = std::fs::create_dir_all(cache_dir());
     let mut png = Vec::new();
     if image::DynamicImage::ImageRgba8(img.clone())
@@ -115,14 +173,36 @@ async fn fetch_sized(client: &reqwest::Client, url: &str, size: u32) -> Option<P
 /// library refresh: already-requested URLs are skipped, and nothing is spawned when
 /// there is nothing new.
 pub fn request(weak: &slint::Weak<MainWindow>, playlists: &[lightify_core::Playlist]) {
-    let todo: Vec<(String, String)> = {
+    // A playlist whose cover was removed: the old one goes too, instead of staying for
+    // the rest of the run (BUGS-PLAN DC20).
+    let bare: Vec<String> = playlists.iter().filter(|p| p.image.is_empty()).map(|p| p.id.clone()).collect();
+    if !bare.is_empty() {
+        if let Ok(mut guard) = REQUESTED.lock() {
+            if let Some(seen) = guard.as_mut() {
+                seen.retain(|(id, _)| !bare.contains(id));
+            }
+        }
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            let had: Vec<String> = THUMBS.with(|t| {
+                let mut t = t.borrow_mut();
+                bare.into_iter().filter(|id| t.remove(id).is_some()).collect()
+            });
+            if had.is_empty() {
+                return;
+            }
+            let rows = app.get_playlists();
+            let art = app.get_playlist_art();
+            for i in 0..rows.row_count().min(art.row_count()) {
+                if rows.row_data(i).is_some_and(|r| had.iter().any(|id| r.id.as_str() == id)) {
+                    art.set_row_data(i, Image::default());
+                }
+            }
+        });
+    }
+    let todo: Vec<(String, Vec<String>)> = {
         let Ok(mut guard) = REQUESTED.lock() else { return };
         let seen = guard.get_or_insert_with(HashSet::new);
-        playlists
-            .iter()
-            .filter(|p| !p.image.is_empty() && seen.insert(p.image.clone()))
-            .map(|p| (p.id.clone(), p.image.clone()))
-            .collect()
+        new_requests(seen, playlists.iter().map(|p| (p.id.as_str(), p.image.as_str())))
     };
     if todo.is_empty() {
         return;
@@ -139,28 +219,44 @@ pub fn request(weak: &slint::Weak<MainWindow>, playlists: &[lightify_core::Playl
             let mut queue = todo.into_iter();
             loop {
                 while set.len() < PARALLEL {
-                    let Some((id, url)) = queue.next() else { break };
+                    let Some((url, ids)) = queue.next() else { break };
                     let client = client.clone();
-                    set.spawn(async move { (id, fetch(&client, &url).await) });
+                    set.spawn(async move {
+                        let px = fetch(&client, &url).await;
+                        (url, ids, px)
+                    });
                 }
                 let Some(done) = set.join_next().await else { break };
-                if let Ok((id, Some(px))) = done {
-                    deliver(&weak, id, px);
+                match done {
+                    Ok((_, ids, Some(px))) => deliver(&weak, ids, px),
+                    Ok((url, ids, None)) => {
+                        if let Ok(mut g) = REQUESTED.lock() {
+                            if let Some(seen) = g.as_mut() {
+                                forget_requests(seen, &url, &ids);
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
         });
     });
 }
 
-fn deliver(weak: &slint::Weak<MainWindow>, id: String, px: Pixels) {
+fn deliver(weak: &slint::Weak<MainWindow>, ids: Vec<String>, px: Pixels) {
     let _ = weak.upgrade_in_event_loop(move |app| {
         let img = Image::from_rgba8(px);
-        THUMBS.with(|t| t.borrow_mut().insert(id.clone(), img.clone()));
-        // Patch just the rows showing this playlist.
+        THUMBS.with(|t| {
+            let mut t = t.borrow_mut();
+            for id in &ids {
+                t.insert(id.clone(), img.clone());
+            }
+        });
+        // Patch just the rows showing these playlists.
         let rows = app.get_playlists();
         let art = app.get_playlist_art();
         for i in 0..rows.row_count().min(art.row_count()) {
-            if rows.row_data(i).is_some_and(|r| r.id.as_str() == id) {
+            if rows.row_data(i).is_some_and(|r| ids.iter().any(|id| r.id.as_str() == id)) {
                 art.set_row_data(i, img.clone());
             }
         }
@@ -347,4 +443,38 @@ pub fn prune_disk_cache() {
             let _ = std::fs::remove_file(path);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // D14: a cover shared by two playlists reaches both, fetched once.
+    /// DC20: the cache name is the same on every build (FNV-1a, not `DefaultHasher`).
+    #[test]
+    fn cover_cache_names_are_stable() {
+        assert_eq!(cache_key("", SIZE), 0xcbf2_9ce4_8422_2325, "FNV-1a's offset basis");
+        assert_eq!(cache_key("a", SIZE), 0xaf63_dc4c_8601_ec8c, "FNV-1a 64 of \"a\"");
+        assert_ne!(cache_key("a", SIZE), cache_key("a", LARGE));
+    }
+
+    #[test]
+    fn shared_cover_reaches_every_playlist() {
+        let mut seen = HashSet::new();
+        let todo = new_requests(&mut seen, [("a", "u1"), ("b", "u1"), ("c", "u2"), ("d", "")].into_iter());
+        assert_eq!(todo, vec![("u1".to_string(), vec!["a".to_string(), "b".to_string()]), ("u2".to_string(), vec!["c".to_string()])]);
+        // A later refresh only asks for what's new, including a new playlist on a known cover.
+        let again = new_requests(&mut seen, [("a", "u1"), ("e", "u1")].into_iter());
+        assert_eq!(again, vec![("u1".to_string(), vec!["e".to_string()])]);
+    }
+
+    // D15: a failed cover is asked for again by the next refresh.
+    #[test]
+    fn failed_cover_is_requested_again() {
+        let mut seen = HashSet::new();
+        let todo = new_requests(&mut seen, [("a", "u1"), ("b", "u1")].into_iter());
+        assert!(new_requests(&mut seen, [("a", "u1")].into_iter()).is_empty());
+        forget_requests(&mut seen, &todo[0].0, &todo[0].1);
+        assert_eq!(new_requests(&mut seen, [("a", "u1"), ("b", "u1")].into_iter()), todo);
+    }
 }

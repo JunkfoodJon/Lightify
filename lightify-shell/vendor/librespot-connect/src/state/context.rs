@@ -116,6 +116,8 @@ impl ConnectState {
             ResetContext::Completely => {
                 self.context = None;
                 self.autoplay_context = None;
+                // Lightify patch: see `removed_uids`; they named tracks of that context.
+                self.removed_uids.clear();
 
                 let player = self.player_mut();
                 player.context_uri.clear();
@@ -138,7 +140,10 @@ impl ConnectState {
     }
 
     pub fn valid_resolve_uri(uri: &str) -> Option<&str> {
-        if uri.is_empty() || uri.starts_with(SEARCH_IDENTIFIER) {
+        // Lightify patch (BUGS-PLAN DA5): "spotify:web-api" names Lightify's own track lists
+        // (see `Spirc` loads), not something Spotify can resolve: asking gave a 400 at every
+        // start after a transfer. Like an empty URI, the pages the state came with are used.
+        if uri.is_empty() || uri.starts_with(SEARCH_IDENTIFIER) || uri == "spotify:web-api" {
             None
         } else {
             Some(uri)
@@ -511,8 +516,11 @@ impl ConnectState {
             .as_mut()
             .ok_or(StateError::NoContext(ContextType::Default))?;
 
+        // Lightify patch: while shuffled, new tracks mix in with what hasn't been lined up
+        // yet, and `unshuffle` still finds the original order. A plain push did neither.
+        let from = ctx.index.track as usize;
         for t in context.tracks {
-            ctx.tracks.push(t)
+            ctx.tracks.push_shuffled(t, from)
         }
 
         Ok(())

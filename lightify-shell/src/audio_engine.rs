@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc};
+use librespot_connect::{CommandFailure, ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::SessionConfig;
@@ -37,6 +37,7 @@ use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::Player;
+use lightify_i18n::tr;
 use serde::Deserialize;
 
 use crate::engine::Event;
@@ -80,6 +81,9 @@ pub enum Cmd {
     /// `raw`: resolve `context_uri` as given rather than as a seed's station (the
     /// `--probe-station <context uri>` diagnostic).
     #[serde(rename = "stationtracks")] StationTracks { context_uri: String, #[serde(default)] seq: u64, #[serde(default)] raw: bool },
+    /// Fetch `context_uri` ahead of a likely `loadcontext` (the list the user just
+    /// opened), so the click that follows doesn't wait for it.
+    #[serde(rename = "preparecontext")] PrepareContext { context_uri: String },
     /// Play a plain list of track uris from `index` — the local twin of the Web API's
     /// `me/player/play` with `uris`, without its practical length limit (the shell
     /// used to send at most 50, so a long Liked Songs run stopped after 50) or its
@@ -94,6 +98,9 @@ pub enum Cmd {
         #[serde(default)] position_ms: u32,
         #[serde(default)] shuffle: bool,
         #[serde(default)] repeat: String,
+        /// A jump to a later row of the list already playing: songs removed from it by
+        /// hand stay gone (`Spirc::keep_removed_on_next_load`, BUGS-PLAN QD5).
+        #[serde(default)] keep_removed: bool,
     },
     /// Grow the list a `loadtracks` started, at its end, while it plays (the vendored
     /// librespot's `Spirc::append_tracks`). Dropped unless the playing list still
@@ -109,6 +116,9 @@ pub enum Cmd {
     /// Drop one upcoming track (the `nth` occurrence of `uri`) and nothing else (the
     /// vendored `Spirc::remove_from_queue`); there is no Web-API way to do this.
     #[serde(rename = "removefromqueue")] RemoveFromQueue { uri: String, #[serde(default)] nth: usize },
+    /// Play `uri` from up next now; the tracks before it are skipped unloaded and the list
+    /// after it stays whole (the vendored `Spirc::skip_to`, BUGS-PLAN QD8).
+    #[serde(rename = "skipto")] SkipTo { uri: String },
     #[serde(rename = "loadtracks")] LoadTracks {
         uris: Vec<String>,
         #[serde(default)] index: u32,
@@ -299,13 +309,68 @@ impl Log {
         Self(Mutex::new(file.ok()))
     }
 
+    /// Each line carries the milliseconds since the app started, so how long a step
+    /// took (a click's load to its first audio, say) can be read straight off the log.
     fn line(&self, msg: &str) {
         if let Ok(mut f) = self.0.lock() {
             if let Some(f) = f.as_mut() {
-                let _ = writeln!(f, "{msg}");
+                let _ = writeln!(f, "[{:>9}ms] {msg}", log_epoch().elapsed().as_millis());
             }
         }
     }
+}
+
+/// librespot's last word on why a song wouldn't load, so the skip notice can say why
+/// instead of only that it happened.
+static LOAD_PROBLEM: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
+fn note_load_problem(msg: &str) {
+    let lower = msg.to_ascii_lowercase();
+    let specific = ["load key", "audio key", "encrypted file", "audio item", "not available", "unavailable"]
+        .iter()
+        .any(|p| lower.contains(p));
+    let generic = lower.contains("skipping to next track");
+    if !specific && !generic {
+        return;
+    }
+    if let Ok(mut g) = LOAD_PROBLEM.lock() {
+        // The generic "skipping" line follows the specific one: keep the specific.
+        let fresh_specific = g.as_ref().is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(5));
+        if specific || !fresh_specific {
+            *g = Some((std::time::Instant::now(), msg.to_string()));
+        }
+    }
+}
+
+/// Why the last song failed, in words a user can act on (`None` when librespot said
+/// nothing in the last half minute).
+fn recent_load_problem() -> Option<String> {
+    let g = LOAD_PROBLEM.lock().ok()?;
+    let (at, msg) = g.as_ref()?;
+    (at.elapsed() < std::time::Duration::from_secs(30)).then(|| load_problem_words(msg))
+}
+
+fn load_problem_words(msg: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("load key") || lower.contains("audio key") {
+        tr!("Spotify refused the song\u{2019}s key: this account may have asked for too many songs too fast")
+    } else if lower.contains("encrypted file") {
+        tr!("couldn\u{2019}t download it from Spotify\u{2019}s audio servers: check the network, or a firewall or antivirus blocking them")
+    } else if lower.contains("not available") || lower.contains("unavailable") {
+        tr!("it isn\u{2019}t available to this account or in this country")
+    } else {
+        msg.chars().take(140).collect()
+    }
+}
+
+/// Songs that failed in a row with nothing playing in between: past this, every song is
+/// failing the same way, so stop rather than spend an audio key on each one left.
+const UNPLAYABLE_IN_A_ROW: usize = 3;
+
+/// The zero of the log's timestamps: the first time anything asked for it.
+fn log_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
 }
 
 /// librespot's own warnings and errors ("unexpected shutdown", a playlist page that
@@ -330,6 +395,7 @@ impl log::Log for LibrespotLog {
         if msg.contains("will be ignored while already active") || msg.contains("couldn't load context info") {
             return;
         }
+        note_load_problem(&msg);
         let sink = LIBRESPOT_LOG_SINK.lock().ok().and_then(|g| g.clone());
         if let Some(sink) = sink {
             sink.line(&format!("[{} {}] {msg}", r.level(), r.target()));
@@ -376,6 +442,11 @@ struct SharedState {
     /// reset + activate announce "repeat off", which is the reset talking, not a
     /// change anyone made (see `Cmd::ClearQueue`'s `repeat`).
     repeat_quiet_until: Mutex<Option<std::time::Instant>>,
+    /// The same for shuffle, set only when shuffle was on: see `keep_shuffle_report`.
+    shuffle_quiet_until: Mutex<Option<std::time::Instant>>,
+    /// Until then, a `SessionDisconnected` is our own `disconnect` (a queue clear's or a
+    /// station start's reset), not another device taking over: no `Inactive` for it.
+    own_disconnect_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl SharedState {
@@ -386,7 +457,21 @@ impl SharedState {
             gate_muted: AtomicBool::new(false),
             gate_muted_since: Mutex::new(None),
             repeat_quiet_until: Mutex::new(None),
+            shuffle_quiet_until: Mutex::new(None),
+            own_disconnect_until: Mutex::new(None),
         }
+    }
+
+    /// About to `disconnect` on purpose (see `own_disconnect_until`).
+    fn note_own_disconnect(&self) {
+        *self.own_disconnect_until.lock().unwrap() = Some(std::time::Instant::now() + CLEAR_REPEAT_QUIET);
+    }
+
+    fn own_disconnect(&self) -> bool {
+        self.own_disconnect_until
+            .lock()
+            .unwrap()
+            .is_some_and(|t| std::time::Instant::now() < t)
     }
 
     fn repeat_quiet(&self) -> bool {
@@ -394,6 +479,70 @@ impl SharedState {
             .lock()
             .unwrap()
             .is_some_and(|t| std::time::Instant::now() < t)
+    }
+
+    fn shuffle_quiet(&self) -> bool {
+        self.shuffle_quiet_until
+            .lock()
+            .unwrap()
+            .is_some_and(|t| std::time::Instant::now() < t)
+    }
+}
+
+/// Should a shuffle report reach the app? While a queue clear is under way, "off" is the
+/// reset talking, not a change anyone made: the clear keeps shuffle on itself. A user's
+/// own "off" ends the quiet first (`Cmd::Shuffle`).
+fn keep_shuffle_report(quiet: bool, shuffle: bool) -> bool {
+    shuffle || !quiet
+}
+
+/// Should a `SessionDisconnected` reach the app as `Inactive`? Not while it is our own
+/// reset's disconnect (`SharedState::own_disconnect`).
+fn keep_disconnect_report(own: bool) -> bool {
+    !own
+}
+
+/// The load that keeps the current song through a queue clear. A load resets shuffle, so
+/// when it was on it rides along. With shuffle on and no track named, a load picks at
+/// random, hence the index, though there is only the one.
+fn keep_current_request(keep_uri: String, position_ms: u32, playing: bool, shuffle: bool) -> LoadRequest {
+    LoadRequest::from_tracks(
+        vec![keep_uri],
+        LoadRequestOptions {
+            start_playing: playing,
+            seek_to: position_ms,
+            context_options: shuffle.then(|| librespot_connect::LoadContextOptions::Options(load_options(true, "off"))),
+            playing_track: shuffle.then_some(PlayingTrack::Index(0)),
+        },
+    )
+}
+
+/// Used when nothing has been saved yet. librespot's Default is half volume.
+const DEFAULT_VOLUME_PERCENT: u16 = 70;
+
+/// The level to start at: the last one set, which librespot saves in the cache.
+fn initial_volume(saved: Option<u16>) -> u16 {
+    saved.unwrap_or_else(|| percent_to_volume(DEFAULT_VOLUME_PERCENT))
+}
+
+/// Spotify's 0-65535 from the app's 0-100, to the nearest step.
+fn percent_to_volume(percent: u16) -> u16 {
+    ((u32::from(percent.min(100)) * u32::from(u16::MAX) + 50) / 100) as u16
+}
+
+/// To the nearest percent, so what the app set comes back as it was set (50 used to
+/// come back as 49).
+fn volume_to_percent(volume: u16) -> u16 {
+    ((u32::from(volume) * 100 + u32::from(u16::MAX) / 2) / u32::from(u16::MAX)) as u16
+}
+
+/// What the user is told about a command that was accepted and then didn't work.
+fn failure_notice(failure: &CommandFailure) -> String {
+    match failure {
+        CommandFailure::Load { reason } => tr!("Couldn\u{2019}t play that \u{2014} {}", reason),
+        CommandFailure::RemoveFromQueue { .. } => {
+            tr!("That song wasn\u{2019}t in the queue any more, so nothing was removed")
+        }
     }
 }
 
@@ -522,6 +671,7 @@ impl Sink for TappedSink {
             // syscalls even when the lock is uncontended) since the ongoing
             // per-packet confirmation has no real diagnostic value this deep into
             // the engine's life that the one-time version doesn't already cover.
+            // Once per start, not per packet: the first audio of each track.
             if self.seen_packets == 0 {
                 self.log.line(&format!("sink.write packet #0 samples={}", samples.len()));
             }
@@ -532,6 +682,7 @@ impl Sink for TappedSink {
 
     fn start(&mut self) -> SinkResult<()> {
         self.log.line("sink.start()");
+        self.seen_packets = 0;
         self.inner.start()
     }
 
@@ -642,6 +793,7 @@ async fn run(
     log.line(&format!("session client_id={}", session_config.client_id));
     let cache = Cache::new(Some(&cache_dir), Some(&cache_dir), None, None)
         .map_err(|e| format!("Failed to create cache directory: {e}"))?;
+    let saved_volume = cache.volume();
 
     let credentials = resolve_streaming_credentials(&cache, &cache_dir, &on_event, &log, &quit).await?;
     let session = Session::new(session_config, Some(cache));
@@ -693,10 +845,7 @@ async fn run(
 
     let connect_config = ConnectConfig {
         name: DEVICE_NAME.into(),
-        // librespot's Default sets initial_volume: Some(50), but Spirc treats
-        // this as a u16 in 0..=65535 (50 ≈ 0.076%) — force ~70% so playback is
-        // audible immediately on first Connect.
-        initial_volume: (u16::MAX as u32 * 70 / 100) as u16,
+        initial_volume: initial_volume(saved_volume),
         ..Default::default()
     };
 
@@ -721,6 +870,16 @@ async fn run(
         log.line(&format!("warning: could not write streaming-auth marker: {e}"));
     }
 
+    // `spirc.load` and friends only put a command on a channel; this is how one that was
+    // accepted and then failed gets out of the Spirc task.
+    {
+        let (on_event, log) = (Arc::clone(&on_event), Arc::clone(&log));
+        spirc.on_command_failed(move |failure| {
+            log.line(&format!("command failed: {failure:?}"));
+            on_event(Event::Notice { msg: failure_notice(&failure) });
+        });
+    }
+
     let mut spirc_handle = tokio::spawn(spirc_task);
     let spirc = Arc::new(spirc);
 
@@ -738,6 +897,15 @@ async fn run(
             break;
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    {
+        let user_data = session.user_data();
+        on_event(Event::Account {
+            username: session.username(),
+            account_type: user_data.attributes.get("type").cloned().unwrap_or_default(),
+            catalogue: user_data.attributes.get("catalogue").cloned().unwrap_or_default(),
+        });
     }
 
     let device_id = session.device_id().to_string();
@@ -767,6 +935,8 @@ async fn run(
     // engine instead reports `Exited`, so the shell's watchdog restarts it.
     let mut lost: Option<&str> = None;
     let mut spirc_done = false;
+    // Songs that failed to load since anything last played (see `UNPLAYABLE_IN_A_ROW`).
+    let mut failed_in_a_row: std::collections::HashSet<String> = std::collections::HashSet::new();
     while state.running.load(Ordering::Relaxed) {
         tokio::select! {
             _ = &mut spirc_handle => {
@@ -781,7 +951,12 @@ async fn run(
                     break;
                 };
                 match event {
+                    PlayerEvent::Loading { position_ms, .. } => {
+                        log.line(&format!("player: loading at {position_ms} ms"));
+                    }
                     PlayerEvent::Playing { position_ms, .. } => {
+                        failed_in_a_row.clear();
+                        log.line(&format!("player: playing at {position_ms} ms"));
                         on_event(Event::Playing { playing: true });
                         on_event(Event::Position { ms: position_ms as u64 });
                     }
@@ -799,7 +974,28 @@ async fn run(
                         // it (or, on the final track, from Stopped) — same as before.
                     }
                     PlayerEvent::Unavailable { track_id, .. } => {
-                        on_event(Event::Failed { msg: format!("track unavailable: {track_id}") });
+                        // Spirc skips it and carries on, and it may be only the next
+                        // song's preload: nothing is wrong with the engine.
+                        log.line(&format!("track unavailable: {track_id}"));
+                        let why = recent_load_problem();
+                        failed_in_a_row.insert(track_id.to_string());
+                        let msg = if failed_in_a_row.len() >= UNPLAYABLE_IN_A_ROW {
+                            // Every song is failing the same way: going on would only
+                            // spend an audio key on each one left in the queue.
+                            failed_in_a_row.clear();
+                            let _ = spirc.pause();
+                            log.line("stopped: songs keep failing to load");
+                            match why {
+                                Some(why) => tr!("Stopped: {} songs in a row couldn\u{2019}t be played \u{2014} {}", UNPLAYABLE_IN_A_ROW, why),
+                                None => tr!("Stopped: {} songs in a row couldn\u{2019}t be played", UNPLAYABLE_IN_A_ROW),
+                            }
+                        } else {
+                            match why {
+                                Some(why) => tr!("Skipped a song Spotify can\u{2019}t play \u{2014} {}", why),
+                                None => tr!("Skipped a song Spotify can\u{2019}t play"),
+                            }
+                        };
+                        on_event(Event::Notice { msg });
                     }
                     PlayerEvent::Seeked { position_ms, .. }
                     | PlayerEvent::PositionCorrection { position_ms, .. }
@@ -810,7 +1006,9 @@ async fn run(
                     // remote asked (the Web API, a phone), or librespot changed them
                     // itself. The UI used to learn these only from the next poll.
                     PlayerEvent::ShuffleChanged { shuffle } => {
-                        on_event(Event::Options { shuffle: Some(shuffle), repeat: None });
+                        if keep_shuffle_report(state.shuffle_quiet(), shuffle) {
+                            on_event(Event::Options { shuffle: Some(shuffle), repeat: None });
+                        }
                     }
                     PlayerEvent::RepeatChanged { context, track } => {
                         // A queue clear's reset reporting "off" isn't a change anyone
@@ -821,14 +1019,20 @@ async fn run(
                         }
                     }
                     PlayerEvent::VolumeChanged { volume } => {
-                        let percent = ((volume as u32 * 100) / u16::MAX as u32) as u16;
-                        on_event(Event::Volume { percent });
+                        on_event(Event::Volume { percent: volume_to_percent(volume) });
                     }
                     // Spirc emits this when the cluster names another device active
                     // (`handle_disconnect`) — a handoff the shell would otherwise only
                     // learn about from its next Web-API poll.
+                    // Our own reset (Clear Queue, a station start) disconnects and
+                    // re-activates at once: nothing moved, so the shell must not drop
+                    // what it shows as playing (the play button flickered).
                     PlayerEvent::SessionDisconnected { .. } => {
-                        on_event(Event::Inactive);
+                        if keep_disconnect_report(state.own_disconnect()) {
+                            on_event(Event::Inactive);
+                        } else {
+                            log.line("disconnect: our own reset, not a handoff");
+                        }
                     }
                     PlayerEvent::TrackChanged { audio_item } => {
                         let tid = audio_item.track_id.to_string(); // base62, matches Web-API ids
@@ -878,6 +1082,10 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                // Said once per reason: a silent engine otherwise looks like a broken one.
+                if let Some(why) = crate::audio_output::take_trouble() {
+                    on_event(Event::Notice { msg: why });
+                }
                 if session.is_invalid() {
                     lost = Some("Spotify connection lost");
                     break;
@@ -950,13 +1158,12 @@ fn command_loop(
                 }
             }
             Cmd::Volume { percent } => {
-                let pct = percent.min(100) as u32;
-                let v = ((pct * u16::MAX as u32) / 100) as u16;
-                if let Err(e) = spirc.set_volume(v) {
+                if let Err(e) = spirc.set_volume(percent_to_volume(percent)) {
                     log.line(&format!("volume failed: {e}"));
                 }
             }
             Cmd::Shuffle { enabled } => {
+                *state.shuffle_quiet_until.lock().unwrap() = None;
                 if let Err(e) = spirc.shuffle(enabled) {
                     log.line(&format!("shuffle failed: {e}"));
                 }
@@ -993,6 +1200,7 @@ fn command_loop(
                     _ => context_uri.clone(),
                 };
                 log.line(&format!("station: loading {station_uri}"));
+                state.note_own_disconnect();
                 if let Err(e) = spirc.disconnect(true) {
                     log.line(&format!("station: disconnect failed: {e}"));
                 }
@@ -1008,11 +1216,17 @@ fn command_loop(
                 if !repeat.is_empty() {
                     *state.repeat_quiet_until.lock().unwrap() = Some(std::time::Instant::now() + CLEAR_REPEAT_QUIET);
                 }
+                // The reset below wipes shuffle as well as repeat. Read before it goes out.
+                let shuffle = spirc.shuffling();
+                if shuffle {
+                    *state.shuffle_quiet_until.lock().unwrap() = Some(std::time::Instant::now() + CLEAR_REPEAT_QUIET);
+                }
                 if keep_uri.is_empty() {
                     // Hard reset. disconnect(true) pauses and tears the session's
                     // playback state down, so this MUST NOT be the path a user-facing
                     // "Clear" takes - it stops the music. Kept for ending a station,
                     // which loads something else on the very next line.
+                    state.note_own_disconnect();
                     if let Err(e) = spirc.disconnect(true) {
                         log.line(&format!("clearqueue: disconnect failed: {e}"));
                     }
@@ -1037,27 +1251,21 @@ fn command_loop(
                     // empties `next_tracks`, and also drops the autoplay context so a
                     // finished station's radio can't carry over. Same three-step
                     // sequence as `Station` above, so it is the well-trodden path.
+                    state.note_own_disconnect();
                     if let Err(e) = spirc.disconnect(true) {
                         log.line(&format!("clearqueue: disconnect failed: {e}"));
                     }
                     if let Err(e) = spirc.activate() {
                         log.line(&format!("clearqueue: activate failed: {e}"));
                     }
-                    let request = LoadRequest::from_tracks(
-                        vec![keep_uri.clone()],
-                        LoadRequestOptions {
-                            start_playing: playing,
-                            seek_to: position_ms,
-                            ..Default::default()
-                        },
-                    );
-                    match spirc.load(request) {
+                    match spirc.load(keep_current_request(keep_uri.clone(), position_ms, playing, shuffle)) {
                         Ok(()) => log.line(&format!(
                             "clearqueue: reset, kept {keep_uri} at {position_ms}ms (playing={playing})"
                         )),
                         Err(e) => log.line(&format!("clearqueue: keep-current load failed: {e}")),
                     }
                     // The reset and the load both leave repeat off (`reset_options`).
+                    // (Shuffle rode along on the load: a change after it would reshuffle.)
                     // Clearing the queue isn't a reason to lose the user's repeat mode,
                     // so put it back. Spirc runs its commands in order, so this lands
                     // after the load.
@@ -1068,9 +1276,14 @@ fn command_loop(
                     }
                 }
             }
-            Cmd::LoadContext { context_uri, track_uri, position_ms, shuffle, repeat } => {
+            Cmd::LoadContext { context_uri, track_uri, position_ms, shuffle, repeat, keep_removed } => {
                 if let Err(e) = spirc.activate() {
                     log.line(&format!("loadcontext: activate failed: {e}"));
+                }
+                if keep_removed {
+                    if let Err(e) = spirc.keep_removed_on_next_load() {
+                        log.line(&format!("loadcontext: keep removed failed: {e}"));
+                    }
                 }
                 let request = LoadRequest::from_context_uri(
                     context_uri.clone(),
@@ -1078,7 +1291,7 @@ fn command_loop(
                         start_playing: true,
                         seek_to: position_ms,
                         context_options: Some(librespot_connect::LoadContextOptions::Options(load_options(shuffle, &repeat))),
-                        playing_track: (!track_uri.is_empty()).then(|| librespot_connect::PlayingTrack::Uri(track_uri)),
+                        playing_track: (!track_uri.is_empty()).then(|| PlayingTrack::Uri(track_uri)),
                     },
                 );
                 match spirc.load(request) {
@@ -1100,6 +1313,10 @@ fn command_loop(
                     Err(e) => log.line(&format!("replacenext failed: {e}")),
                 }
             }
+            Cmd::SkipTo { uri } => match spirc.skip_to(uri.clone()) {
+                Ok(()) => log.line(&format!("skipto: {uri}")),
+                Err(e) => log.line(&format!("skipto failed: {e}")),
+            },
             Cmd::RemoveFromQueue { uri, nth } => match spirc.remove_from_queue(uri, nth) {
                 Ok(()) => log.line(&format!("removefromqueue: #{nth}")),
                 Err(e) => log.line(&format!("removefromqueue failed: {e}")),
@@ -1124,7 +1341,7 @@ fn command_loop(
                         start_playing: true,
                         seek_to: position_ms,
                         context_options: Some(librespot_connect::LoadContextOptions::Options(load_options(shuffle, &repeat))),
-                        playing_track: Some(librespot_connect::PlayingTrack::Index(index)),
+                        playing_track: Some(PlayingTrack::Index(index)),
                     },
                 );
                 match spirc.load(request) {
@@ -1132,36 +1349,52 @@ fn command_loop(
                     Err(e) => on_event(Event::Failed { msg: format!("Play failed: {e}") }),
                 }
             }
+            Cmd::PrepareContext { context_uri } => {
+                // In the background: the command thread must stay free for the click
+                // this is preparing for. A load that arrives first just resolves the
+                // context itself, as it would have anyway.
+                let (sess, log) = (session.clone(), Arc::clone(&log));
+                rt.spawn(async move {
+                    let t = std::time::Instant::now();
+                    match tokio::time::timeout(STATION_RESOLVE_TIMEOUT, librespot_connect::prepare_context(&sess, &context_uri)).await {
+                        Ok(Ok(())) => log.line(&format!("prepared {context_uri} in {} ms", t.elapsed().as_millis())),
+                        Ok(Err(e)) => log.line(&format!("prepare {context_uri} failed: {e}")),
+                        Err(_) => log.line(&format!("prepare {context_uri} timed out")),
+                    }
+                });
+            }
             Cmd::StationTracks { context_uri, seq, raw } => {
                 let station_uri = match context_uri.strip_prefix("spotify:") {
                     Some(rest) if !raw && !rest.starts_with("station:") => format!("spotify:station:{rest}"),
                     _ => context_uri.clone(),
                 };
-                let sess = session.clone();
-                // Bounded: this blocks the command thread, so a request that never
-                // answers would otherwise leave every later command (pause, next,
-                // quit included) stuck behind it for good.
-                let resolved = rt.block_on(async move {
-                    tokio::time::timeout(STATION_RESOLVE_TIMEOUT, sess.spclient().get_context(&station_uri)).await
-                });
-                let resolved = match resolved {
-                    Ok(r) => r.map_err(|e| e.to_string()),
-                    Err(_) => Err(format!("timed out after {}s", STATION_RESOLVE_TIMEOUT.as_secs())),
-                };
-                match resolved {
-                    Ok(ctx) => {
-                        let uris: Vec<String> = ctx
-                            .pages
-                            .into_iter()
-                            .flat_map(|p| p.tracks)
-                            .filter_map(|t| t.uri)
-                            .filter(|u| u.starts_with("spotify:track:"))
-                            .collect();
-                        log.line(&format!("station: resolved {} tracks", uris.len()));
-                        on_event(Event::StationTracks { uris, seq });
+                // In the background, like `PrepareContext`: resolving used to block this
+                // thread for up to `STATION_RESOLVE_TIMEOUT`, so Pause/Next/seek/volume
+                // waited behind it. Bounded all the same, so a request that never
+                // answers can't hold a task forever.
+                let (sess, log, on_event) = (session.clone(), Arc::clone(&log), Arc::clone(&on_event));
+                rt.spawn(async move {
+                    let resolved =
+                        tokio::time::timeout(STATION_RESOLVE_TIMEOUT, sess.spclient().get_context(&station_uri)).await;
+                    let resolved = match resolved {
+                        Ok(r) => r.map_err(|e| e.to_string()),
+                        Err(_) => Err(format!("timed out after {}s", STATION_RESOLVE_TIMEOUT.as_secs())),
+                    };
+                    match resolved {
+                        Ok(ctx) => {
+                            let uris: Vec<String> = ctx
+                                .pages
+                                .into_iter()
+                                .flat_map(|p| p.tracks)
+                                .filter_map(|t| t.uri)
+                                .filter(|u| u.starts_with("spotify:track:"))
+                                .collect();
+                            log.line(&format!("station: resolved {} tracks", uris.len()));
+                            on_event(Event::StationTracks { uris, seq });
+                        }
+                        Err(e) => on_event(Event::Failed { msg: format!("Station resolve failed: {e}") }),
                     }
-                    Err(e) => on_event(Event::Failed { msg: format!("Station resolve failed: {e}") }),
-                }
+                });
             }
             Cmd::Output { device } => {
                 log.line(&format!(
@@ -1182,7 +1415,81 @@ fn command_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{repeat_calls, RepeatCall};
+    use super::{
+        failure_notice, initial_volume, keep_current_request, keep_disconnect_report, keep_shuffle_report, load_problem_words, note_load_problem,
+        percent_to_volume, recent_load_problem, repeat_calls, volume_to_percent,
+        RepeatCall, DEFAULT_VOLUME_PERCENT,
+    };
+    use librespot_connect::{CommandFailure, LoadContextOptions, PlayingTrack};
+
+    #[test]
+    fn a_failed_load_says_why() {
+        let failure = CommandFailure::Load { reason: "no such playlist".into() };
+        assert!(failure_notice(&failure).contains("no such playlist"));
+    }
+
+    #[test]
+    fn volume_percent_round_trips_at_every_step() {
+        for percent in 0..=100 {
+            assert_eq!(volume_to_percent(percent_to_volume(percent)), percent);
+        }
+        assert_eq!(percent_to_volume(0), 0);
+        assert_eq!(percent_to_volume(100), u16::MAX);
+        assert_eq!(percent_to_volume(250), u16::MAX, "out of range clamps");
+        assert_eq!(volume_to_percent(u16::MAX), 100);
+    }
+
+    #[test]
+    fn a_failed_load_is_explained_and_the_specific_reason_wins() {
+        // The key refusal comes first, then librespot's generic "skipping" line.
+        note_load_problem("Unable to load key, continuing without decryption: Service unavailable");
+        note_load_problem("Skipping to next track, unable to load track <SpotifyId>: ()");
+        let why = recent_load_problem().expect("a reason");
+        assert!(why.contains("key"), "{why}");
+        assert!(load_problem_words("Unable to load encrypted file: timed out").contains("audio servers"));
+        assert!(load_problem_words("<x> is not available").contains("available"));
+        // Lines that aren't about loading a song are not a reason.
+        note_load_problem("Client specified an invalid argument");
+        assert!(recent_load_problem().expect("still the key").contains("key"));
+    }
+
+    #[test]
+    fn volume_starts_at_the_saved_level() {
+        assert_eq!(initial_volume(Some(12_345)), 12_345);
+        assert_eq!(initial_volume(Some(0)), 0, "muted is a level too");
+        assert_eq!(volume_to_percent(initial_volume(None)), DEFAULT_VOLUME_PERCENT);
+    }
+
+    #[test]
+    fn a_clear_holds_back_only_the_resets_shuffle_off() {
+        assert!(!keep_shuffle_report(true, false), "the reset's off");
+        assert!(keep_shuffle_report(true, true));
+        assert!(keep_shuffle_report(false, false), "any other time, off is off");
+        assert!(keep_shuffle_report(false, true));
+    }
+
+    #[test]
+    fn our_own_reset_is_not_a_handoff() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let state = super::SharedState::new(Arc::new(AtomicBool::new(true)));
+        assert!(keep_disconnect_report(state.own_disconnect()), "another device taking over is reported");
+        state.note_own_disconnect();
+        assert!(!keep_disconnect_report(state.own_disconnect()), "a clear's or station's reset is not");
+    }
+
+    #[test]
+    fn keeping_the_song_through_a_clear_keeps_shuffle() {
+        let on = keep_current_request("spotify:track:x".into(), 4200, true, true);
+        assert!(on.start_playing);
+        assert_eq!(on.seek_to, 4200);
+        assert!(matches!(&on.context_options, Some(LoadContextOptions::Options(o)) if o.shuffle && !o.repeat && !o.repeat_track));
+        assert!(matches!(on.playing_track, Some(PlayingTrack::Index(0))), "or a load picks at random");
+
+        let off = keep_current_request("spotify:track:x".into(), 0, false, false);
+        assert!(!off.start_playing);
+        assert!(off.context_options.is_none());
+        assert!(off.playing_track.is_none());
+    }
 
     #[test]
     fn repeat_cycle_touches_only_the_flag_that_changes() {

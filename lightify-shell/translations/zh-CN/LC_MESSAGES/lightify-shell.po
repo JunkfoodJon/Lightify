@@ -1769,3 +1769,354 @@ msgstr "显示 Lightify"
 #: src/tray.rs:69 src/tray.rs:81
 msgid "Quit"
 msgstr "退出"
+
+#. machine translation
+#: ui/app.slint:5529
+msgid "Sign in again"
+msgstr "重新登录"
+
+#. machine translation
+#: ui/app.slint:5807
+msgid "Starting the update to Lightify {}…"
+msgstr "正在开始更新到 Lightify {}…"
+
+#. machine translation
+#: ui/app.slint:6274
+msgid "Most features need a Spotify Premium account, including the player and the downloader. Local mode plays your own music files with any account."
+msgstr "大多数功能（包括播放器和下载器）都需要 Spotify Premium 账户。本地模式可用任何账户播放你自己的音乐文件。"
+
+#. machine translation
+#: ui/app.slint:6290
+msgid "open"
+msgstr "打开"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copied"
+msgstr "已复制"
+
+#. machine translation
+#: ui/app.slint:6305
+msgid "copy"
+msgstr "复制"
+
+#. machine translation
+#: ui/app.slint:6379
+msgid "No Spotify to hand? Play the music files on this PC."
+msgstr "手边没有 Spotify？播放这台电脑上的音乐文件。"
+
+#. machine translation
+#: ui/app.slint:6389
+msgid "Use Local mode"
+msgstr "使用本地模式"
+
+#. machine translation
+#: src/audio_engine.rs:350
+msgid "Spotify refused the song’s key: this account may have asked for too many songs too fast"
+msgstr "Spotify 拒绝了这首歌的密钥：此账户可能请求歌曲过多过快"
+
+#. machine translation
+#: src/audio_engine.rs:352
+msgid "couldn’t download it from Spotify’s audio servers: check the network, or a firewall or antivirus blocking them"
+msgstr "无法从 Spotify 的音频服务器下载：请检查网络，或是否有防火墙或杀毒软件阻止了它们"
+
+#. machine translation
+#: src/audio_engine.rs:354
+msgid "it isn’t available to this account or in this country"
+msgstr "它在此账户或此国家/地区不可用"
+
+#. machine translation
+#: src/audio_engine.rs:536
+msgid "Couldn’t play that — {}"
+msgstr "无法播放 — {}"
+
+#. machine translation
+#: src/audio_engine.rs:538
+msgid "That song wasn’t in the queue any more, so nothing was removed"
+msgstr "那首歌已不在队列中，因此没有移除任何内容"
+
+#. machine translation
+#: src/audio_engine.rs:983
+msgid "Stopped: {} songs in a row couldn’t be played — {}"
+msgstr "已停止：连续 {} 首歌无法播放 — {}"
+
+#. machine translation
+#: src/audio_engine.rs:984
+msgid "Stopped: {} songs in a row couldn’t be played"
+msgstr "已停止：连续 {} 首歌无法播放"
+
+#. machine translation
+#: src/audio_engine.rs:988
+msgid "Skipped a song Spotify can’t play — {}"
+msgstr "已跳过一首 Spotify 无法播放的歌曲 — {}"
+
+#. machine translation
+#: src/audio_engine.rs:989
+msgid "Skipped a song Spotify can’t play"
+msgstr "已跳过一首 Spotify 无法播放的歌曲"
+
+#. machine translation
+#: src/audio_output.rs:520
+msgid "No sound: the audio output wouldn’t open — {}"
+msgstr "没有声音：无法打开音频输出 — {}"
+
+#. machine translation
+#: src/audio_output.rs:540
+msgid "No sound: Windows reports no audio output device. Plug in or turn on speakers or headphones."
+msgstr "没有声音：Windows 未检测到任何音频输出设备。请连接或打开扬声器或耳机。"
+
+#. machine translation
+#: src/downloader.rs:842
+msgid "The downloader is running but not answering. It may be busy; try again in a moment."
+msgstr "下载器正在运行但没有响应。它可能正忙；请稍后再试。"
+
+#. machine translation
+#: src/local_library.rs:88
+msgid "Unknown artist"
+msgstr "未知艺人"
+
+#. machine translation
+#: src/local_library.rs:89
+msgid "Unknown album"
+msgstr "未知专辑"
+
+#. machine translation
+#: src/local_library.rs:956
+msgid "Music"
+msgstr "音乐"
+
+#. machine translation
+#: src/local_library.rs:962
+msgid "Desktop"
+msgstr "桌面"
+
+#. machine translation
+#: src/local_library.rs:969
+msgid "OneDrive — Music"
+msgstr "OneDrive — 音乐"
+
+#. machine translation
+#: src/local_library.rs:972
+msgid "Lightify downloads"
+msgstr "Lightify 下载"
+
+#. machine translation
+#: src/local_player.rs:221
+msgid "could not start the player thread: {}"
+msgstr "无法启动播放器线程：{}"
+
+#. machine translation
+#: src/local_player.rs:354
+msgid "the file reports a sample rate of 0 Hz"
+msgstr "文件报告的采样率为 0 Hz"
+
+#. machine translation
+#: src/local_player.rs:356
+msgid "the decoder crashed on this file"
+msgstr "解码器在此文件上崩溃"
+
+#. machine translation
+#: src/local_player.rs:622
+msgid "could not open the file: {}"
+msgstr "无法打开文件：{}"
+
+#. machine translation
+#: src/local_player.rs:631
+msgid "unsupported or unreadable audio file: {}"
+msgstr "不支持或无法读取的音频文件：{}"
+
+#. machine translation
+#: src/local_player.rs:637
+msgid "the file has no audio track"
+msgstr "文件没有音轨"
+
+#. machine translation
+#: src/local_player.rs:646
+msgid "unsupported audio codec: {}"
+msgstr "不支持的音频编解码器：{}"
+
+#. machine translation
+#: src/local_player.rs:689
+msgid "seek failed: {}"
+msgstr "跳转失败：{}"
+
+#. machine translation
+#: src/local_player.rs:734
+msgid "could not read the file: {}"
+msgstr "无法读取文件：{}"
+
+#. machine translation
+#: src/local_player.rs:776
+msgid "too many undecodable frames"
+msgstr "无法解码的帧过多"
+
+#. machine translation
+#: src/local_player.rs:781
+msgid "could not decode the file: {}"
+msgstr "无法解码文件：{}"
+
+#. machine translation
+#: src/local_player.rs:809 src/local_player.rs:828 src/local_player.rs:838
+msgid "resampling failed: {}"
+msgstr "重采样失败：{}"
+
+#. machine translation
+#: src/local_player.rs:853
+msgid "the file reports a sample rate of {} Hz, which can’t be played"
+msgstr "文件报告的采样率为 {} Hz，无法播放"
+
+#. machine translation
+#: src/local_player.rs:865
+msgid "cannot resample from {0} Hz: {1}"
+msgstr "无法从 {0} Hz 重采样：{1}"
+
+#. machine translation
+#: src/local_ui.rs:1245
+msgid "Couldn’t save local playlists — their file can’t be read or written right now"
+msgstr "无法保存本地歌单 — 现在无法读取或写入其文件"
+
+#. machine translation
+#: src/local_ui.rs:1736
+msgid "Delete “{}” from your local playlists?"
+msgstr "要从本地歌单中删除“{}”吗？"
+
+#. machine translation
+#: src/local_ui.rs:2080
+msgid "Can’t play “{0}” — {1}. Stopped: {n} file in a row couldn’t be played"
+msgid_plural "Can’t play “{0}” — {1}. Stopped: {n} files in a row couldn’t be played"
+msgstr[0] "无法播放“{0}” — {1}。已停止：连续 {n} 个文件无法播放"
+
+#. machine translation
+#: src/local_ui.rs:2088
+msgid "Can’t play “{}” — {}. Skipped it"
+msgstr "无法播放“{}” — {}。已跳过"
+
+#. machine translation
+#: src/main.rs:3268
+msgid "Cleared finished downloads"
+msgstr "已清除完成的下载"
+
+#. machine translation
+#: src/main.rs:3277
+msgid "Download queued for retry"
+msgstr "下载已重新加入队列"
+
+#. machine translation
+#: src/main.rs:3289
+msgid "Download cancelled"
+msgstr "下载已取消"
+
+#. machine translation
+#: src/main.rs:3301
+msgid "Deleted downloaded file"
+msgstr "已删除下载的文件"
+
+#. machine translation
+#: src/main.rs:3331
+msgid "Signing the downloader in to Spotify — if a Spotify page opens in your browser, click Agree."
+msgstr "正在将下载器登录到 Spotify — 如果浏览器中打开了 Spotify 页面，请点击“同意”。"
+
+#. machine translation
+#: src/main.rs:3802
+msgid "Playback engine isn’t running"
+msgstr "播放引擎未运行"
+
+#. machine translation
+#: src/main.rs:4639
+msgid "Couldn’t match the selection — {}"
+msgstr "无法匹配所选内容 — {}"
+
+#. machine translation
+#: src/main.rs:5672
+msgid "Finish the Spotify streaming sign-in in your browser"
+msgstr "请在浏览器中完成 Spotify 流媒体登录"
+
+#. machine translation
+#: src/main.rs:5913
+msgid "the system default"
+msgstr "系统默认"
+
+#. machine translation
+#: src/main.rs:5955
+msgid "Sign in to Spotify in your browser with your Premium account"
+msgstr "请在浏览器中用你的 Premium 账户登录 Spotify"
+
+#. machine translation
+#: src/main.rs:9995 src/main.rs:11679
+msgid "{} / {} loaded"
+msgstr "已加载 {} / {}"
+
+#. machine translation
+#: src/main.rs:11083
+msgid "Waiting for Spotify to confirm the new track — try again in a moment."
+msgstr "正在等待 Spotify 确认新曲目 — 请稍后再试。"
+
+#. machine translation
+#: src/main.rs:11442
+msgid "the engine registered but Spotify hasn’t listed it yet"
+msgstr "引擎已注册，但 Spotify 尚未列出它"
+
+#. machine translation
+#: src/main.rs:11681
+msgid "{} loaded"
+msgstr "已加载 {}"
+
+#. machine translation
+#: src/main.rs:12427
+msgid "Nothing to play"
+msgstr "没有可播放的内容"
+
+#. machine translation
+#: src/main.rs:12473
+msgid "The player is signed in as “{}”, not the account Lightify uses (“{}”). Sign in again with the same account."
+msgstr "播放器登录的账户是“{}”，不是 Lightify 使用的账户（“{}”）。请用同一账户重新登录。"
+
+#. machine translation
+#: src/main.rs:12604
+msgid "This is a Spotify Free account. Lightify’s player and downloader need Spotify Premium to work properly. Local mode works with any account."
+msgstr "这是 Spotify Free 账户。Lightify 的播放器和下载器需要 Spotify Premium 才能正常工作。本地模式适用于任何账户。"
+
+#. machine translation
+#: src/main.rs:12606 src/main.rs:17615
+msgid "This account is Spotify Free. The player needs Spotify Premium, so songs may not play. Local mode works with any account."
+msgstr "此账户是 Spotify Free。播放器需要 Spotify Premium，因此歌曲可能无法播放。本地模式适用于任何账户。"
+
+#. machine translation
+#: src/main.rs:12607 src/main.rs:17616
+msgid "This account is Spotify Free. The downloader needs Spotify Premium, so downloads may not work."
+msgstr "此账户是 Spotify Free。下载器需要 Spotify Premium，因此下载可能无法进行。"
+
+#. machine translation
+#: src/main.rs:13684
+msgid "Downloads — {}"
+msgstr "下载 — {}"
+
+#. machine translation
+#: src/main.rs:14579
+msgid "Couldn't open your web browser to sign in."
+msgstr "无法打开网页浏览器进行登录。"
+
+#. machine translation
+#: src/main.rs:14590
+msgid "Timed out waiting for Spotify — click Authorise to try again."
+msgstr "等待 Spotify 超时 — 点击“授权”重试。"
+
+#. machine translation
+#: src/main.rs:15120
+msgid "Couldn't start the update check"
+msgstr "无法开始检查更新"
+
+#. machine translation
+#: src/main.rs:15144
+msgid "Update failed: {}"
+msgstr "更新失败：{}"
+
+#. machine translation
+#: src/main.rs:15147
+msgid "Couldn't check for updates: {}"
+msgstr "无法检查更新：{}"
+
+#. machine translation
+#: src/main.rs:16621
+msgid "This playlist is already in your library"
+msgstr "此歌单已在你的资料库中"

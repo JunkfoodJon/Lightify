@@ -301,6 +301,36 @@ pub fn processes_in(dir: &Path) -> Vec<(u32, String)> {
     out
 }
 
+/// A named mutex held for as long as this value lives (`hold_named`).
+pub struct NamedLock(HANDLE);
+
+impl Drop for NamedLock {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// Take the session-wide mutex `name`, or `None` when another process (or another
+/// holder in this one) already has it — or has it and won't let this one open it.
+pub fn hold_named(name: &str) -> Option<NamedLock> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let w = wide(name);
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, w.as_ptr());
+        if h.is_null() {
+            return None;
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(h);
+            return None;
+        }
+        Some(NamedLock(h))
+    }
+}
+
 /// Wait for a process to exit. True if it has (or never existed).
 pub fn wait_pid(pid: u32, timeout_ms: u32) -> bool {
     use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
@@ -348,6 +378,52 @@ pub fn close_windows_of(pid: u32) -> usize {
     }
 }
 
+/// Start a program through the desktop shell, so explorer.exe is what creates it: it runs
+/// as the signed-in user, unelevated, with that user's environment, whoever this process
+/// is. (The route Raymond Chen gives for "launch an unelevated process from an elevated
+/// one".) Needs explorer to be the shell; fails, rather than running it elevated, if not.
+pub fn run_through_shell(exe: &Path, args: &str, dir: &Path) -> Result<(), String> {
+    use windows::core::{Interface, BSTR};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IDispatch, IServiceProvider, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::UI::Shell::{
+        IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, ShellWindows, SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP,
+        SWFO_NEEDDISPATCH,
+    };
+    const CSIDL_DESKTOP: i32 = 0;
+    const SW_SHOWNORMAL: i32 = 1;
+    let fail = |e: windows::core::Error| format!("the desktop shell: {e}");
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER).map_err(fail)?;
+        let mut hwnd = 0i32;
+        let desktop: IDispatch = windows
+            .FindWindowSW(&VARIANT::from(CSIDL_DESKTOP), &VARIANT::default(), SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH)
+            .map_err(fail)?;
+        let browser: IShellBrowser = desktop.cast::<IServiceProvider>().map_err(fail)?.QueryService(&SID_STopLevelBrowser).map_err(fail)?;
+        let background: IDispatch = browser.QueryActiveShellView().map_err(fail)?.GetItemObject(SVGIO_BACKGROUND).map_err(fail)?;
+        let view: IShellFolderViewDual = background.cast().map_err(fail)?;
+        let shell: IShellDispatch2 = view.Application().map_err(fail)?.cast().map_err(fail)?;
+        shell
+            .ShellExecute(
+                &BSTR::from(exe.to_string_lossy().as_ref()),
+                &VARIANT::from(args),
+                &VARIANT::from(dir.to_string_lossy().as_ref()),
+                &VARIANT::from("open"),
+                &VARIANT::from(SW_SHOWNORMAL),
+            )
+            .map_err(fail)
+    }
+}
+
+/// DLLs loaded by name from now on come from System32 only, never from this exe's folder
+/// or the current directory: both can be user-writable while this process is elevated.
+/// DLLs named by a full path, such as shell extensions, still load.
+pub fn restrict_dll_search() {
+    use windows_sys::Win32::System::LibraryLoader::{SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
+}
+
 /// Start a program detached from this one (no console, own process group).
 pub fn spawn_detached(exe: &Path, args: &[&str], cwd: Option<&Path>) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
@@ -376,7 +452,9 @@ pub fn delete_after_exit(files: &[PathBuf], dirs: &[PathBuf]) {
         script.push_str(&format!(" & rmdir \"{}\"", q(d)));
     }
     script.push_str(" 2>nul");
-    let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+    // From the System folder, not %ComSpec%: this process can be elevated, and that
+    // variable is the user's to change.
+    let cmd = system_dir().map_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"), |d| d.join("cmd.exe"));
     let _ = std::process::Command::new(cmd)
         .raw_arg(script)
         .creation_flags(CREATE_NO_WINDOW)
@@ -398,6 +476,11 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
         }
         out.filter(|p| !p.as_os_str().is_empty())
     }
+}
+
+fn system_dir() -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Shell::FOLDERID_System;
+    known_folder(&FOLDERID_System)
 }
 
 pub fn programs_dir(all_users: bool) -> Option<PathBuf> {
@@ -457,7 +540,7 @@ pub fn pick_folder(owner: Option<isize>, start: &Path) -> Option<PathBuf> {
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let opts = dlg.GetOptions().ok()?;
         dlg.SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
-        let _ = dlg.SetTitle(&HSTRING::from("Install Lightify to"));
+        let _ = dlg.SetTitle(&HSTRING::from(lightify_i18n::tr!("Install Lightify to")));
         // Start in the nearest existing parent of the current path.
         let mut probe = Some(start);
         while let Some(p) = probe {
@@ -553,11 +636,40 @@ mod tests {
     }
 
     #[test]
+    fn a_named_lock_is_held_once() {
+        let name = format!("Local\\Lightify.Test.{}", std::process::id());
+        let first = hold_named(&name).expect("free at first");
+        assert!(hold_named(&name).is_none(), "held: a second taker is refused");
+        drop(first);
+        assert!(hold_named(&name).is_some(), "free again once dropped");
+    }
+
+    #[test]
     fn env_expansion() {
         std::env::set_var("LFY_TEST_VAR", "C:\\X");
         assert_eq!(expand_env("%LFY_TEST_VAR%\\Programs"), "C:\\X\\Programs");
         assert_eq!(expand_env("%NOPE_NOT_SET_9%\\a"), "%NOPE_NOT_SET_9%\\a");
         assert_eq!(expand_env("100%"), "100%");
+    }
+
+    // Starts a real process through the running desktop shell (a console flashes up), so
+    // it only runs when asked for: cargo test -- --ignored shell_route
+    #[test]
+    #[ignore = "starts a process through the real desktop shell"]
+    fn shell_route_starts_a_process() {
+        let d = std::env::temp_dir().join(format!("lfy-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mark = d.join("started.txt");
+        let cmd = system_dir().unwrap().join("cmd.exe");
+        run_through_shell(&cmd, &format!("/c echo ok> \"{}\"", mark.display()), &d).unwrap();
+        for _ in 0..50 {
+            if mark.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(mark.is_file(), "the shell did not run it");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

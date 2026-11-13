@@ -1,6 +1,6 @@
 [package]
 name = "lightify-shell"
-version = "2.3.13"
+version = "2.3.22"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 description = "Tier 2 spike: native Slint UI shell for Lightify (software renderer, no WebView2)."
@@ -97,6 +97,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
@@ -118,6 +119,9 @@ lightify-i18n = { path = "../lightify-i18n" }
 # no Web-API request.
 [patch.crates-io]
 librespot-connect = { path = "vendor/librespot-connect" }
+# librespot-core 0.8.0 with one fix, marked "Lightify patch" in vendor/librespot-core/src/session.rs:
+# a non-Premium account is logged, never `exit(1)` (it ended the whole app; BUGS-PLAN DA1).
+librespot-core = { path = "vendor/librespot-core" }
 # Slint's software renderer 1.17.1 with one fix, marked "Lightify patch" in
 # vendor/i-slint-renderer-software/lib.rs: vector paths (every icon) are clipped to the
 # repaint's dirty region like every other item. Upstream drew a path whole whenever it

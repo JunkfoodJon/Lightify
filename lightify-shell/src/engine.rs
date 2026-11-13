@@ -64,6 +64,14 @@ pub enum Event {
     Options { shuffle: Option<bool>, repeat: Option<String> },
     /// The one-time keymaster sign-in is required (the engine opens the browser).
     NeedAuth { msg: String },
+    /// Which Spotify account the player signed in with, once the session is up. Its
+    /// own sign-in (the browser's), so it can differ from the Web-API account, and a
+    /// Free account can't stream at all.
+    Account { username: String, account_type: String, catalogue: String },
+    /// Something the user should hear about, on an engine that is fine: a song it had to
+    /// skip, a load that didn't work. Whatever was playing goes on.
+    Notice { msg: String },
+    /// The engine itself is in trouble.
     Failed { msg: String },
     /// A seed's radio, resolved to plain track uris. Nothing was loaded or played —
     /// the host decides whether to queue them behind what's already on, or start them.
@@ -221,6 +229,13 @@ pub fn running() -> bool {
         Ok(mut g) => g.as_mut().map(|e| e.is_running()).unwrap_or(false),
         Err(_) => false,
     }
+}
+
+/// Retire the running engine without waiting for it: its events stop reaching the app
+/// at once (as after `shutdown`), and the `start` that follows stops it. For a restart,
+/// whose `start` runs off the app's command loop: `shutdown` waits up to `STOP_WAIT_MS`.
+pub fn retire() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Stop the engine. Safe to call when nothing is running; call it on the way out.

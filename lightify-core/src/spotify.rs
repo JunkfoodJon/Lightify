@@ -167,9 +167,41 @@ pub fn parse_playback(v: &Value) -> PlaybackState {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-/// Refresh an access token using a refresh token (PKCE public client).
+/// Prefix of the error a refresh gives when Spotify says the refresh token is no good.
+pub const TOKEN_REVOKED_PREFIX: &str = "Spotify sign-in revoked \u{2014} ";
+
+/// Did this refresh failure mean the sign-in is really gone (`invalid_grant`)? Only then
+/// does the user have to sign in again. Every other refresh failure can pass: a network
+/// failure carries [`crate::net::OFFLINE_PREFIX`], and a 5xx or an unrelated 4xx says
+/// nothing about the sign-in.
+pub fn is_token_revoked(msg: &str) -> bool {
+    msg.starts_with(TOKEN_REVOKED_PREFIX)
+}
+
+/// The error for a refused refresh. Parsed rather than searched: the word
+/// `invalid_grant` anywhere in a gateway's error page must not sign anybody out.
+fn refresh_failure(status: u16, body: &str) -> String {
+    let answer: Value = serde_json::from_str(body).unwrap_or_default();
+    if (400..500).contains(&status) && answer["error"].as_str() == Some("invalid_grant") {
+        let why = answer["error_description"].as_str().unwrap_or("invalid_grant");
+        return format!("{TOKEN_REVOKED_PREFIX}{why}");
+    }
+    format!("Token refresh failed ({status}): {body}")
+}
+
+/// Refresh an access token using a refresh token (PKCE public client). Tell the failures
+/// apart with [`is_token_revoked`] and [`crate::net::is_offline_error`].
 pub async fn refresh_access_token(
     http: &reqwest::Client,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenInfo, String> {
+    refresh_access_token_at(http, TOKEN_URL, client_id, refresh_token).await
+}
+
+async fn refresh_access_token_at(
+    http: &reqwest::Client,
+    url: &str,
     client_id: &str,
     refresh_token: &str,
 ) -> Result<TokenInfo, String> {
@@ -178,15 +210,21 @@ pub async fn refresh_access_token(
         ("refresh_token", refresh_token),
         ("client_id", client_id),
     ];
-    let resp = http
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("Token refresh HTTP error: {e}"))?;
+    // Reports to `net` the way `send_api` does: with an expired token this is the first
+    // request of every call, so it is what finds out the network has gone or come back.
+    let resp = http.post(url).form(&params).send().await.map_err(|e| {
+        if crate::net::is_connectivity(&e) {
+            crate::net::note_down();
+            format!("{}Token refresh: {e}", crate::net::OFFLINE_PREFIX)
+        } else {
+            format!("Token refresh HTTP error: {e}")
+        }
+    })?;
+    crate::net::note_up();
     if !resp.status().is_success() {
+        let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Token refresh failed: {body}"));
+        return Err(refresh_failure(status, &body));
     }
     let mut body: Value = resp
         .json()
@@ -308,10 +346,16 @@ pub use ratelimit::is_rate_limited;
 /// call even though the token's own expiry hasn't passed.
 pub(crate) static TOKEN_REJECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// A 401 from the user-token rungs is a token problem, not "Spotify refuses this
-/// playlist": don't fall through to the embed scrape and show ~100 thin rows.
-fn is_auth_error(e: &str) -> bool {
-    e.contains(" 401 ")
+/// Did Spotify refuse this playlist (403/404), as opposed to failing to answer? Only a
+/// refusal may fall back to the embed scrape: since February 2026 the Web API serves only
+/// the contents of the user's own playlists. A 5xx, a 401, a rate limit or a dropped
+/// connection says nothing about that, and falling through on one showed an owned
+/// playlist as ~100 thin rows, or as empty and finished.
+///
+/// Reads the status from where `api_error` puts it ("GET {path} {status}: {body}"; a path
+/// has no spaces), since a body can hold any text.
+fn is_refusal(e: &str) -> bool {
+    matches!(e.split(' ').nth(2), Some("403" | "404"))
 }
 
 async fn send_api(
@@ -562,8 +606,8 @@ pub async fn get_playlist_tracks(
     if !refused_items(playlist_id) {
         match sp_get(http, token, &items_path).await {
             Ok(Some(v)) => return Ok((parse_track_items(&v), page_len(&v))),
-            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
-            Err(e) => note_refused_items(playlist_id, &e),
+            Err(e) if is_refusal(&e) => note_refused_items(playlist_id),
+            Err(e) => return Err(e),
             _ => {}
         }
     }
@@ -576,7 +620,7 @@ pub async fn get_playlist_tracks(
             Ok(Some(v)) if !v["tracks"].is_null() => {
                 return Ok((parse_track_items(&v["tracks"]), page_len(&v["tracks"])))
             }
-            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            Err(e) if !is_refusal(&e) => return Err(e),
             _ => {}
         }
     }
@@ -596,10 +640,7 @@ fn refused_items(playlist_id: &str) -> bool {
     REFUSED_ITEMS.lock().map(|g| g.iter().any(|id| id == playlist_id)).unwrap_or(false)
 }
 
-fn note_refused_items(playlist_id: &str, err: &str) {
-    if !(err.contains(" 403 ") || err.contains(" 404 ")) {
-        return;
-    }
+fn note_refused_items(playlist_id: &str) {
     if let Ok(mut g) = REFUSED_ITEMS.lock() {
         if !g.iter().any(|id| id == playlist_id) {
             if g.len() >= 500 {
@@ -792,7 +833,23 @@ pub async fn get_playlist_tracks_embed(
 /// `get_playlist_tracks` (user `/items` → full playlist → anonymous web token);
 /// only the first two can report a total, so the fallback reports 0 and the caller
 /// falls back to "stop when a short page arrives".
+///
+/// `Err` means this page couldn't be read, and the caller may try again; the fallbacks
+/// run only once Spotify has refused the playlist (see `is_refusal`).
 pub async fn get_playlist_tracks_page(
+    http: &reqwest::Client,
+    token: &str,
+    playlist_id: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<TrackPage, String> {
+    playlist_page_from("", http, token, playlist_id, limit, offset).await
+}
+
+/// `api_base` goes in front of the Web-API paths: empty for the real API (`url_for`
+/// adds it), a local server's address under test.
+async fn playlist_page_from(
+    api_base: &str,
     http: &reqwest::Client,
     token: &str,
     playlist_id: &str,
@@ -803,11 +860,12 @@ pub async fn get_playlist_tracks_page(
         return Ok(page);
     }
     let items_path =
-        format!("playlists/{playlist_id}/items?limit={limit}&offset={offset}&market=from_token");
+        format!("{api_base}playlists/{playlist_id}/items?limit={limit}&offset={offset}&market=from_token");
     // A rate limit is NOT "this endpoint refuses this playlist": falling through to
     // the next rung on a 429 used to spend two more Web-API requests into the same
     // limit, then scrape the embed and show its partial ~100 rows as if that were
-    // the playlist. Surface the limit instead so the caller backs off.
+    // the playlist. Surface the limit instead so the caller backs off. The same goes
+    // for every other failure that isn't a refusal.
     if !refused_items(playlist_id) {
         match sp_get(http, token, &items_path).await {
             Ok(Some(v)) => {
@@ -816,8 +874,8 @@ pub async fn get_playlist_tracks_page(
                 page_cache::put(playlist_id, offset, &page);
                 return Ok(page);
             }
-            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
-            Err(e) => note_refused_items(playlist_id, &e),
+            Err(e) if is_refusal(&e) => note_refused_items(playlist_id),
+            Err(e) => return Err(e),
             _ => {}
         }
     }
@@ -825,13 +883,13 @@ pub async fn get_playlist_tracks_page(
     // tracks), so it can only stand in for page one; for a later page it returned
     // rows 0-99 again as if they came next.
     if offset == 0 && !refused_items(playlist_id) {
-        let full_path = format!("playlists/{playlist_id}?market=from_token");
+        let full_path = format!("{api_base}playlists/{playlist_id}?market=from_token");
         match sp_get(http, token, &full_path).await {
             Ok(Some(v)) if !v["tracks"].is_null() => {
                 let total = v["tracks"]["total"].as_u64().unwrap_or(0) as u32;
                 return Ok(TrackPage::api(parse_track_items(&v["tracks"]), total, page_len(&v["tracks"])));
             }
-            Err(e) if is_rate_limited(&e) || is_auth_error(&e) => return Err(e),
+            Err(e) if !is_refusal(&e) => return Err(e),
             _ => {}
         }
     }
@@ -1250,13 +1308,21 @@ pub async fn create_playlist(
     }
     // Spotify caps an add at 100 URIs per call.
     for chunk in uris.chunks(100) {
-        sp_post_body(
+        if let Err(e) = sp_post_body(
             http,
             token,
             &format!("playlists/{id}/items"),
             serde_json::json!({ "uris": chunk }),
         )
-        .await?;
+        .await
+        {
+            // The playlist this call just made goes again: left half-filled, the retry made
+            // a second one beside it (BUGS-PLAN DC10). Nothing else is ever touched here.
+            if let Err(gone) = unfollow_playlist(http, token, &id).await {
+                eprintln!("[lightify] the half-made playlist {id} couldn't be removed: {gone}");
+            }
+            return Err(e);
+        }
     }
     Ok(Playlist {
         name: created["name"].as_str().unwrap_or(name).to_string(),
@@ -1343,6 +1409,169 @@ pub async fn set_saved(
 
 #[cfg(test)]
 mod tests {
+    /// Answers one request per canned (status, body) on a loopback port, then stops, and
+    /// counts what it answered. Nothing here leaves the machine.
+    async fn serve(answers: Vec<(u16, &'static str)>) -> (String, tokio::task::JoinHandle<usize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut answered = 0;
+            for (status, body) in answers {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                // Read all of it (a form body follows the headers): closing with bytes
+                // unread resets the connection on Windows, and the client loses the answer.
+                loop {
+                    let n = s.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let length = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if n == 0 || request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                s.write_all(head.as_bytes()).await.unwrap();
+                s.write_all(body.as_bytes()).await.unwrap();
+                s.shutdown().await.unwrap();
+                answered += 1;
+            }
+            answered
+        });
+        (base, server)
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    /// A loopback address nothing is listening on: the connection is refused at once.
+    async fn dead_address() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        format!("http://{}/", listener.local_addr().unwrap())
+    }
+
+    #[test]
+    fn only_invalid_grant_is_a_revocation() {
+        use super::{is_token_revoked, refresh_failure};
+        let revoked = refresh_failure(400, r#"{"error":"invalid_grant","error_description":"Refresh token revoked"}"#);
+        assert!(is_token_revoked(&revoked), "{revoked}");
+        assert!(revoked.contains("Refresh token revoked"), "{revoked}");
+        assert!(is_token_revoked(&refresh_failure(400, r#"{"error":"invalid_grant"}"#)));
+        for (status, body) in [
+            (400, r#"{"error":"invalid_request","error_description":"refresh_token must be supplied"}"#),
+            (400, r#"{"error":"invalid_client"}"#),
+            (401, r#"{"error":"invalid_client"}"#),
+            (429, "Too many requests"),
+            (500, r#"{"error":"invalid_grant"}"#),
+            (502, "<html>Bad gateway: invalid_grant</html>"),
+            (503, ""),
+            (400, "not json, mentions invalid_grant"),
+        ] {
+            let e = refresh_failure(status, body);
+            assert!(!is_token_revoked(&e), "{status} {body}: {e}");
+            assert!(e.contains(&status.to_string()), "{e}");
+        }
+        assert!(!is_token_revoked(&format!("{}Token refresh: dns", crate::net::OFFLINE_PREFIX)));
+    }
+
+    #[tokio::test]
+    async fn refresh_failures_can_be_told_apart() {
+        use crate::net;
+        let _turn = net::TEST_GLOBALS.lock().await;
+
+        // The network is gone: the offline form, and the process knows.
+        net::note_up();
+        let e = super::refresh_access_token_at(&client(), &dead_address().await, "c", "r").await.unwrap_err();
+        assert!(net::is_offline_error(&e), "{e}");
+        assert!(net::is_offline(), "note_down wasn't called");
+        assert!(!super::is_token_revoked(&e), "{e}");
+
+        // A real revocation, which also proves the network is back.
+        let (url, server) = serve(vec![(400, r#"{"error":"invalid_grant","error_description":"Refresh token revoked"}"#)]).await;
+        let e = super::refresh_access_token_at(&client(), &url, "c", "r").await.unwrap_err();
+        assert!(super::is_token_revoked(&e), "{e}");
+        assert!(!net::is_offline(), "any answer means Spotify is reachable");
+        assert_eq!(server.await.unwrap(), 1);
+
+        // A server failure is neither.
+        let (url, server) = serve(vec![(503, "busy")]).await;
+        let e = super::refresh_access_token_at(&client(), &url, "c", "r").await.unwrap_err();
+        assert!(!super::is_token_revoked(&e) && !net::is_offline_error(&e), "{e}");
+        assert_eq!(server.await.unwrap(), 1);
+
+        // Success, with Spotify keeping the refresh token.
+        let (url, server) = serve(vec![(200, r#"{"access_token":"a","expires_in":3600}"#)]).await;
+        let t = super::refresh_access_token_at(&client(), &url, "c", "r").await.unwrap();
+        assert_eq!((t.access_token.as_str(), t.refresh_token.as_str()), ("a", "r"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[test]
+    fn only_a_403_or_404_counts_as_a_refusal() {
+        use super::is_refusal;
+        assert!(is_refusal("GET playlists/x/items?limit=100 403 Forbidden: {}"));
+        assert!(is_refusal("GET playlists/x?market=from_token 404 Not Found: {}"));
+        for e in [
+            "GET playlists/x/items 500 Internal Server Error: upstream said 403 once",
+            "GET playlists/x/items 502 Bad Gateway: 404 ",
+            "GET playlists/x/items 401 Unauthorized: {}",
+            "GET playlists/x/items error: connection reset",
+            "GET playlists/x/items parse: 403 expected value",
+            "Rate limited by Spotify \u{2014} retry in 5s",
+            "Offline \u{2014} GET playlists/x/items 403 : dns",
+        ] {
+            assert!(!is_refusal(e), "{e}");
+        }
+    }
+
+    /// The bug: any of these used to reach the embed scrape, whose empty page came back
+    /// `Ok`, ending an owned playlist early as "preview only". The answer counts prove
+    /// nothing else was asked; the embed is a real address, so reaching it isn't tested.
+    #[tokio::test]
+    async fn only_a_refusal_may_leave_the_web_api() {
+        use super::{is_refusal, playlist_page_from, refused_items};
+        let _turn = crate::net::TEST_GLOBALS.lock().await;
+
+        let (base, server) = serve(vec![(500, "boom")]).await;
+        let e = playlist_page_from(&base, &client(), "t", "server-error", 100, 0).await.unwrap_err();
+        assert!(e.contains(" 500 ") && !is_refusal(&e), "{e}");
+        assert_eq!(server.await.unwrap(), 1);
+        assert!(!refused_items("server-error"), "a failure isn't a refusal to remember");
+
+        let (base, server) = serve(vec![(401, "expired")]).await;
+        let e = playlist_page_from(&base, &client(), "t", "expired-token", 100, 0).await.unwrap_err();
+        assert!(e.contains(" 401 "), "{e}");
+        assert_eq!(server.await.unwrap(), 1);
+        super::TOKEN_REJECTED.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // The second rung, once the first had no answer to give.
+        let (base, server) = serve(vec![(204, ""), (503, "busy")]).await;
+        let e = playlist_page_from(&base, &client(), "t", "second-rung", 100, 0).await.unwrap_err();
+        assert!(e.contains(" 503 "), "{e}");
+        assert_eq!(server.await.unwrap(), 2);
+
+        let e = playlist_page_from(&dead_address().await, &client(), "t", "no-network", 100, 0).await.unwrap_err();
+        assert!(crate::net::is_offline_error(&e), "{e}");
+        crate::net::note_up();
+
+        // A healthy owned playlist never leaves the first rung.
+        let (base, server) = serve(vec![(200, r#"{"total":1,"items":[{"track":{"id":"a","name":"A","uri":"spotify:track:a"}}]}"#)]).await;
+        let page = playlist_page_from(&base, &client(), "t", "owned", 100, 0).await.unwrap();
+        assert_eq!((page.tracks.len(), page.total, page.partial), (1, 1, false));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
     #[test]
     fn a_page_with_a_local_file_still_counts_as_full() {
         let v = serde_json::json!({ "items": [

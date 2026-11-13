@@ -8,7 +8,8 @@
 //!
 //! Options: --silent (no UI; with --all-users / --dir <path> / --desktop / --launch for
 //! setup, --wipe for uninstall), --lang <code> (this run's language, never saved).
-//! Internal: --elevated, --from-temp, --parent-pid.
+//! Internal: --elevated, --from-temp, --parent-pid, --user-data, --user-bridge,
+//! --user-updates, --user-music.
 //! Self-check: --shot <page> <out.png> [scale] renders a page to PNG headlessly.
 //!
 //! The payload (app files) is appended to this exe by lightify-pack; see payload.rs.
@@ -33,6 +34,8 @@ slint::include_modules!();
 const EXIT_OK: i32 = 0;
 const EXIT_ERR: i32 = 1;
 const EXIT_CANCEL: i32 = 2;
+/// Lightify is gone, but a wipe could not delete all of the user's settings.
+const EXIT_WIPE_INCOMPLETE: i32 = 3;
 /// Elevated setup finished and the user asked to launch: the non-elevated parent
 /// starts Lightify, so it never runs as administrator.
 const EXIT_LAUNCH: i32 = 10;
@@ -205,11 +208,12 @@ struct Args {
     launch: bool,
     wipe: bool,
     elevated: bool,
+    /// The uninstalling user's folders, from stage 1.
+    user: ops::UserDirs,
     shot: Option<(String, String, f32)>,
 }
 
-fn parse_args() -> Args {
-    let v: Vec<String> = std::env::args().skip(1).collect();
+fn parse_args(v: &[String]) -> Args {
     let mut a = Args::default();
     let mut i = 0;
     while i < v.len() {
@@ -237,6 +241,16 @@ fn parse_args() -> Args {
             "--launch" => a.launch = true,
             "--wipe" => a.wipe = true,
             "--elevated" => a.elevated = true,
+            "--user-data" | "--user-bridge" | "--user-updates" | "--user-music" => {
+                let dir = next(i).map(PathBuf::from);
+                match v[i].to_ascii_lowercase().as_str() {
+                    "--user-data" => a.user.data = dir,
+                    "--user-bridge" => a.user.bridge = dir,
+                    "--user-updates" => a.user.updates = dir,
+                    _ => a.user.music = dir,
+                }
+                i += 1;
+            }
             "--shot" => {
                 let page = next(i).unwrap_or_else(|| "welcome".into());
                 let out = v.get(i + 2).cloned().unwrap_or_else(|| "setup-shot.png".into());
@@ -382,7 +396,11 @@ fn wire_chrome(ui: &InstallerWindow) {
 /// Centre on the primary work area, show, then round the corners (the native
 /// window only exists once the event loop has created it).
 fn show(ui: &InstallerWindow) {
-    let (w, h) = if ui.get_mode() == "update" { (420.0, 172.0) } else { (600.0, 440.0) };
+    let (w, h) = match ui.get_mode().as_str() {
+        "update" => (420.0, 172.0),
+        "install" => (600.0, 520.0),
+        _ => (600.0, 440.0),
+    };
     if let Some((x, y)) = win::centered_position(w, h) {
         ui.window().set_position(slint::PhysicalPosition::new(x, y));
     }
@@ -548,7 +566,7 @@ fn run_install(args: Args) -> i32 {
         let start_install = start_install.clone();
         Rc::new(move |c: Choice| {
             let Some(ui) = weak.upgrade() else { return };
-            if !ops::running_app(&c.dir).is_empty() {
+            if ops::app_running_in(&ops::install_folders(&c.dir, c.all_users)) {
                 ui.set_closeapp_note(tr!(
                     "Lightify is open. Setup can close it for you \u{2014} your settings are kept, and you can reopen it when setup finishes."
                 ).into());
@@ -632,7 +650,7 @@ fn run_install(args: Args) -> i32 {
         ui.on_install(move || {
             let Some(ui) = weak.upgrade() else { return };
             let dir = ops::resolve_dir(&ui.get_install_path());
-            if let Err(m) = ops::validate_dir(&dir) {
+            if let Err(m) = ops::validate_target(&dir) {
                 ui.set_welcome_note(m.into());
                 return;
             }
@@ -716,9 +734,9 @@ fn run_install(args: Args) -> i32 {
             ui.set_closing(true);
             let weak = ui.as_weak();
             let (tx, rx) = std::sync::mpsc::channel();
-            let dir = c.dir.clone();
+            let folders = ops::install_folders(&c.dir, c.all_users);
             std::thread::spawn(move || {
-                let _ = tx.send(ops::close_app(&dir, 15_000));
+                let _ = tx.send(ops::close_apps_in(&folders, 15_000));
             });
             let start_install = start_install.clone();
             let timer = Rc::new(slint::Timer::default());
@@ -793,7 +811,11 @@ fn run_install(args: Args) -> i32 {
         // Handed over from the unelevated wizard: the choices are made, go.
         ui.set_accepted(true);
         let c = Choice { dir: ops::resolve_dir(&dir_text), all_users: true, desktop: args.desktop };
-        begin(c);
+        // Checked again here: this copy is the one with the rights to overwrite.
+        match ops::validate_target(&c.dir) {
+            Ok(()) => begin(c),
+            Err(m) => show_error(&ui, &tr!("Setup couldn't finish"), &m, false),
+        }
     }
     show(&ui);
     let _ = slint::run_event_loop_until_quit();
@@ -803,7 +825,7 @@ fn run_install(args: Args) -> i32 {
 }
 
 fn silent_install(args: &Args, exe: &Path, c: Choice) -> i32 {
-    if let Err(e) = ops::validate_dir(&c.dir) {
+    if let Err(e) = ops::validate_target(&c.dir) {
         log(&e);
         return EXIT_ERR;
     }
@@ -828,7 +850,8 @@ fn silent_install(args: &Args, exe: &Path, c: Choice) -> i32 {
             }
         };
     }
-    if !ops::running_app(&c.dir).is_empty() && !ops::close_app(&c.dir, 15_000) {
+    let folders = ops::install_folders(&c.dir, c.all_users);
+    if ops::app_running_in(&folders) && !ops::close_apps_in(&folders, 15_000) {
         log("Lightify is running and did not close");
         return EXIT_ERR;
     }
@@ -865,6 +888,19 @@ fn error_window(mode: &str, version: &str, title: &str, text: &str) -> i32 {
 // ── Update ──────────────────────────────────────────────────────────────────
 
 fn run_update(args: Args) -> i32 {
+    // One update at a time: a second one (Restart clicked twice) would swap the files
+    // under the first. The elevated copy runs while the copy that started it holds this.
+    let _one_update = if args.elevated {
+        None
+    } else {
+        match win::hold_named("Local\\Lightify.Update") {
+            Some(lock) => Some(lock),
+            None => {
+                log("update: another update is already running");
+                return EXIT_ERR;
+            }
+        }
+    };
     let exe = current_exe();
     let info = match read_payload_info(&exe) {
         Ok(Some(i)) => i,
@@ -878,7 +914,10 @@ fn run_update(args: Args) -> i32 {
         }
     };
     let new_version = info.header.version.clone();
-    let own = ops::find_own();
+    // The app says which install it runs from; with both a per-user and an all-users
+    // copy, `find_own` alone would update the per-user one whichever asked.
+    let named = args.dir.as_deref().and_then(|d| ops::find_own_at(Path::new(d)));
+    let own = named.or_else(ops::find_own);
     let inno = if own.is_none() { ops::find_inno() } else { None };
     let Some(existing) = own.clone().or_else(|| inno.clone()) else {
         log("update: no install found");
@@ -905,6 +944,10 @@ fn run_update(args: Args) -> i32 {
         if let Some(p) = args.wait_pid {
             a.push("--wait-pid".into());
             a.push(p.to_string());
+        }
+        if let Some(d) = &args.dir {
+            a.push("--dir".into());
+            a.push(d.clone());
         }
         if args.silent {
             a.push("--silent".into());
@@ -1030,7 +1073,7 @@ fn run_uninstall(args: Args) -> i32 {
             .map(ops::resolve_dir)
             .or_else(|| exe.parent().map(Path::to_path_buf))
             .unwrap_or_default();
-        let own = ops::find_own().filter(|e| win::same_path(&e.dir, &dir));
+        let own = ops::find_own_at(&dir);
         let all_users = own.as_ref().map(|e| e.all_users).unwrap_or(args.all_users);
         let temp = std::env::temp_dir().join(format!("Lightify-uninstall-{}.exe", std::process::id()));
         if let Err(e) = payload::write_stub(&exe, &temp) {
@@ -1048,6 +1091,8 @@ fn run_uninstall(args: Args) -> i32 {
             "--lang".into(),
             run_language(),
         ];
+        // The same goes for the folders a wipe deletes and the ones it must keep.
+        a.extend(ops::UserDirs::current().to_args());
         if all_users {
             a.push("--all-users".into());
         }
@@ -1098,7 +1143,8 @@ fn run_uninstall(args: Args) -> i32 {
     let code = uninstall_from_temp(&args, &left);
     let mut files = vec![exe];
     files.extend(left.borrow().iter().cloned());
-    let dirs: Vec<PathBuf> = args.dir.as_deref().map(ops::resolve_dir).filter(|_| code == EXIT_OK).into_iter().collect();
+    let removed = code == EXIT_OK || code == EXIT_WIPE_INCOMPLETE;
+    let dirs: Vec<PathBuf> = args.dir.as_deref().map(ops::resolve_dir).filter(|_| removed).into_iter().collect();
     win::delete_after_exit(&files, &dirs);
     code
 }
@@ -1109,8 +1155,9 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
         win::wait_pid(p, 10_000);
     }
     let Some(dir) = args.dir.as_deref().map(ops::resolve_dir) else { return EXIT_ERR };
-    let own = ops::find_own().filter(|e| win::same_path(&e.dir, &dir));
+    let own = ops::find_own_at(&dir);
     let all_users = own.as_ref().map(|e| e.all_users).unwrap_or(args.all_users);
+    let user = args.user.clone().handed_over();
     let version = own.as_ref().map(|e| e.version.clone()).filter(|v| !v.is_empty()).unwrap_or_else(|| STUB_VERSION.into());
     let files = own.as_ref().map(|e| e.files.clone()).unwrap_or_default();
     log(&format!("uninstall {} (all users {all_users}, version {version})", dir.display()));
@@ -1121,7 +1168,10 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
         return if args.silent { EXIT_ERR } else { error_window("uninstall", &version, &tr!("Nothing to remove"), &msg) };
     }
 
-    let make_removal = |wipe: bool| ops::Removal { dir: dir.clone(), all_users, wipe, files: files.clone() };
+    let make_removal = {
+        let dir = dir.clone();
+        move |wipe: bool| ops::Removal { dir: dir.clone(), all_users, wipe, files: files.clone(), user: user.clone() }
+    };
 
     if args.silent {
         if !ops::running_app(&dir).is_empty() && !ops::close_app(&dir, 15_000) {
@@ -1130,12 +1180,17 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
         }
         ops::wait_helpers(&dir, 5_000);
         return match ops::uninstall(&make_removal(args.wipe), &mut |_| {}) {
-            Ok(left) => {
-                if !left.is_empty() {
-                    log(&format!("uninstall: removing after exit {left:?}"));
+            Ok(done) => {
+                if !done.leftovers.is_empty() {
+                    log(&format!("uninstall: removing after exit {:?}", done.leftovers));
                 }
-                left_out.borrow_mut().extend(left.into_iter().map(PathBuf::from));
-                EXIT_OK
+                left_out.borrow_mut().extend(done.leftovers);
+                if done.not_wiped.is_empty() {
+                    EXIT_OK
+                } else {
+                    log(&format!("uninstall: settings not removed: {:?}", done.not_wiped));
+                    EXIT_WIPE_INCOMPLETE
+                }
             }
             Err(e) => {
                 log(&format!("uninstall failed: {e}"));
@@ -1156,8 +1211,7 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
 
     let start_removal = {
         let weak = ui.as_weak();
-        let dir = dir.clone();
-        let files = files.clone();
+        let make_removal = make_removal.clone();
         Rc::new(move || {
             let Some(ui) = weak.upgrade() else { return };
             let wipe = ui.get_wipe();
@@ -1166,23 +1220,25 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
             ui.set_current("".into());
             ui.set_page("removing".into());
             let weak = ui.as_weak();
-            let r = ops::Removal { dir: dir.clone(), all_users, wipe, files: files.clone() };
+            let r = make_removal(wipe);
             std::thread::spawn(move || {
                 ops::wait_helpers(&r.dir, 5_000);
                 let mut fwd = forwarder(weak.clone());
                 let res = ops::uninstall(&r, &mut fwd);
-                if let Ok(left) = &res {
-                    if !left.is_empty() {
-                        log(&format!("uninstall: removing after exit {left:?}"));
+                if let Ok(done) = &res {
+                    if !done.leftovers.is_empty() {
+                        log(&format!("uninstall: removing after exit {:?}", done.leftovers));
                     }
                     if let Ok(mut g) = LEFTOVERS.lock() {
-                        g.extend(left.iter().map(PathBuf::from));
+                        g.extend(done.leftovers.iter().cloned());
                     }
+                    WIPE_INCOMPLETE.store(!done.not_wiped.is_empty(), std::sync::atomic::Ordering::SeqCst);
                 }
                 let _ = weak.upgrade_in_event_loop(move |ui| match res {
-                    Ok(_) => {
+                    Ok(done) if done.not_wiped.is_empty() => {
                         ui.set_page("removed".into());
                     }
+                    Ok(done) => show_error(&ui, &tr!("Lightify wasn't fully removed"), &ops::not_wiped_text(&done.not_wiped), false),
                     Err(e) => show_error(&ui, &tr!("Lightify wasn't fully removed"), &e, false),
                 });
             });
@@ -1272,11 +1328,16 @@ fn uninstall_from_temp(args: &Args, left_out: &Rc<RefCell<Vec<PathBuf>>>) -> i32
         left_out.borrow_mut().extend(g.iter().cloned());
     }
     let code = *exit.borrow();
+    if code == EXIT_ERR && WIPE_INCOMPLETE.load(std::sync::atomic::Ordering::SeqCst) {
+        return EXIT_WIPE_INCOMPLETE;
+    }
     code
 }
 
 /// Files the interactive uninstall could not delete (removed after exit).
 static LEFTOVERS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// The interactive uninstall removed Lightify, but a wipe fell short.
+static WIPE_INCOMPLETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ── Headless render (self-check) ────────────────────────────────────────────
 
@@ -1329,6 +1390,12 @@ fn render_shot(page: &str, out: &str, scale: f32) -> i32 {
             ui.set_accepted(true);
             ui.set_welcome_note(tr!("Pick a folder, not the root of a drive.").into());
         }
+        "welcome-shared" => {
+            ui.set_page("welcome".into());
+            ui.set_install_path(std::env::temp_dir().to_string_lossy().as_ref().into());
+            ui.set_accepted(true);
+            ui.set_welcome_note(ops::validate_target(&std::env::temp_dir()).err().unwrap_or_default().into());
+        }
         "licence" => ui.set_page("licence".into()),
         "closeapp" => {
             ui.set_page("closeapp".into());
@@ -1373,6 +1440,12 @@ fn render_shot(page: &str, out: &str, scale: f32) -> i32 {
             ui.set_mode("uninstall".into());
             ui.set_page("removed".into());
         }
+        "removed-partial" => {
+            ui.set_mode("uninstall".into());
+            ui.set_error_title(tr!("Lightify wasn't fully removed").into());
+            ui.set_error_text(ops::not_wiped_text(&[r"C:\Users\you\AppData\Roaming\Lightify (Access is denied. (os error 5))".to_string()]).into());
+            ui.set_page("error".into());
+        }
         "update" | "update-error" => {
             ui.set_mode("update".into());
             ui.set_page(if page == "update" { "update".into() } else { "error".into() });
@@ -1386,7 +1459,11 @@ fn render_shot(page: &str, out: &str, scale: f32) -> i32 {
             return EXIT_ERR;
         }
     }
-    let (lw, lh) = if ui.get_mode() == "update" { (420.0, 172.0) } else { (600.0, 440.0) };
+    let (lw, lh) = match ui.get_mode().as_str() {
+        "update" => (420.0, 172.0),
+        "install" => (600.0, 520.0),
+        _ => (600.0, 440.0),
+    };
     let (w, h) = ((lw * scale).round() as u32, (lh * scale).round() as u32);
     window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     window.set_size(slint::PhysicalSize::new(w, h));
@@ -1419,7 +1496,10 @@ fn render_shot(page: &str, out: &str, scale: f32) -> i32 {
 }
 
 fn main() {
-    let args = parse_args();
+    // Before anything can load a DLL by name: Setup runs from the Downloads folder, %TEMP%
+    // or the updates folder, and may be elevated. (build.rs does the same for imports.)
+    win::restrict_dll_search();
+    let args = parse_args(&std::env::args().skip(1).collect::<Vec<_>>());
     // The Rust half's language before any text is built (an error shown before its
     // window); each window then sets Slint's half too (apply_language).
     lightify_i18n::select(LANGS, &run_language());
@@ -1463,6 +1543,20 @@ mod tests {
         }
     }
 
+    // What lightify-shell's test of the same name checks: each catalog parses and keeps its
+    // placeholders.
+    #[test]
+    fn catalogs_are_safe_to_show() {
+        let pot = include_str!("../translations/lightify-installer.pot");
+        let mut problems = Vec::new();
+        for l in LANGS {
+            problems.extend(lightify_i18n::check::catalog(l.code, l.po, pot).problems);
+        }
+        assert!(problems.is_empty(), "
+{}", problems.join("
+"));
+    }
+
     #[test]
     fn handoff_passes_the_language() {
         let c = Choice { dir: PathBuf::from(r"C:\Program Files\Lightify"), all_users: true, desktop: true };
@@ -1470,9 +1564,28 @@ mod tests {
         assert_eq!(a, ["--elevated", "--all-users", "--dir", r"C:\Program Files\Lightify", "--desktop", "--lang", "pt-BR"]);
     }
 
+    // Over-the-shoulder elevation: the folders stage 1 resolved are the ones stage 2 reads
+    // back, spaces and all (win::quote_arg's quoting is tested in win.rs).
+    #[test]
+    fn stage_1_hands_its_user_folders_to_stage_2() {
+        let user = ops::UserDirs {
+            data: Some(PathBuf::from(r"C:\Users\Pat Doe\AppData\Roaming\Lightify")),
+            bridge: Some(PathBuf::from(r"C:\Users\Pat Doe\AppData\Roaming\onthespot")),
+            updates: Some(PathBuf::from(r"C:\Users\Pat Doe\AppData\Local\Lightify\updates")),
+            music: Some(PathBuf::from(r"C:\Users\Pat Doe\Music")),
+        };
+        let mut a = vec!["--uninstall".to_string(), "--from-temp".into(), "--wipe".into()];
+        a.extend(user.to_args());
+        let parsed = parse_args(&a);
+        assert!(parsed.uninstall && parsed.from_temp && parsed.wipe);
+        assert_eq!(parsed.user, user);
+        assert_eq!(parsed.user.clone().handed_over(), user);
+    }
+
     // The language file in a sandbox: written only for a real change, never elsewhere.
     #[test]
     fn language_is_saved_only_when_it_changes() {
+        let _sandbox = ops::SANDBOX_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let sb = std::env::temp_dir().join(format!("lfy-lang-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&sb);
         std::env::set_var("LIGHTIFY_INSTALL_SANDBOX", &sb);

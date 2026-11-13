@@ -29,18 +29,46 @@ pub struct Tray {
     _icon: TrayIcon,
 }
 
-fn load_icon() -> Option<Icon> {
+impl Drop for Tray {
+    /// `rescale`'s copy goes first, so dropping this still removes the icon at once.
+    fn drop(&mut self) {
+        let _ = ICON.try_with(|i| i.borrow_mut().take());
+    }
+}
+
+/// The tray's icon size in px: the small-icon size at the DPI of the primary monitor,
+/// whose taskbar holds the notification area — read now, not the DPI the process
+/// started with, so a scale changed since is followed.
+fn tray_px() -> u32 {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
+        use windows::Win32::UI::WindowsAndMessaging::SM_CXSMICON;
+        let (mut x, mut y) = (96u32, 96u32);
+        unsafe {
+            let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut x, &mut y);
+            GetSystemMetricsForDpi(SM_CXSMICON, x.max(96)).max(16) as u32
+        }
+    }
+    #[cfg(not(windows))]
+    16
+}
+
+fn load_icon(px: u32) -> Option<Icon> {
     // The exe's own icon resource (id 1, see build.rs) at the tray's size, so Windows
     // picks the hand-tuned small cut out of lightify.ico (16–32 px) instead of
     // shrinking the 256 px artwork.
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
-        let px = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
         if let Ok(icon) = Icon::from_resource(1, Some((px, px))) {
             return Some(icon);
         }
     }
+    #[cfg(not(windows))]
+    let _ = px;
     let img = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     Icon::from_rgba(img.into_raw(), w, h).ok()
@@ -60,6 +88,26 @@ thread_local! {
     /// The menu's items, kept so a language switch can say them again (`relabel`). The
     /// tray belongs to the UI thread, and so do these.
     static ITEMS: std::cell::RefCell<Option<(MenuItem, MenuItem)>> = const { std::cell::RefCell::new(None) };
+    /// The icon in the tray and the size it was drawn at, for `rescale`.
+    static ICON: std::cell::RefCell<Option<(TrayIcon, u32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The primary monitor's scale may have changed (the main window saw a DPI, display or
+/// settings change): draw the icon again at the size that scale wants, so it isn't
+/// stretched from the old one. No-op when the size is the same.
+pub fn rescale() {
+    ICON.with(|i| {
+        let mut i = i.borrow_mut();
+        let Some((icon, at)) = i.as_mut() else { return };
+        let px = tray_px();
+        if px != *at {
+            if let Some(new) = load_icon(px) {
+                if icon.set_icon(Some(new)).is_ok() {
+                    *at = px;
+                }
+            }
+        }
+    });
 }
 
 /// The menu's two items, in the active language.
@@ -103,12 +151,17 @@ pub fn install(weak: slint::Weak<MainWindow>) -> Option<Tray> {
     let (show_id, quit_id) = (show.id().clone(), quit.id().clone());
     ITEMS.with(|i| *i.borrow_mut() = Some((show, quit)));
 
+    let px = tray_px();
     let icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        // tray-icon opens the menu on a left click too by default; here a left click
+        // only restores the window (below), and the menu is the right button's.
+        .with_menu_on_left_click(false)
         .with_tooltip("Lightify")
-        .with_icon(load_icon()?)
+        .with_icon(load_icon(px)?)
         .build()
         .ok()?;
+    ICON.with(|i| *i.borrow_mut() = Some((icon.clone(), px)));
 
     // Both crates deliver events outside winit. They used to be drained by a 150 ms
     // UI-thread timer — ~7 wake-ups a second for the whole run, tray clicked or not.

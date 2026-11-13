@@ -374,3 +374,23 @@ msgstr "удаление записи из списка приложений"
 #: src/win.rs:223
 msgid "could not start the elevated installer: {}"
 msgstr "не удалось запустить установщик с правами администратора: {}"
+
+#: src/win.rs:513
+msgid "Install Lightify to"
+msgstr "Установить Lightify в"
+
+#: src/ops.rs:136
+msgid "That folder has other files in it. Pick an empty one, or add \\Lightify to the end."
+msgstr "В этой папке есть другие файлы. Выберите пустую или добавьте в конце \\Lightify."
+
+#: src/ops.rs:668
+msgid "removing the old copy"
+msgstr "удаление старой копии"
+
+#: src/ops.rs:970
+msgid ""
+"Lightify was removed, but these settings could not be deleted. Close whatever is using them, then delete them yourself:\n"
+"{}"
+msgstr ""
+"Lightify удалён, но эти настройки удалить не удалось. Закройте то, что их использует, и удалите их вручную:\n"
+"{}"

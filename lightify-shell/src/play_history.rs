@@ -46,10 +46,38 @@ pub fn iso_from_unix(secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+/// A history file, for a read-then-write: `Ok(None)` when there is none, `Err` when it
+/// is there but can't be read now (it must not be written over: it holds plays that
+/// would be lost). One that reads but doesn't parse is moved aside to `<name>.corrupt`
+/// and counts as none (as the local library's state files do).
+pub fn read_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> std::io::Result<Option<T>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => Ok(Some(v)),
+        Err(_) => {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(".corrupt");
+            std::fs::rename(path, &aside)?;
+            Ok(None)
+        }
+    }
+}
+
+/// How long after a failed read the history file is tried again.
+const RETRY_READ: Duration = Duration::from_secs(5);
+
 struct State {
     /// Where the history lives: the data folder, or (tests) a throwaway file.
     file: Option<std::path::PathBuf>,
+    /// The file has been read (or there was none). Until then plays are kept in memory
+    /// only, and go on top of what it holds once it reads.
     loaded: bool,
+    /// When reading it last failed.
+    failed_at: Option<Instant>,
     /// Newest first; `added_at` is when it was played.
     plays: Vec<Track>,
     /// The track our engine has loaded, and how long it has been listened to.
@@ -70,17 +98,58 @@ struct Listen {
 /// can name a track twice while loading it); later, it is a repeat.
 const SAME_LOAD: Duration = Duration::from_secs(10);
 
-static STATE: Mutex<State> =
-    Mutex::new(State { file: None, loaded: false, plays: Vec::new(), listen: None, playing: false, changed: false });
+static STATE: Mutex<State> = Mutex::new(State {
+    file: None,
+    loaded: false,
+    failed_at: None,
+    plays: Vec::new(),
+    listen: None,
+    playing: false,
+    changed: false,
+});
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut st = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    if !st.loaded {
-        st.loaded = true;
-        let file = st.file.get_or_insert_with(|| lightify_core::config::data_dir().join("lightify_shell_history.json")).clone();
-        st.plays = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    }
+    st.file.get_or_insert_with(|| lightify_core::config::data_dir().join("lightify_shell_history.json"));
+    load(&mut st, Instant::now());
     f(&mut st)
+}
+
+/// Read the history file if it hasn't been (at most every `RETRY_READ` while it can't
+/// be). Plays recorded meanwhile stay on top and are saved with what it held.
+fn load(st: &mut State, now: Instant) {
+    if st.loaded || st.failed_at.is_some_and(|t| now.saturating_duration_since(t) < RETRY_READ) {
+        return;
+    }
+    let Some(file) = st.file.clone() else { return };
+    match read_file::<Vec<Track>>(&file) {
+        Ok(saved) => {
+            st.loaded = true;
+            st.failed_at = None;
+            let had = !st.plays.is_empty();
+            st.plays.extend(saved.unwrap_or_default());
+            st.plays.truncate(KEEP);
+            if had {
+                st.changed = true;
+                save(st);
+            }
+        }
+        Err(e) => {
+            if st.failed_at.is_none() {
+                note(&format!("can't read the history file ({e}); not saving over it until it reads"));
+            }
+            st.failed_at = Some(now);
+        }
+    }
+}
+
+fn save(st: &State) {
+    if !st.loaded {
+        return;
+    }
+    if let (Some(file), Ok(b)) = (st.file.as_ref(), serde_json::to_vec(&st.plays)) {
+        let _ = lightify_core::config::write_atomic(file, &b);
+    }
 }
 
 /// Our engine loaded `t` (`engine::Event::Track`): added now if it's playing.
@@ -163,9 +232,7 @@ fn record(st: &mut State, mut t: Track) {
     st.plays.insert(0, t);
     st.plays.truncate(KEEP);
     st.changed = true;
-    if let (Some(file), Ok(b)) = (st.file.as_ref(), serde_json::to_vec(&st.plays)) {
-        let _ = lightify_core::config::write_atomic(file, &b);
-    }
+    save(st);
 }
 
 /// Did the history gain a play since the last call?
@@ -234,7 +301,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lightify-history-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut st = State { file: Some(dir.join("lightify_shell_history.json")), loaded: true, plays: Vec::new(), listen: None, playing: false, changed: false };
+        let mut st = State { file: Some(dir.join("lightify_shell_history.json")), loaded: true, failed_at: None, plays: Vec::new(), listen: None, playing: false, changed: false };
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let uris = |st: &State| st.plays.iter().map(|t| t.uri.clone()).collect::<Vec<_>>();
@@ -275,6 +342,46 @@ mod tests {
         let on_disk: Vec<Track> = serde_json::from_slice(&std::fs::read(dir.join("lightify_shell_history.json")).unwrap()).unwrap();
         assert_eq!(on_disk.len(), 4);
         assert!(on_disk[0].added_at.as_deref().and_then(crate::parse_rfc3339_utc).is_some(), "stamped with when");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_history_file_that_cant_be_read_is_not_written_over() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("lightify-history-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lightify_shell_history.json");
+        let old = vec![track("t:old1", "2026-10-30T09:00:00Z"), track("t:old2", "2026-10-30T08:00:00Z")];
+        std::fs::write(&file, serde_json::to_vec(&old).unwrap()).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let mut st = State { file: Some(file.clone()), loaded: false, failed_at: None, plays: Vec::new(), listen: None, playing: true, changed: false };
+
+        // Locked (another program, a backup tool): not read, and a play isn't saved over it.
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+        let t0 = Instant::now();
+        load(&mut st, t0);
+        assert!(!st.loaded && st.failed_at.is_some());
+        engine_track_at(&mut st, track("t:new", ""), t0);
+        drop(lock);
+        assert_eq!(std::fs::read(&file).unwrap(), before, "the file is as it was");
+        assert_eq!(st.plays.len(), 1, "the play is kept meanwhile");
+
+        // Not tried again at once; after the wait it reads, the play goes on top, saved.
+        load(&mut st, t0 + Duration::from_secs(1));
+        assert!(!st.loaded);
+        load(&mut st, t0 + RETRY_READ);
+        assert!(st.loaded);
+        let uris = |v: &[Track]| v.iter().map(|t| t.uri.clone()).collect::<Vec<_>>();
+        assert_eq!(uris(&st.plays), ["t:new", "t:old1", "t:old2"]);
+        let on_disk: Vec<Track> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(uris(&on_disk), ["t:new", "t:old1", "t:old2"]);
+
+        // One that doesn't parse is set aside, not lost.
+        std::fs::write(&file, b"{ not json").unwrap();
+        assert!(read_file::<Vec<Track>>(&file).unwrap().is_none());
+        assert_eq!(std::fs::read(dir.join("lightify_shell_history.json.corrupt")).unwrap(), b"{ not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

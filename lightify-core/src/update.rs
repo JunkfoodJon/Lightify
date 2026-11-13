@@ -86,9 +86,17 @@ fn parse_version(s: &str) -> Option<[u64; 3]> {
 /// Is `candidate` a strictly newer version than `current`? Unparseable = no.
 pub fn is_newer(candidate: &str, current: &str) -> bool {
     match (parse_version(candidate), parse_version(current)) {
+        // The same x.y.z: a release is newer than its pre-release (`0.2.0` after
+        // `0.2.0-rc1`), never the other way round (BUGS-PLAN AR2-15). Build metadata
+        // (`+…`) doesn't count.
+        (Some(a), Some(b)) if a == b => is_prerelease(current) && !is_prerelease(candidate),
         (Some(a), Some(b)) => a > b,
         _ => false,
     }
+}
+
+fn is_prerelease(s: &str) -> bool {
+    s.trim().split('+').next().is_some_and(|v| v.contains('-'))
 }
 
 // ── Manifest ────────────────────────────────────────────────────────────────
@@ -396,13 +404,18 @@ pub fn pending(current_version: &str) -> Option<(String, PathBuf)> {
 
 // ── Hand-off ────────────────────────────────────────────────────────────────
 
-/// Spawns `<installer> --update --wait-pid <this pid> --relaunch` detached. Caller then exits the app.
+/// Spawns `<installer> --update --wait-pid <this pid> --relaunch --dir <this app's folder>`
+/// detached. Caller then exits the app. `--dir` says which install to update when a PC has
+/// both a per-user and an all-users one.
 pub fn launch_update(installer: &Path) -> Result<(), String> {
     let mut cmd = std::process::Command::new(installer);
     cmd.arg("--update")
         .arg("--wait-pid")
         .arg(std::process::id().to_string())
         .arg("--relaunch");
+    if let Some(app_dir) = std::env::current_exe().ok().as_deref().and_then(Path::parent) {
+        cmd.arg("--dir").arg(app_dir);
+    }
     // Not the install dir: nothing should hold a handle inside it while it is replaced.
     if let Some(dir) = installer.parent() {
         cmd.current_dir(dir);
@@ -496,6 +509,11 @@ mod tests {
         assert!(!is_newer("garbage", "2.2.4"));
         assert!(!is_newer("2.3.0", "garbage"));
         assert!(!is_newer("1.2.3.4", "1.0.0"));
+        // AR2-15: a release follows its pre-release, not the reverse; build tags don't count.
+        assert!(is_newer("0.2.0", "0.2.0-rc1"));
+        assert!(!is_newer("0.2.0-rc1", "0.2.0"));
+        assert!(!is_newer("0.2.0+build5", "0.2.0"));
+        assert!(is_newer("0.2.1-rc1", "0.2.0"));
     }
 
     /// Same vector as lightify-installer's lightify-sign test: both sides must build

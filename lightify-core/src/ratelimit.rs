@@ -154,6 +154,7 @@ mod tests {
     // One test touches the global state so ordering between tests can't matter.
     #[test]
     fn gate_blocks_then_counts() {
+        let _turn = crate::net::TEST_GLOBALS.blocking_lock();
         assert!(is_rate_limited(&rate_limited_error(3)));
         let applied = note_429(Some(2));
         assert_eq!(applied, 2, "jitter is 0 below 5s");
